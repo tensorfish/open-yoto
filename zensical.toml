@@ -16,6 +16,7 @@ nav = [
   { "Flow Charts" = "flow.md" },
   { "How to Decompile" = "decompile.md" },
   { "Custom Rust Firmware" = "custom-firmware.md" },
+  { "Firmware Frameworks" = "firmware-options.md" },
   { "NFC / RFID (CR95HF)" = "subsystems/nfc.md" },
   { "SD Card & Storage" = "subsystems/storage.md" },
   { "Display" = "subsystems/display.md" },
@@ -35,6 +36,7 @@ nav = [
       { "Connectivity" = "ai/connectivity.md" },
       { "Boot" = "ai/boot.md" },
       { "Custom Rust Firmware" = "ai/custom-firmware.md" },
+      { "Firmware Frameworks" = "ai/firmware-options.md" },
   ]},
 ]
 

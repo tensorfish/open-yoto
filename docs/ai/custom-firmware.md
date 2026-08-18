@@ -18,8 +18,10 @@ the Yoto Player (ESP32, Xtensa LX6). Goals: **no Wi-Fi/BT** (guaranteed) and
   Qi *RX*. No USB data reaches the ESP32.
 - **No hardware FPU** on Xtensa LX6 → software MP3 decode stutters. Pre-convert
   audio to 16-bit PCM WAV on the host.
-- **No PSRAM** assumed → keep buffers small (16×16 framebuffer = 192 bytes;
-  audio double-buffer of a few KB).
+- **PSRAM**: the Yoto V3 board def declares 8 MB QIO PSRAM (ESP32-WROVER-E
+  module) — so PSRAM *is* available on the V3 (verify per unit). Keep buffers
+  small anyway (16×16 framebuffer = 192 bytes) for portability to PSRAM-less
+  revisions.
 
 ## 2. Stack decision
 

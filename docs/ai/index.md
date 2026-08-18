@@ -22,6 +22,7 @@ human-facing pages (top level) are intentionally simpler.
 | [connectivity.md](connectivity.md) | Wi-Fi/BT, MQTT, HTTP endpoints |
 | [boot.md](boot.md) | Boot sequence, OTA gating, reset paths |
 | [custom-firmware.md](custom-firmware.md) | Replacement Rust firmware: toolchain, drivers, content loading |
+| [firmware-options.md](firmware-options.md) | Comparison of ESP-IDF / Arduino / CircuitPython / Rust / Zephyr |
 
 ## Ground-truth files
 
