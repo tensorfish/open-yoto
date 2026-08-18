@@ -1,0 +1,98 @@
+---
+icon: lucide/monitor
+---
+
+# Display
+
+The front face is a **16×16 pixel** display used to render card icons, status,
+and animations. Two controller families appear across revisions:
+
+| Config | Controller | Technology | Interface |
+|--------|-----------|------------|-----------|
+| #01/#02/#05 | **HT16D35x** (Holtek) | LED matrix (constant-current driver) | SPI, 4× chip-select via IOX |
+| #00/#04 | **GC9306** | TFT LCD | SPI (`pwm`/`cs`/`dc`/`reset`) |
+
+Only `ht16d35x` and `gc9306` appear as display-controller strings in the image;
+no GC9A01/ST7789/ILI9341/SSD1306 references exist.
+
+## HT16D35x (LED matrix)
+
+Four chip-select lines (`csn0..csn3`) drive the LED matrix through the IO
+expander. The `csn` mapping differs by revision:
+
+```text
+"display": { "type": "ht16d35x", "csn0": "IOX.2.0", "csn1": "IOX.2.1",
+             "csn2": "IOX.2.2", "csn3": "IOX.2.3" }   # 2-IOX boards (#02/#05)
+
+"display": { "type": "ht16d35x", "csn3": "IOX.0.0", "csn2": "IOX.0.1",
+             "csn1": "IOX.0.2", "csn0": "IOX.0.3" }   # single-IOX board (#01)
+```
+
+The log tag is `DISP_HLTK` (the HAL symbol is spelled `ht1d35x_hal` in the
+image — a firmware typo for `ht16d35x_hal`).
+
+## GC9306 (TFT)
+
+```text
+"display": {
+  "type": "gc9306",
+  "pwm": "GPIO.26",     # backlight PWM
+  "cs": "IOX.0.0",
+  "dc": "IOX.0.1",
+  "reset": "IOX.0.2"
+}
+```
+
+The log tag is `@DISP_GC9306` (the `@` is part of the extracted string; the
+overlay tag is likewise `@UI_OVERLAY`).
+
+## Rendering model
+
+The display renders **icons** (16×16 sprites) with optional **overlays**, plus
+status elements:
+
+```text
+D (%lu) %s: Rendering icon %d. Overlay:%llu
+D (%lu) %s: Rendering icon %s. Overlay:%llu
+SET_OVERLAY_MODE
+SET_OVERLAY_PERSISTS_MODE
+CLEAR_OVERLAY
+```
+
+Icon sources live under `/sdcard/icons` and `/system/icons` (built-in faces
+such as `leftwink`, `rightwink`). Icons are cached and tracked by `IconId`.
+Brightness is controllable (`DISPLAY_REFRESH_BRIGHTNESS`) and the display
+supports animations (`DISPLAY_ANIMATION`, `icon_anm`).
+
+## Night light
+
+A separate **AW2028H** LED driver provides the RGB "night light" (three
+channels, `red`/`green`/`blue`). On config #01 the channels are direct GPIO
+(`red`=GPIO12, `green`=GPIO23, `blue`=GPIO19); configs #00/#04 have
+`nightlight: null`. Configs #02/#05 use the AW2028H (register access — the
+image has `AW2028 Version 0x%02X`). This is distinct from the 16×16 display
+and is used for the ambient/night-light feature (`APP_AMBIENT_RGB`,
+`APP_NAMBIENTRGB`).
+
+!!! note
+    The AW2028H's bus is not stated in the config JSON; "I2C" is an inference
+    from the register-access strings, not a literal config field.
+
+## Factory-test diagnostics
+
+A `DISPLAY` command (plus `/display-bar`, `/display-calculate-md5`,
+`/display-get-md5`, `/icon-preview`) exposes subcommands for production
+verification:
+
+- draw horizontal/vertical lines in a given RGB colour
+- draw a single pixel (`PIXEL FAIL: invalid co-ordinates`)
+- set/clear overlay and overlay persist mode
+- set/get brightness
+- calculate/retrieve an MD5 of the last rendered frame
+
+```text
+DISPLAY FAIL: --horzlines and --vertlines cannot be used together
+DISPLAY FAIL: --line cannot be used with --horzlines/--vertlines
+DISPLAY FAIL: invalid RGB value
+DISPLAY FAIL: invalid line
+```

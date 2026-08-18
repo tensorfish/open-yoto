@@ -1,0 +1,25 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Zensical build output
+site/
+.cache/
+
+# Firmware input & generated RE artifacts (regenerable via analysis/*.py)
+yoto-firmware.bin
+output/
+*.bndb
+
+# IDE / editor
+.idea/
+.vscode/
