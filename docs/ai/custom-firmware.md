@@ -128,46 +128,70 @@ Sources: [esp-hal](https://github.com/esp-rs/esp-hal),
   no FPU, so CPU-heavy. `symphonia`/`awedio`/`awedio_esp32` are the std/ESP-IDF
   path (`mp3 may not work well on ESPs without native FPU`).
 
-### Content loading (the "push to SD" problem)
+### Upload mode (softAP + HTTP) — the in-place edit path
 
-Given no native USB + no Wi-Fi:
+Since the ESP32 has no native USB and Wi-Fi is normally absent, add a hidden
+upload mode that briefly enables the radio:
 
-1. **Removable SD (primary)** — eject, copy on PC, reinsert. Zero transfer
-   firmware.
-2. **Serial XMODEM/YMODEM** — expose a UART (the CR95HF UART GPIO32/33, or the
-   programming UART); firmware runs [`rmodem`](https://docs.rs/rmodem/)
-   (XMODEM/1k/CRC; AGPL-3.0) or [`xmodem`](https://docs.rs/xmodem/)
-   /[`xymodem.rs`](https://github.com/TGMM/xymodem.rs); PC side `sz --ymodem`.
-   Baud-limited, not drag-and-drop.
-3. **USB MSC device mode — NOT possible** on this silicon. `usbd-mass-storage`
-   is immature + pins `usb-device 0.2.4` (esp-hal ≤0.23 uses 0.3.x, 1.x uses
-   embassy-usb which has **no MSC device class**; `embassy-usb-msd` is an empty
-   name reservation). Only S2/S3 have OTG, and esp-idf-hal doesn't wrap tinyusb
-   ([issue #231](https://github.com/esp-rs/esp-idf-hal/issues/231)).
+- **Gate Wi-Fi behind a cargo feature** (`upload-mode`) so the normal build has
+  zero radio code/flash cost.
+- **Trigger**: all three buttons (encoder pushes IOX0.5/IOX0.4 + power IOX1.3)
+  held simultaneously ~400 ms. Poll the PI4IOE5V6416 input ports at a 5 ms tick
+  (interrupts unnecessary); one [`debouncr`](https://docs.rs/debouncr/) per
+  button; a chord state machine (all-released → all-pressed → settle
+  300–500 ms → toggle). Configure pull-ups (reg `0x46`/`0x47` enable,
+  `0x48`/`0x49` select) on the button bits; seed state from a first read and
+  require a released→pressed transition so it never fires at boot. Match the
+  exact 3-bit mask to avoid colliding with the power-button long-press.
+- **AP**: `esp-radio` (renamed from `esp-wifi` in esp-hal 1.x) using the
+  `embassy_access_point` recipe — `Interface::access_point()` + `WifiController`
+  `Config::AccessPoint(AccessPointConfig{ssid:"YotoUpload", ..})` +
+  `embassy_net::new` static `192.168.4.1/24` + `edge_dhcp` server (phones
+  auto-join).
+- **HTTP server**: [`edge-http`](https://docs.rs/edge-http/) 0.8 (no_std,
+  no_alloc, `Handler` trait) behind `edge-nal-embassy`, using
+  `run_with_socket_queue()` (embassy-net has no accept queue). Alternative:
+  [`picoserve`](https://docs.rs/picoserve/) (axum-style router, JSON extractors,
+  higher MSRV 1.93 vs edge-http 1.88).
+- **Endpoints**:
+  - `GET /mapping.json` — read SD, stream back
+  - `PUT /mapping.json` — raw JSON body → validate length → parse
+    (`serde_json_core`/`serde-json-core`) → write SD
+  - `PUT /media/<name>` — raw `application/octet-stream` body streamed in fixed
+    chunks to `embedded-sdmmc::File::write` (never buffer a whole file — no PSRAM)
+  - `GET /` — tiny status page
+- **No multipart needed** — raw JSON + raw binary PUT is simpler and supported
+  by both edge-http and esp-idf-svc.
+- **Teardown**: `controller.stop()` + drop server/stack on the same chord or a
+  ~5-min timeout; show an indicator on the 16×16 matrix while up.
 
 ### SD layout
 
 ```text
-/cards/<uid>/sound.wav     # 16-bit PCM, 22.05/44.1 kHz
-/cards/<uid>/image.bmp     # 16x16 (or 240x320 for TFT)
+/mapping.json               # NFC UID -> media binding (edited over upload mode)
+/media/<name>.wav           # 16-bit PCM, 22.05/44.1 kHz
+/media/<name>.bmp           # 16x16 (or 240x320 for TFT)
+```
+
+```json
+{"cards": {"04A1B2C3D4E5F0": {"sound": "media/a.wav", "image": "media/a.bmp"}}}
 ```
 
 ## 5. NFC → content mapping
 
-- Read the card **UID** (7 bytes) → hex string → directory `/cards/<uid>/`.
-- Simplest: key purely on UID; no NDEF write needed. Alternatively write a
-  custom NDEF URI and parse it. The CR95HF can write blank Type 2 tags.
+- Read the card **UID** (7 bytes) → hex string → look up `cards[uid]` in
+  `mapping.json` → get `sound` + `image` paths under `/media/`.
+- Key purely on UID (no NDEF write needed); the CR95HF can also write a custom
+  NDEF URI if you prefer URL-keyed lookups.
 
 ## 6. Phased plan
 
 1. `esp-generate` scaffold + LED blink + `defmt`/`log` over UART.
-2. SD read: mount FAT32, list `/cards/`.
-3. NFC read: poll CR95HF, read UID.
-4. Audio: WAV from SD → I2S DMA → codec.
-5. Display: render 16×16 image from SD.
-6. NFC write: program blank cards.
-7. Polish: encoders (GPIO intr), power button, fuel gauge (CW2215B over I2C,
-   optional).
+2. SD read: mount FAT32, parse `mapping.json`.
+3. NFC read: poll CR95HF, read UID → resolve media paths.
+4. Audio + display: WAV via I2S DMA, 16×16 image render.
+5. Upload mode: 3-button chord → softAP + `edge-http` edit/upload.
+6. Polish: encoders, power handling, fuel gauge (CW2215B over I2C, optional).
 
 ## 7. Gotcha summary
 
@@ -181,17 +205,30 @@ Given no native USB + no Wi-Fi:
   optional via `with_mclk`).
 - Yoto USB-C is charge-only; serial upload needs the UART pins.
 - GPL-3.0 (NFC stack) and AGPL-3.0 (`rmodem`) license obligations.
+- `esp-wifi` was renamed **`esp-radio`** in esp-hal 1.x; it requires esp-hal's
+  `unstable` feature (not SemVer-stable) — pin with `~` and keep `unstable` only
+  in the `upload-mode` build.
+- `edge-http` (MSRV 1.88) vs `picoserve` (MSRV 1.93) — pick to match your esp-hal
+  MSRV; both are 0.x.
+- Use `edge-http`'s `run_with_socket_queue()` (not `run()`) with embassy-net —
+  smoltcp has no accept queue.
+- Stream uploads in fixed chunks to SD — never buffer a whole file (no PSRAM).
+- The old `docs.esp-rs.org` domain is now serving an unrelated site; use
+  `docs.espressif.com/projects/rust/`.
 
 ## 8. Primary sources
 
 - https://github.com/esp-rs/esp-hal · https://github.com/esp-rs/esp-template
+- https://github.com/esp-rs/esp-hal/blob/main/examples/wifi/embassy_access_point/src/main.rs
+- https://docs.rs/esp-radio/ · https://docs.rs/embassy-net/
+- https://docs.rs/edge-http/ · https://docs.rs/picoserve/ · https://docs.rs/edge-nal-embassy/
+- https://docs.rs/debouncr/ · https://docs.rs/serde-json-core/
 - https://docs.rs/st25r95/ · https://docs.rs/nfc_forum_tags/ · https://docs.rs/ndef/
 - https://docs.rs/embedded-sdmmc/ · https://docs.rs/embedded-hal-bus/
 - https://docs.rs/mipidsi/ · https://docs.rs/minipng/ · https://docs.rs/tinybmp/
 - https://docs.rs/esp-hal/latest/esp_hal/i2s/master/index.html
 - https://github.com/hi-squeaky-things/es8388_driver_rust
 - https://github.com/espressif/esp-adf/tree/master/components/audio_hal/driver/es8156
-- https://docs.rs/nanomp3/ · https://docs.rs/awedio_esp32/
-- https://docs.rs/rmodem/ · https://docs.rs/xmodem/
+- https://docs.rs/nanomp3/ · https://docs.rs/rmodem/ · https://docs.rs/xmodem/
 - https://www.espressif.com/sites/default/files/documentation/esp32_datasheet_en.pdf
 - https://github.com/esp-rs/esp-idf-hal/issues/231

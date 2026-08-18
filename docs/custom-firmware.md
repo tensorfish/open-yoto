@@ -4,29 +4,30 @@ icon: lucide/code-2
 
 # Writing a Custom Rust Firmware
 
-How to replace the stock Yoto firmware with your own Rust firmware that (a)
-never enables Wi-Fi/BT and (b) lets you load your own sounds + pictures and
-bind them to custom NFC cards.
+A replacement Rust firmware for the Yoto Player that:
 
-!!! note "Hardware reality check"
-    The original **ESP32 has no native USB controller**, so you cannot expose
-    the SD card as a USB drive in software. "Pushing" content means either
-    ejecting the SD card and copying files on a PC (simplest), or serial
-    upload over a UART bridge. There is no Wi-Fi fallback because the goal is
-    no connectivity.
+- keeps **Wi-Fi/BT off by default** (radio is opt-in, never linked in the normal
+  build),
+- exposes a **hidden "upload mode"** — press all buttons at once to briefly
+  bring up a Wi-Fi access point and edit a mapping file from a phone/laptop,
+- reads that mapping when an **NFC card is scanned** to play the right sound and
+  show the right picture.
 
-## Goals → design
+## Modes
 
 ```mermaid
 flowchart TD
-  A[boot] --> B[init: SPI, I2C, UART, I2S]
-  B --> C[NFC poll loop]
-  C --> D{card detected?}
-  D -->|no| C
-  D -->|yes| E[read UID + NDEF URL]
-  E --> F["map to /cards/&lt;uid&gt;/"]
-  F --> G[show image on display]
-  F --> H[play sound via I2S]
+  A[boot] --> B[normal mode<br/>Wi-Fi absent]
+  B --> C[NFC poll]
+  C --> D{card?}
+  D -->|no| B
+  D -->|yes| E[read UID]
+  E --> F["look up mapping.json"]
+  F --> G[play sound + show image]
+  B -->|all 3 buttons held ~400ms| U[upload mode]
+  U --> V["softAP 'YotoUpload'<br/>+ HTTP server"]
+  V --> W[remote edits mapping.json<br/>+ uploads media]
+  W -->|same chord or timeout| B
 ```
 
 ## Toolchain
@@ -41,59 +42,73 @@ Rust's ESP32 support comes from **esp-rs** (Espressif's official Rust org):
 
 Target: `xtensa-esp32-none-elf`.
 
-## How "no Wi-Fi" is guaranteed
+## How Wi-Fi stays off
 
-Use the **`no_std` `esp-hal`** stack. In it, the radio is **opt-in**: you never
-link the `esp-wifi`/`esp-radio`/`esp-rtos` crates, so the Wi-Fi and Bluetooth
-stacks are *not present in the binary at all*. No connectivity, by construction
-— not just "disabled in config."
+Use the **`no_std` `esp-hal`** stack. The radio driver (`esp-wifi` / `esp-radio`)
+is a separate crate that is **opt-in** — the normal build simply doesn't include
+it, so there is no radio code in the binary at all. The upload-mode AP is gated
+behind a **cargo feature** (`upload-mode`), so it only exists when you enable it.
 
-(The std `esp-idf-hal` route is the fallback if I2S/SD prove immature — it has
-mature drivers but links the ESP-IDF, where you must strip radio via sdkconfig
-and accept a larger binary.)
+## The hidden upload mode
+
+The device has three pressable buttons: the two rotary-encoder push buttons and
+the power button. Holding **all three together for ~400 ms** toggles upload mode:
+
+1. Firmware brings up a **softAP** (SSID `YotoUpload`, static `192.168.4.1`,
+   with DHCP so a phone joins automatically).
+2. A tiny HTTP server serves a status page and these endpoints:
+   - `GET /mapping.json` — download the current mapping
+   - `PUT /mapping.json` — replace it (raw JSON)
+   - `PUT /media/<name>` — upload a sound/image file (raw bytes)
+3. The 16×16 display shows a Wi-Fi/upload indicator while active.
+4. The same chord (or a ~5-minute timeout) turns it back off.
+
+The remote machine edits **one file** — `mapping.json` — which is the complete
+binding between NFC cards and their media.
+
+## The mapping file
+
+`mapping.json` on the SD card (a plain JSON object keyed by card UID):
+
+```json
+{
+  "cards": {
+    "04A1B2C3D4E5F0": {
+      "sound": "media/my-sound.wav",
+      "image": "media/my-picture.bmp"
+    },
+    "11BB22CC334455": {
+      "sound": "media/other.wav",
+      "image": "media/other.bmp"
+    }
+  }
+}
+```
+
+On scan, the firmware reads the card **UID** (7 bytes), looks it up, and plays
+`sound` + renders `image`. Media files live under `/media/` on the same card.
 
 ## Component map
 
 | Peripheral | Rust approach |
 |------------|---------------|
-| NFC (CR95HF = ST25R95) | `st25r95` crate over SPI; `nfc_forum_tags` + `ndef` for Type 2 tag read/write |
+| NFC (CR95HF = ST25R95) | `st25r95` crate over SPI; `nfc_forum_tags` + `ndef` |
 | SD card | `embedded-sdmmc` (FAT16/32) over SPI, via `embedded-hal-bus` |
-| Display (HT16D35x) | small custom `embedded-graphics` `DrawTarget` driver (16×16 framebuffer) |
-| Display (GC9306 TFT) | `mipidsi` (DCS-compatible), `display-interface-spi` |
-| Images | `tinybmp`/`tinytga` (or `minipng` for PNG), downscaled to 16×16 |
-| Audio | I2S (`esp-hal`) + ES8388/aw881xx codec over I2C; play **WAV/PCM** (pre-decode on PC) |
-| Buttons/encoders | `esp-hal` GPIO interrupts |
-
-## Content loading (no USB, no Wi-Fi)
-
-1. **Removable SD (recommended)** — eject the card, copy a folder layout onto
-   it on a PC, reinsert. Zero transfer firmware to write.
-2. **Serial upload** — XMODEM/YMODEM (`rmodem` crate) over the UART console
-   bridge, into a filesystem write path.
-
-Layout on the SD card:
-
-```text
-/cards/<uid>/sound.wav      # the audio to play
-/cards/<uid>/image.bmp      # the 16x16 picture to show
-```
-
-## NFC card → sound + picture
-
-Read the card's **UID** (7 bytes) with the CR95HF; use it as the directory
-name. No need to write NDEF at all if you key purely on UID — but you can also
-write a custom NDEF URI and parse it. To *create* cards, the same CR95HF can
-write NDEF to blank NFC Forum Type 2 tags.
+| Display (HT16D35x) | custom `embedded-graphics` `DrawTarget` driver (16×16 framebuffer) |
+| Display (GC9306 TFT) | `mipidsi`, `display-interface-spi` |
+| Images | `tinybmp`/`tinytga` (or `minipng`), downscaled to 16×16 |
+| Audio | I2S (`esp-hal`) + ES8388/aw881xx codec over I2C; **WAV/PCM** |
+| Buttons | poll IO expander at 5 ms + `debouncr` |
+| Upload mode | `esp-radio` softAP + `edge-http` server (cargo feature) |
 
 ## Phased plan
 
 1. Toolchain + LED blink + serial logging (`esp-hal`).
-2. SD read: mount FAT32, list `/cards/`.
-3. NFC read: poll for a card, read UID.
-4. Audio: play a WAV from SD over I2S + codec.
-5. Display: render a 16×16 image.
-6. NFC write: program blank cards.
-7. Polish: encoders, power button, battery gauge (optional).
+2. SD read: mount FAT32, parse `mapping.json`.
+3. NFC read: poll CR95HF, read UID.
+4. Audio + display: play a WAV, render a 16×16 image.
+5. Upload mode: button chord → softAP + HTTP edit/upload.
+6. Polish: encoders, power handling, battery gauge (optional).
 
-Full crate list, exact commands, and gotchas are in the
+Full crate list, exact commands, endpoint details, and gotchas are in the
 [AI reference](ai/custom-firmware.md).
