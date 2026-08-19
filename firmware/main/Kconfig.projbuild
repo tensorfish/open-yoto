@@ -1,0 +1,10 @@
+menu "open-yoto Application"
+
+    config APP_TEST_MODE
+        bool "Build the boot test firmware"
+        default n
+        help
+            Build a minimal test firmware that displays an image and emits a
+            repeating beep on boot. Intended for hardware bring-up only.
+
+endmenu

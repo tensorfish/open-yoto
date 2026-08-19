@@ -55,6 +55,29 @@ The build emits `build/bootloader/bootloader.bin` (flashed at `0x1000`),
 `build/partition_table/partition-table.bin` (`0x8000`), and `build/yoto.bin`
 (`0x10000`). Flash size is 8 MB (ESP32-WROVER-E).
 
+## Boot test firmware
+
+A minimal bring-up firmware (`main/test_main.c`) that skips NFC / SD / encoder
+and, on boot, just:
+
+- displays a border + cross on the 16×16 LED panel, and
+- emits a repeating **1 kHz** beep on the headphone DAC (`audio_play_tone()`).
+
+This proves power, I²C, SPI/display, and I²S/ES8156 audio are alive.
+
+Enable it in `idf.py menuconfig` (top-level **"Build the boot test firmware"**,
+from `main/Kconfig.projbuild`), or directly:
+
+```bash
+echo 'CONFIG_APP_TEST_MODE=y' >> sdkconfig && idf.py build
+```
+
+Back to the normal firmware:
+
+```bash
+sed -i '' 's/^CONFIG_APP_TEST_MODE=.*/CONFIG_APP_TEST_MODE=n/' sdkconfig && idf.py build
+```
+
 ## Structure
 
 ```
@@ -62,7 +85,9 @@ firmware/
 ├── CMakeLists.txt            # top-level (idf.py / CMake)
 ├── sdkconfig.defaults        # default Kconfig
 ├── main/
-│   ├── app_main.c            # boot + init sequence
+│   ├── app_main.c            # normal firmware: boot + init + main loop
+│   ├── test_main.c           # boot test firmware (display + beep)
+│   ├── Kconfig.projbuild     # CONFIG_APP_TEST_MODE switch
 │   └── CMakeLists.txt
 └── components/
     ├── board/board_pins.h    # THE pin map + I2C addresses (authoritative)

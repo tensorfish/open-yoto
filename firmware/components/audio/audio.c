@@ -22,6 +22,7 @@
 #include "mp3dec.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 static const char *TAG = "audio";
 
@@ -509,4 +510,63 @@ bool audio_is_playing(void)
 bool audio_is_paused(void)
 {
     return s_paused;
+}
+
+esp_err_t audio_play_tone(int freq_hz)
+{
+    const int sample_rate = 44100;
+    const int on_ms = 400;
+    const int off_ms = 300;
+    const int on_frames = sample_rate * on_ms / 1000;
+    const int off_frames = sample_rate * off_ms / 1000;
+    const int period = sample_rate / freq_hz;
+    const int half = period / 2;
+    int16_t *buf;
+    int total;
+    int i;
+
+    if (s_tx_chan == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (freq_hz < 50 || freq_hz > 8000)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_playing)
+    {
+        audio_stop();
+    }
+
+    total = on_frames + off_frames;
+    buf = calloc((size_t)total, 2 * sizeof(int16_t));
+    if (buf == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    for (i = 0; i < on_frames; i++)
+    {
+        int16_t v = ((i % period) < half) ? (int16_t)6000 : (int16_t)-6000;
+
+        buf[i * 2] = v;
+        buf[i * 2 + 1] = v;
+    }
+
+    s_playing = true;
+    s_stop_req = false;
+    s_paused = false;
+
+    while (!s_stop_req)
+    {
+        if (!audio_write_pcm(buf, (size_t)total))
+        {
+            break;
+        }
+    }
+
+    free(buf);
+    s_playing = false;
+    return ESP_OK;
 }

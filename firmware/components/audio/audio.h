@@ -80,3 +80,14 @@ bool audio_is_playing(void);
  * Return true while playback is paused (audio_is_playing() is also true).
  */
 bool audio_is_paused(void);
+
+
+/**
+ * Generate a continuous square-wave beep (test aid): 400 ms on at freq_hz,
+ * 300 ms off, repeating until audio_stop() is called. Blocks the calling
+ * task for the duration of the beeping.
+ *
+ * @param freq_hz  beep frequency in Hz (50..8000).
+ * @return ESP_OK once stopped, or an esp_err_t on invalid state/argument.
+ */
+esp_err_t audio_play_tone(int freq_hz);
