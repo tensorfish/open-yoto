@@ -10,30 +10,50 @@ and the project's `docs/` for the full reverse-engineering write-up.
 
 > **Note on `make`**: the GNU-Make workflow (`make menuconfig && make flash`)
 > was **removed in ESP-IDF v4/v5**. The current build command is `idf.py`, which
-> drives CMake + Ninja. `idf.py` is the official command-line build, so this
-> project targets ESP-IDF **v5.x** (`idf.py`), not the legacy `make`.
+> drives CMake + Ninja. This project targets ESP-IDF **v5.x** (`idf.py`).
+
+### One-time setup (macOS)
 
 ```bash
-# one-time: install ESP-IDF v5.5 (or later) and export its env
-git clone -b v5.5 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
-~/esp/esp-idf/install.sh esp32
-. ~/esp/esp-idf/export.sh
+# 1. Build prerequisites (cmake/ninja/dfu-util). Python is managed by uv below,
+#    NOT Homebrew.
+brew install cmake ninja dfu-util
 
-# build this project
+# 2. uv-managed Python 3.12 (ESP-IDF needs Python 3.10+; 3.12 is a safe choice)
+uv python install 3.12
+
+# 3. Clone ESP-IDF v5.5 and install its tools, using uv's Python
+git clone --depth 1 --recursive --shallow-submodules -b release/v5.5 \
+  https://github.com/espressif/esp-idf.git ~/esp/esp-idf
+export PATH="$(dirname "$(uv python find 3.12)"):$PATH"   # uv Python first
+~/esp/esp-idf/install.sh esp32
+```
+
+### Build
+
+```bash
+. ~/esp/esp-idf/export.sh     # adds IDF_PATH + toolchain to PATH
 cd firmware
 idf.py set-target esp32
 idf.py build
-
-# flash (drives esptool.py at the correct offsets)
-idf.py -p /dev/cu.usbserial-XXXX flash monitor
 ```
 
-Flashing with `esptool.py` directly (the user's workflow):
+### Flash
+
+`idf.py` drives esptool.py at the correct offsets, or you can raw-flash a single
+merged image (the esptool workflow):
 
 ```bash
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+
+# ...or a single merged image via esptool.py:
 idf.py merge-bin -o merged.bin
-esptool.py --chip esp32 write_flash 0x0 merged.bin
+esptool.py --chip esp32 --flash_size 8MB write_flash 0x0 merged.bin
 ```
+
+The build emits `build/bootloader/bootloader.bin` (flashed at `0x1000`),
+`build/partition_table/partition-table.bin` (`0x8000`), and `build/yoto.bin`
+(`0x10000`). Flash size is 8 MB (ESP32-WROVER-E).
 
 ## Structure
 
