@@ -75,3 +75,8 @@ esp_err_t audio_set_volume(int vol);
  * Return true while a file is being played (including when paused).
  */
 bool audio_is_playing(void);
+
+/**
+ * Return true while playback is paused (audio_is_playing() is also true).
+ */
+bool audio_is_paused(void);

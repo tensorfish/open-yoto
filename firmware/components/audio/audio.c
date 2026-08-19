@@ -505,3 +505,8 @@ bool audio_is_playing(void)
 {
     return s_playing;
 }
+
+bool audio_is_paused(void)
+{
+    return s_paused;
+}

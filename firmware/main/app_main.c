@@ -146,13 +146,13 @@ static int s_track_count = 0;
 /* Toggle play/pause for the currently loaded audio. */
 static void play_pause_toggle(void)
 {
-    if (audio_is_playing())
-    {
-        audio_pause();
-    }
-    else
+    if (audio_is_paused())
     {
         audio_resume();
+    }
+    else if (audio_is_playing())
+    {
+        audio_pause();
     }
 }
 
