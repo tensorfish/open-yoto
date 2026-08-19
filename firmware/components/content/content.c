@@ -335,6 +335,105 @@ esp_err_t content_lookup(const char *url, char *sound_path, size_t sp,
     return ESP_ERR_NOT_FOUND;
 }
 
+/*
+ * Find the mapping card whose "url" matches url, or NULL if absent.
+ *
+ * @param url URL key to match.
+ * @return the cJSON card object, or NULL.
+ */
+static cJSON *content_find_card(const char *url)
+{
+    cJSON *card;
+    cJSON *u;
+
+    if (s_root == NULL || s_cards == NULL || url == NULL)
+    {
+        return NULL;
+    }
+
+    cJSON_ArrayForEach(card, s_cards)
+    {
+        u = cJSON_GetObjectItemCaseSensitive(card, "url");
+        if (u != NULL && cJSON_IsString(u) && u->valuestring != NULL
+            && strcmp(u->valuestring, url) == 0)
+        {
+            return card;
+        }
+    }
+    return NULL;
+}
+
+int content_get_track_count(const char *url)
+{
+    cJSON *card;
+    cJSON *tracks;
+    cJSON *sound;
+
+    card = content_find_card(url);
+    if (card == NULL)
+    {
+        return -1;
+    }
+
+    tracks = cJSON_GetObjectItemCaseSensitive(card, "tracks");
+    if (tracks != NULL && cJSON_IsArray(tracks))
+    {
+        return cJSON_GetArraySize(tracks);
+    }
+
+    sound = cJSON_GetObjectItemCaseSensitive(card, "sound");
+    if (sound != NULL && cJSON_IsString(sound) && sound->valuestring != NULL)
+    {
+        return 1;
+    }
+
+    return 0;
+}
+
+esp_err_t content_get_track(const char *url, int index,
+                            char *sound_path, size_t sp)
+{
+    cJSON *card;
+    cJSON *tracks;
+    const char *val;
+
+    card = content_find_card(url);
+    if (card == NULL)
+    {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    val = NULL;
+    tracks = cJSON_GetObjectItemCaseSensitive(card, "tracks");
+    if (tracks != NULL && cJSON_IsArray(tracks))
+    {
+        cJSON *item = cJSON_GetArrayItem(tracks, index);
+        if (item != NULL && cJSON_IsString(item))
+        {
+            val = item->valuestring;
+        }
+    }
+    else if (index == 0)
+    {
+        cJSON *sound = cJSON_GetObjectItemCaseSensitive(card, "sound");
+        if (sound != NULL && cJSON_IsString(sound))
+        {
+            val = sound->valuestring;
+        }
+    }
+
+    if (val == NULL)
+    {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (sound_path != NULL && sp > 0)
+    {
+        snprintf(sound_path, sp, "%s", val);
+    }
+    return ESP_OK;
+}
+
 esp_err_t content_add(const char *url, const char *sound_name,
                       const char *image_name)
 {

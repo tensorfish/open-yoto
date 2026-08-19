@@ -142,41 +142,111 @@ static void show_admin_code(uint16_t code)
 }
 
 /* ------------------------------------------------------------- encoder --- */
-/*
- * Encoder callback: encoder 0 = volume, encoder 1 = track skip, button =
- * pause/resume.
- */
-static void encoder_cb(int encoder_id, int delta, bool button)
+/* Playback/power state. */
+static bool s_powered_off = false;
+static char s_current_url[128];
+static int s_track_index = 0;
+static int s_track_count = 0;
+
+/* Toggle play/pause for the currently loaded audio. */
+static void play_pause_toggle(void)
 {
-    if (encoder_id == 0 && delta != 0)
+    if (audio_is_playing())
     {
-        s_volume += delta * VOLUME_DELTA_PER_DETENT;
-        if (s_volume < VOLUME_MIN)
-        {
-            s_volume = VOLUME_MIN;
-        }
-        if (s_volume > VOLUME_MAX)
-        {
-            s_volume = VOLUME_MAX;
-        }
-        audio_set_volume(s_volume);
-        ESP_LOGI(TAG, "volume %d", s_volume);
+        audio_pause();
     }
-    else if (encoder_id == 1 && delta != 0)
+    else
     {
-        /* TODO: advance/rewind within a playlist; single-track mode is a no-op. */
-        ESP_LOGI(TAG, "skip %d", delta);
+        audio_resume();
+    }
+}
+
+/* Toggle power: "off" stops audio and blanks the display; "on" resumes. */
+static void power_toggle(void)
+{
+    s_powered_off = !s_powered_off;
+    if (s_powered_off)
+    {
+        audio_stop();
+        ht16d35x_clear();
+        ht16d35x_flush();
+        ESP_LOGI(TAG, "powered off");
+    }
+    else
+    {
+        ESP_LOGI(TAG, "powered on");
+    }
+}
+
+/* Advance/rewind the current card's tracks by delta (wraps around). */
+static void skip_track(int delta)
+{
+    char sound_path[128];
+
+    if (s_track_count <= 0)
+    {
+        return;
     }
 
-    if (button)
+    s_track_index += delta;
+    s_track_index %= s_track_count;
+    if (s_track_index < 0)
     {
-        if (audio_is_playing())
+        s_track_index += s_track_count;
+    }
+
+    if (content_get_track(s_current_url, s_track_index,
+                          sound_path, sizeof(sound_path)) == ESP_OK)
+    {
+        ESP_LOGI(TAG, "track %d/%d: %s", s_track_index + 1,
+                 s_track_count, sound_path);
+        audio_play(sound_path);
+    }
+}
+
+/*
+ * Encoder callback: encoder 0 = volume, encoder 1 = track skip; both knobs
+ * short-press = play/pause; encoder 1 long-press and the power button = power.
+ */
+static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
+{
+    if (event == ENCODER_EVT_TURN)
+    {
+        if (encoder_id == ENCODER_ID_0)
         {
-            audio_pause();
+            s_volume += delta * VOLUME_DELTA_PER_DETENT;
+            if (s_volume < VOLUME_MIN)
+            {
+                s_volume = VOLUME_MIN;
+            }
+            if (s_volume > VOLUME_MAX)
+            {
+                s_volume = VOLUME_MAX;
+            }
+            audio_set_volume(s_volume);
+            ESP_LOGI(TAG, "volume %d", s_volume);
         }
-        else
+        else if (encoder_id == ENCODER_ID_1)
         {
-            audio_resume();
+            skip_track(delta);
+        }
+    }
+    else if (event == ENCODER_EVT_SHORT_PRESS)
+    {
+        if (encoder_id == ENCODER_ID_0 || encoder_id == ENCODER_ID_1)
+        {
+            play_pause_toggle();
+        }
+        else if (encoder_id == ENCODER_ID_POWER)
+        {
+            power_toggle();
+        }
+    }
+    else if (event == ENCODER_EVT_LONG_PRESS)
+    {
+        if (encoder_id == ENCODER_ID_1 || encoder_id == ENCODER_ID_POWER)
+        {
+            power_toggle();
         }
     }
 }
@@ -219,6 +289,12 @@ void app_main(void)
 
     while (1)
     {
+        if (s_powered_off)
+        {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
         if (admin_is_active())
         {
             /* Web server runs in its own task; the code is already on screen. */
@@ -255,14 +331,22 @@ void app_main(void)
             }
             else
             {
-                char sound_path[128] = { 0 };
-                char image_path[128] = { 0 };
-                if (content_lookup(url, sound_path, sizeof(sound_path),
-                                   image_path, sizeof(image_path)) == ESP_OK)
+                int n = content_get_track_count(url);
+                if (n > 0)
                 {
-                    ESP_LOGI(TAG, "playing %s (image %s)", sound_path, image_path);
-                    /* TODO: decode + draw the 16x16 image from image_path. */
-                    audio_play(sound_path);
+                    strncpy(s_current_url, url, sizeof(s_current_url) - 1);
+                    s_current_url[sizeof(s_current_url) - 1] = '\0';
+                    s_track_count = n;
+                    s_track_index = 0;
+
+                    char sound_path[128] = { 0 };
+                    if (content_get_track(url, 0, sound_path,
+                                          sizeof(sound_path)) == ESP_OK)
+                    {
+                        ESP_LOGI(TAG, "playing track 1/%d: %s", n, sound_path);
+                        /* TODO: decode + draw the 16x16 image for this card. */
+                        audio_play(sound_path);
+                    }
                 }
                 else
                 {

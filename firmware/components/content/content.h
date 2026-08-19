@@ -41,6 +41,31 @@ esp_err_t content_lookup(const char *url, char *sound_path, size_t sp,
                          char *image_path, size_t ip);
 
 /**
+ * Return the number of playable tracks for a card, or -1 if the URL is
+ * unknown. A card with a "tracks" array uses its length; a card carrying only
+ * a legacy "sound" string counts as one track.
+ *
+ * @param url URL key to match against cards[].url.
+ * @return track count (>=0), or -1 if the URL is not mapped.
+ */
+int content_get_track_count(const char *url);
+
+/**
+ * Copy the index-th track's sound path into sound_path. If the card has a
+ * "tracks" array, index selects within it; otherwise only index 0 returns the
+ * legacy "sound" value.
+ *
+ * @param url        URL key.
+ * @param index      zero-based track index.
+ * @param sound_path output buffer (or NULL to skip).
+ * @param sp         size of sound_path in bytes.
+ * @return ESP_OK if the track exists, ESP_ERR_NOT_FOUND if the URL is unknown
+ *         or index is out of range, ESP_ERR_INVALID_STATE if not initialized.
+ */
+esp_err_t content_get_track(const char *url, int index,
+                            char *sound_path, size_t sp);
+
+/**
  * Add or replace a mapping entry. sound_name and image_name are media file
  * names (no directory) stored under /sdcard/media/; they are persisted as
  * "media/<name>". A card already carrying url is replaced.

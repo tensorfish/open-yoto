@@ -1,43 +1,51 @@
 /*
- * encoder.h — Rotary encoders (PCNT quadrature) + push buttons (IO expander).
+ * encoder.h — Rotary encoders (PCNT quadrature) + push buttons + power button.
  *
  * Two detented rotary encoders are decoded in 4X quadrature with the ESP32
- * pulse counter (one PCNT unit per encoder), and their push buttons are read
- * from the PI4IOE5V6416 IO expander and debounced. A dedicated FreeRTOS task
- * delivers one callback per detent and one callback per button press.
+ * pulse counter, and their push buttons plus the power button are read from
+ * the PI4IOE5V6416 IO expander and debounced. A FreeRTOS task delivers:
+ *   - a TURN event per detent (positive/negative delta),
+ *   - a SHORT_PRESS event on button release before the long-press threshold,
+ *   - a LONG_PRESS event once a button is held past the threshold.
  */
 #pragma once
 
-#include "esp_err.h"
-#include <stdbool.h>
+#include <stdint.h>
 
-/* Encoder identifiers passed to the registered callback. */
+#include "esp_err.h"
+
+/* Identifiers passed to the callback. ENCODER_ID_POWER is the power button
+ * (no encoder attached, so its delta is always 0). */
 enum
 {
     ENCODER_ID_0 = 0,
     ENCODER_ID_1 = 1,
-    ENCODER_ID_MAX = 2,
+    ENCODER_ID_POWER = 2,
 };
 
+/* Button/encoder event kinds delivered to the callback. */
+typedef enum
+{
+    ENCODER_EVT_TURN = 1,       /* rotation; delta is a signed detent count  */
+    ENCODER_EVT_SHORT_PRESS,    /* released before the long-press threshold  */
+    ENCODER_EVT_LONG_PRESS,     /* held past the long-press threshold        */
+} encoder_event_t;
+
+/** Application callback, invoked only from the encoder task. */
+typedef void (*encoder_cb_t)(int encoder_id, int delta, encoder_event_t event);
+
 /**
- * Initialize both rotary encoders (4X quadrature, glitch-filtered, one watch
- * point per detent) and start the task that decodes them and debounces the two
- * push buttons on the IO expander.
- *
- * Requires the IO expander bus to be up first (iox_init must have run).
+ * Initialize the encoders, the button debounce, and the delivery task.
+ * Requires iox_init() to have run first.
  *
  * @return ESP_OK on success, or the first PCNT/queue/task error encountered.
  */
 esp_err_t encoder_init(void);
 
 /**
- * Register the application callback invoked from the encoder task.
+ * Register the application callback (may be NULL to disable delivery).
  *
- * @param cb Callback receiving the encoder id, the number of detents turned
- *           since the last report (positive for one rotation direction,
- *           negative for the other; the absolute sign follows the A/B wiring
- *           and may be flipped by swapping the two pins), and whether this
- *           invocation is a push-button press (button == true). May be NULL
- *           to disable delivery.
+ * @param cb Callback receiving (encoder_id, delta, event). delta is nonzero
+ *           only for ENCODER_EVT_TURN.
  */
-void encoder_register_cb(void (*cb)(int encoder_id, int delta, bool button));
+void encoder_register_cb(encoder_cb_t cb);

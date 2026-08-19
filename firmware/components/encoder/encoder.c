@@ -1,15 +1,15 @@
 /*
- * encoder.c — Rotary encoders (PCNT quadrature) + push buttons (IO expander).
+ * encoder.c — Rotary encoders (PCNT quadrature) + push buttons + power button.
  *
  * Two detented rotary encoders are decoded in 4X quadrature with the ESP32
- * pulse counter (one PCNT unit per encoder, two channels each), and their
- * push buttons are read from the PI4IOE5V6416 IO expander and debounced.
+ * pulse counter (one PCNT unit per encoder, two channels each). Their push
+ * buttons and the power button are read from the PI4IOE5V6416 IO expander,
+ * hysteresis-debounced, and classified into short vs long presses.
  *
- * Each detent spans ENCODER_COUNTS_PER_DETENT quadrature transitions, so a
- * watch point is armed at +-ENCODER_COUNTS_PER_DETENT. When the counter
- * reaches it the ISR clears the counter and posts a signed one-detent event to
- * a queue; a FreeRTOS task drains the queue and invokes the application
- * callback. Buttons are polled with hysteresis debounce on the same task tick.
+ * Each detent spans ENCODER_COUNTS_PER_DETENT quadrature transitions; a watch
+ * point is armed at +-ENCODER_COUNTS_PER_DETENT, the ISR clears the counter
+ * and posts a signed one-detent event, and a FreeRTOS task drains the queue,
+ * polls the buttons, and invokes the application callback.
  */
 #include "encoder.h"
 
@@ -32,6 +32,9 @@ static const char *TAG = "encoder";
 #define ENCODER_COUNTS_PER_DETENT    4
 #define ENCODER_MAX                  2
 
+/* Buttons: the two encoder push buttons plus the power button. */
+#define ENCODER_BTN_COUNT            3
+
 /* PCNT counter limits. The counter is cleared at every detent, so these values
  * only need headroom for a single fast spin plus the watch-point margin. */
 #define ENCODER_PCNT_LOW_LIMIT       (-100)
@@ -45,6 +48,10 @@ static const char *TAG = "encoder";
 #define ENCODER_BTN_POLL_MS          5
 #define ENCODER_BTN_DEBOUNCE_MS      30
 #define ENCODER_BTN_SAMPLES          (ENCODER_BTN_DEBOUNCE_MS / ENCODER_BTN_POLL_MS)
+
+/* A button held this long is classified as a long press. */
+#define ENCODER_LONG_PRESS_MS        800
+#define ENCODER_LONG_PRESS_TICKS     (ENCODER_LONG_PRESS_MS / ENCODER_BTN_POLL_MS)
 
 /* Queue depth carrying encoder events from the ISR to the task. */
 #define ENCODER_QUEUE_DEPTH          16
@@ -66,23 +73,25 @@ typedef struct
 {
     int encoder_id;
     int delta;
-} encoder_event_t;
+} encoder_msg_t;
 
-/* Button debounce state. */
+/* Button debounce + long-press state. */
 typedef struct
 {
-    bool    pressed;
-    uint8_t count;
+    bool     pressed;     /* debounced pressed state                        */
+    uint8_t  count;       /* hysteresis counter toward/away from pressed    */
+    uint32_t held_ticks;  /* poll ticks held since the press was accepted   */
+    bool     long_fired;  /* the long-press event was already delivered     */
 } encoder_button_t;
 
 static QueueHandle_t s_encoder_queue;
 static TaskHandle_t  s_encoder_task;
 
 static encoder_instance_t s_encoders[ENCODER_MAX];
-static encoder_button_t   s_buttons[ENCODER_MAX];
+static encoder_button_t   s_buttons[ENCODER_BTN_COUNT];
 
 /* Application callback, invoked only from the encoder task. */
-static void (*s_callback)(int encoder_id, int delta, bool button);
+static encoder_cb_t s_callback;
 
 /**
  * PCNT watch-point ISR callback. Runs in ISR context, so only ISR-safe
@@ -92,8 +101,9 @@ static bool encoder_on_reach(pcnt_unit_handle_t unit,
                              const pcnt_watch_event_data_t *edata,
                              void *user_ctx)
 {
+    (void)unit;
     encoder_instance_t *enc = (encoder_instance_t *)user_ctx;
-    encoder_event_t evt;
+    encoder_msg_t evt;
     BaseType_t higher_priority_task_woken = pdFALSE;
 
     /* Translate the raw quadrature count at the watch point into detents. */
@@ -107,10 +117,25 @@ static bool encoder_on_reach(pcnt_unit_handle_t unit,
     return (higher_priority_task_woken == pdTRUE);
 }
 
-/** Read a push button, normalizing the active-low wiring to "true == pressed". */
-static bool encoder_button_read(int encoder_id)
+/**
+ * Read a debounced button's raw level, normalized to "true == pressed".
+ *
+ * @param[in] id ENCODER_ID_0/1 (encoder push) or ENCODER_ID_POWER.
+ * @return true if the button is currently asserted.
+ */
+static bool encoder_button_read(int id)
 {
-    uint8_t pin = (encoder_id == 0) ? IOX_BTN_ENC0_PUSH : IOX_BTN_ENC1_PUSH;
+    uint8_t pin;
+
+    if (id == ENCODER_ID_POWER)
+    {
+        pin = IOX_BTN_POWER;
+    }
+    else
+    {
+        pin = (id == ENCODER_ID_0) ? IOX_BTN_ENC0_PUSH : IOX_BTN_ENC1_PUSH;
+    }
+
     bool level = iox_get_pin(pin);
 
 #if ENCODER_BTN_ACTIVE_LOW
@@ -120,10 +145,16 @@ static bool encoder_button_read(int encoder_id)
 #endif
 }
 
-/** Poll and debounce both push buttons; report a single press per transition. */
+/**
+ * Poll and debounce all buttons; classify each press as short or long.
+ *
+ * A short press is reported when a button is released before the long-press
+ * threshold; a long press is reported once a button has been held past the
+ * threshold (delivered at most once per hold).
+ */
 static void encoder_poll_buttons(void)
 {
-    for (int id = 0; id < ENCODER_MAX; id++)
+    for (int id = 0; id < ENCODER_BTN_COUNT; id++)
     {
         encoder_button_t *btn = &s_buttons[id];
         bool raw = encoder_button_read(id);
@@ -133,12 +164,23 @@ static void encoder_poll_buttons(void)
             if (btn->count < ENCODER_BTN_SAMPLES)
             {
                 btn->count++;
-                if ((btn->count == ENCODER_BTN_SAMPLES) && !btn->pressed)
+                if (btn->count == ENCODER_BTN_SAMPLES)
                 {
                     btn->pressed = true;
+                    btn->held_ticks = 0;
+                    btn->long_fired = false;
+                }
+            }
+            else
+            {
+                btn->held_ticks++;
+                if (!btn->long_fired &&
+                    btn->held_ticks >= ENCODER_LONG_PRESS_TICKS)
+                {
+                    btn->long_fired = true;
                     if (s_callback != NULL)
                     {
-                        s_callback(id, 0, true);
+                        s_callback(id, 0, ENCODER_EVT_LONG_PRESS);
                     }
                 }
             }
@@ -146,9 +188,13 @@ static void encoder_poll_buttons(void)
         else if (btn->count > 0)
         {
             btn->count--;
-            if (btn->count == 0)
+            if (btn->count == 0 && btn->pressed)
             {
                 btn->pressed = false;
+                if (!btn->long_fired && s_callback != NULL)
+                {
+                    s_callback(id, 0, ENCODER_EVT_SHORT_PRESS);
+                }
             }
         }
     }
@@ -158,7 +204,7 @@ static void encoder_poll_buttons(void)
 static void encoder_task(void *arg)
 {
     (void)arg;
-    encoder_event_t evt;
+    encoder_msg_t evt;
 
     for (;;)
     {
@@ -168,7 +214,7 @@ static void encoder_task(void *arg)
         {
             if (s_callback != NULL)
             {
-                s_callback(evt.encoder_id, evt.delta, false);
+                s_callback(evt.encoder_id, evt.delta, ENCODER_EVT_TURN);
             }
         }
         encoder_poll_buttons();
@@ -308,7 +354,7 @@ esp_err_t encoder_init(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_encoder_queue = xQueueCreate(ENCODER_QUEUE_DEPTH, sizeof(encoder_event_t));
+    s_encoder_queue = xQueueCreate(ENCODER_QUEUE_DEPTH, sizeof(encoder_msg_t));
     if (s_encoder_queue == NULL)
     {
         ESP_LOGE(TAG, "xQueueCreate failed");
@@ -327,12 +373,12 @@ esp_err_t encoder_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "2 encoders ready (4X, %d counts/detent, %d ns filter)",
-             ENCODER_COUNTS_PER_DETENT, ENCODER_GLITCH_FILTER_NS);
+    ESP_LOGI(TAG, "2 encoders + 3 buttons ready (4X, %d counts/detent, %d ms long-press)",
+             ENCODER_COUNTS_PER_DETENT, ENCODER_LONG_PRESS_MS);
     return ESP_OK;
 }
 
-void encoder_register_cb(void (*cb)(int encoder_id, int delta, bool button))
+void encoder_register_cb(encoder_cb_t cb)
 {
     s_callback = cb;
 }
