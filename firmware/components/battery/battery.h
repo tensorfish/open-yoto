@@ -37,3 +37,11 @@ int battery_soc(void);
  * low-voltage threshold.
  */
 bool battery_is_low(void);
+
+/**
+ * True while the battery is actively charging (charger STAT line asserted).
+ *
+ * Reads the charger status pin on the IO expander. The active level is
+ * assumed active-low (open-drain STAT) until the schematic confirms polarity.
+ */
+bool battery_is_charging(void);

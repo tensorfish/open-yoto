@@ -39,7 +39,8 @@ flowchart TD
    them **pauses**. Long-pressing the right knob or the power button turns the
    device **off/on**.
 5. Scanning a special "magic" card toggles **admin mode** — a temporary Wi-Fi
-   hotspot + web page where you add, browse, preview, play, and delete content.
+   hotspot + web page. After unlocking with the 4-digit PIN, two tabs let you
+   add a folder as a playlist (New) or browse/play/delete content (Browse).
 
 ## The components
 
@@ -77,16 +78,20 @@ It's one loop with three gates, then the real work:
 
 1. **Powered off?** → sleep 200 ms, do nothing (the power button/knob still
    works because buttons are event-driven).
-2. **Admin mode?** → sleep 200 ms; the web server runs on its own in the
-   background.
-3. **Normal mode** → every ~30 s check the battery (show the low-battery art if
-   depleted), then poll for an NFC card.
+2. **Poll NFC** every ~100 ms in both normal and admin mode.
+3. **Normal mode only** → every ~30 s check the battery (show the low-battery
+   art if depleted).
 
-When a card is detected:
+A card is "new" on a rising edge or when its UID changes (a swap within one
+poll window):
 
-- **Magic URL** (`openyoto.local/admin`) → toggle admin mode on/off.
-- **Anything else** → look it up in the catalog; if found, show its image and
-  start playing its first track.
+- **Magic URL** (`https://openyoto.local/admin`) → toggle admin mode on/off.
+- **Admin mode, other card** → capture its URL for the web page's pre-fill.
+- **Normal mode, other card** → look it up in the catalog; if found, show its
+  image and start playing its first track (else show the "not found" X).
+
+Removing the card stops playback; a swap (or rapid remove/re-insert) is
+detected by UID change, not just presence.
 
 The knobs/buttons are handled as events (not polled in the loop):
 
@@ -97,6 +102,9 @@ The knobs/buttons are handled as events (not polled in the loop):
 | Either knob press (short) | play / pause |
 | Right knob press (long, ~0.8 s) | power off/on |
 | Power button | power off/on |
+
+Simultaneous or rapid presses are debounced so a double press can't
+double-toggle power or cancel a play/pause.
 
 ## Card → playback flow
 
@@ -113,12 +121,13 @@ flowchart LR
 - The NFC reader talks over UART (57,600 baud). It reads the card's UID (4 or
   7 bytes) and its **NDEF URL**.
 - The **URL is the key** (not the UID). `mapping.json` maps each URL to an
-  image and an ordered list of audio tracks:
+  ordered list of audio tracks, each with an optional per-track image:
 
   ```json
   {"cards": [{"url": "https://example.com/card",
               "image": "media/cover.img",
-              "tracks": ["media/track1.mp3", "media/track2.mp3"]}]}
+              "tracks": ["media/track1.mp3", "media/track2.mp3"],
+              "track_images": ["media/track1.img", "media/track2.img"]}]}
   ```
 
 - Images are **16×16, one-bit (32 raw bytes)** — pre-scaled in the browser, so
@@ -140,18 +149,20 @@ SD card → libhelix-mp3 (decode) → I2S → ES8156 headphone DAC
 
 Scanning the magic card starts a temporary **open Wi-Fi hotspot** (`openyoto`,
 at `192.168.4.1`) and a web server. The 4-digit access code appears on the
-16×16 display and gates any *changes* (viewing is open).
+16×16 display. The web page shows only the access-code form until the correct
+PIN is entered; then it reveals two tabs:
 
-The web page lets you, from a phone or laptop:
+- **New** — select a folder of `.mp3` + images (the audio and its image share a
+  name, different extension). The browser resizes each image to the 16×16
+  bitmap (with previews) and uploads the folder as a playlist.
+- **Browse** — each item shows its picture, track count, a play button (audio
+  streams in the browser), and a delete button.
+- **Scan a card** in admin mode to pre-fill the URL field with that card's URL;
+  the page warns when the card already has content.
 
-- **Add** content (URL + sound + optional image) — the image is resized to
-  16×16 in the browser before uploading, with a live preview.
-- **Browse** content — each item shows its picture and a play button (audio
-  streams in the browser).
-- **Delete** content.
-
-Routes: `GET /` (the page), `GET /api/list`, `GET /media/*` (serve files),
-`POST /api/add`, `POST /api/delete`.
+Routes: `GET /` (the page), `GET /api/list`, `GET /api/last-card`,
+`GET /media/*` (serve files), `POST /api/add`, `POST /api/delete`,
+`POST /api/login`.
 
 ## Power & battery
 
@@ -159,6 +170,9 @@ Routes: `GET /` (the page), `GET /api/list`, `GET /media/*` (serve files),
   ADC reading if the gauge is absent.
 - **Low battery** = charge < 15% **or** voltage < 3.3 V — checked at boot and
   every ~30 s, showing the low-battery art (but not shutting down).
+- **Charging** = the charger STAT line is asserted — checked at boot and every
+  ~30 s. When charging, the display shows a lightning bolt and a battery bar
+  whose fill is the rough state of charge (0–100%).
 - "Off" is a software standby (stops audio + blanks the display); true
   deep-sleep power-off needs the I/O-expander interrupt pin as a wake source
   and isn't implemented yet.

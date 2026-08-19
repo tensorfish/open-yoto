@@ -415,6 +415,10 @@ static bool cr95hf_decode_uri(const uint8_t *rec, size_t rec_len,
     {
         return false;
     }
+    if (payload_len < 1)
+    {
+        return false;               /* payload must hold a URI prefix code */
+    }
 
     prefix = rec[4];
     prefix_str = cr95hf_uri_prefix(prefix);

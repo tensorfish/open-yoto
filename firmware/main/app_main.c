@@ -28,7 +28,7 @@
 static const char *TAG = "main";
 
 /* The NDEF URL written to the "magic" admin card. */
-#define MAGIC_URL "openyoto.local/admin"
+#define MAGIC_URL "https://openyoto.local/admin"
 
 /* Number of encoder detents per volume step. */
 #define VOLUME_DELTA_PER_DETENT 5
@@ -189,6 +189,9 @@ static void power_toggle(void)
     if (s_powered_off)
     {
         audio_stop();
+        s_track_count = 0;
+        s_track_index = 0;
+        s_current_url[0] = '\0';
         if (admin_is_active())
         {
             admin_stop();
@@ -204,10 +207,13 @@ static void power_toggle(void)
     state_unlock();
 }
 
+static void render_image(const char *path);
+
 /* Advance/rewind the current card's tracks by delta (wraps around). */
 static void skip_track(int delta)
 {
     char sound_path[128];
+    char image_path[128];
 
     state_lock();
     if (s_track_count > 1)
@@ -226,8 +232,42 @@ static void skip_track(int delta)
                      s_track_count, sound_path);
             audio_play(sound_path);
         }
+
+        if (content_get_track_image(s_current_url, s_track_index,
+                                    image_path, sizeof(image_path)) == ESP_OK)
+        {
+            render_image(image_path);
+        }
+        else
+        {
+            ht16d35x_clear();
+            ht16d35x_flush();
+        }
     }
     state_unlock();
+}
+
+/* Collapse rapid multi-button gestures into a single action so simultaneous
+ * presses don't double-toggle power or cancel a play/pause. */
+#define GESTURE_DEBOUNCE_MS      200
+#define POWER_DEBOUNCE_MS        1000
+static uint32_t s_last_playpause_ticks = 0;
+static uint32_t s_last_power_ticks = 0;
+
+/*
+ * Return true when a gesture of a given kind was already handled within the
+ * debounce window (and so should be suppressed); latch the timestamp otherwise.
+ */
+static bool gesture_debounced(uint32_t *last, uint32_t window_ms)
+{
+    uint32_t now = xTaskGetTickCount();
+
+    if (*last != 0 && (int32_t)(now - *last) < pdMS_TO_TICKS(window_ms))
+    {
+        return true;
+    }
+    *last = now;
+    return false;
 }
 
 /*
@@ -272,18 +312,27 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
     {
         if (encoder_id == ENCODER_ID_0 || encoder_id == ENCODER_ID_1)
         {
-            play_pause_toggle();
+            if (!gesture_debounced(&s_last_playpause_ticks, GESTURE_DEBOUNCE_MS))
+            {
+                play_pause_toggle();
+            }
         }
         else if (encoder_id == ENCODER_ID_POWER)
         {
-            power_toggle();
+            if (!gesture_debounced(&s_last_power_ticks, POWER_DEBOUNCE_MS))
+            {
+                power_toggle();
+            }
         }
     }
     else if (event == ENCODER_EVT_LONG_PRESS)
     {
         if (encoder_id == ENCODER_ID_1 || encoder_id == ENCODER_ID_POWER)
         {
-            power_toggle();
+            if (!gesture_debounced(&s_last_power_ticks, POWER_DEBOUNCE_MS))
+            {
+                power_toggle();
+            }
         }
     }
 }
@@ -328,6 +377,60 @@ static void render_image(const char *path)
 }
 
 /*
+ * Draw a battery level bar (fill proportional to soc) and, when charging, a
+ * lightning bolt above it. Used at boot and on each battery-check period.
+ *
+ * @param[in] soc       state of charge 0..100; -1 draws no fill.
+ * @param[in] charging  true to draw the charging bolt.
+ */
+static void draw_battery_status(int soc, bool charging)
+{
+    static const uint8_t bolt[][2] = {
+        { 8, 1 }, { 9, 1 }, { 7, 2 }, { 8, 2 }, { 6, 3 }, { 7, 3 }, { 8, 3 },
+        { 7, 4 }, { 8, 4 }, { 9, 4 }, { 8, 5 }, { 9, 5 }, { 10, 5 },
+        { 9, 6 }, { 10, 6 }, { 11, 6 }, { 10, 7 }, { 11, 7 }, { 10, 8 },
+        { 11, 8 },
+    };
+    size_t i;
+
+    ht16d35x_clear();
+
+    /* Horizontal bar: outline x 0..15, y 11..14; fill left-to-right. */
+    for (int x = 0; x < 16; x++)
+    {
+        ht16d35x_set_pixel(x, 11, true);
+        ht16d35x_set_pixel(x, 14, true);
+    }
+    for (int y = 11; y <= 14; y++)
+    {
+        ht16d35x_set_pixel(0, y, true);
+        ht16d35x_set_pixel(15, y, true);
+    }
+    if (soc > 0)
+    {
+        int cols = (soc > 100 ? 100 : soc) * 14 / 100;
+        for (int x = 1; x <= cols && x <= 14; x++)
+        {
+            for (int y = 12; y <= 13; y++)
+            {
+                ht16d35x_set_pixel(x, y, true);
+            }
+        }
+    }
+
+    if (charging)
+    {
+        for (i = 0; i < sizeof(bolt) / sizeof(bolt[0]); i++)
+        {
+            ht16d35x_set_pixel(bolt[i][0], bolt[i][1], true);
+        }
+    }
+
+    ht16d35x_flush();
+}
+
+
+/*
  * Check the battery and show the low-battery art when it is depleted.
  */
 static void battery_periodic_check(void)
@@ -340,7 +443,12 @@ static void battery_periodic_check(void)
     }
     s_battery_check_ticks = now;
 
-    if (battery_is_low())
+    if (battery_is_charging())
+    {
+        ESP_LOGI(TAG, "charging (SOC %d%%)", battery_soc());
+        draw_battery_status(battery_soc(), true);
+    }
+    else if (battery_is_low())
     {
         ESP_LOGW(TAG, "low battery (%.1f mV, %d%%)",
                  (double)battery_voltage(), battery_soc());
@@ -383,8 +491,13 @@ void app_main(void)
     ESP_LOGI(TAG, "boot complete (battery %d%%, %.1f mV)",
              battery_soc(), (double)battery_voltage());
 
-    /* Boot-time low-battery check. */
-    if (battery_is_low())
+    /* Boot-time battery check: show charging + level, or the low-battery art. */
+    if (battery_is_charging())
+    {
+        ESP_LOGI(TAG, "charging (SOC %d%%)", battery_soc());
+        draw_battery_status(battery_soc(), true);
+    }
+    else if (battery_is_low())
     {
         ESP_LOGW(TAG, "low battery");
         draw_bitmap(LOW_BATTERY_ART);
@@ -393,6 +506,8 @@ void app_main(void)
     uint8_t uid[10];
     char url[128];
     bool card_present = false;
+    uint8_t last_uid[10];
+    uint8_t last_uid_len = 0;
 
     while (1)
     {
@@ -405,65 +520,119 @@ void app_main(void)
         /* Poll NFC in BOTH modes — the magic card toggles admin on and off. */
         uint8_t uid_len = sizeof(uid);
         bool card = cr95hf_poll(uid, &uid_len, url, sizeof(url));
-        if (card && !card_present)
+        /* A card is "new" on a rising edge, or when its UID changes while a
+         * card is held (a swap within one poll window). */
+        bool new_card = card && !card_present;
+        if (card && card_present
+            && (uid_len != last_uid_len
+                || memcmp(uid, last_uid, uid_len) != 0))
+        {
+            new_card = true;
+        }
+
+        if (new_card)
         {
             ESP_LOGI(TAG, "card: UID len=%u URL=%s", uid_len, url);
+            memcpy(last_uid, uid, uid_len);
+            last_uid_len = uid_len;
 
             state_lock();
 
-            if (strcmp(url, MAGIC_URL) == 0)
+            /* A new card supersedes whatever was playing — including a fast
+             * swap, where no removal edge is observed. */
+            audio_stop();
+            s_track_count = 0;
+            s_track_index = 0;
+            s_current_url[0] = '\0';
+
+            if (!s_powered_off)
             {
-                if (admin_is_active())
+                if (strcmp(url, MAGIC_URL) == 0)
                 {
-                    admin_stop();
-                    ht16d35x_clear();
-                    ht16d35x_flush();
-                    ESP_LOGI(TAG, "admin mode off");
-                }
-                else
-                {
-                    uint16_t code = 0;
-                    if (admin_start(&code) == ESP_OK)
+                    if (admin_is_active())
                     {
-                        ESP_LOGI(TAG, "admin mode on, code %04u", (unsigned int)code);
-                        draw_code(code);
+                        admin_stop();
+                        ht16d35x_clear();
+                        ht16d35x_flush();
+                        ESP_LOGI(TAG, "admin mode off");
                     }
                     else
                     {
-                        ESP_LOGE(TAG, "admin_start failed");
+                        uint16_t code = 0;
+                        if (admin_start(&code) == ESP_OK)
+                        {
+                            ESP_LOGI(TAG, "admin mode on, code %04u",
+                                     (unsigned int)code);
+                            draw_code(code);
+                        }
+                        else
+                        {
+                            ESP_LOGE(TAG, "admin_start failed");
+                        }
                     }
                 }
-            }
-            else if (!admin_is_active())
-            {
-                /* Content playback — normal mode only. */
-                int n = content_get_track_count(url);
-                if (n > 0)
+                else if (admin_is_active())
                 {
-                    strncpy(s_current_url, url, sizeof(s_current_url) - 1);
-                    s_current_url[sizeof(s_current_url) - 1] = '\0';
-                    s_track_count = n;
-                    s_track_index = 0;
-
-                    char image_path[128] = { 0 };
-                    content_lookup(url, NULL, 0, image_path, sizeof(image_path));
-
-                    char sound_path[128] = { 0 };
-                    if (content_get_track(url, 0, sound_path,
-                                          sizeof(sound_path)) == ESP_OK)
+                    /* Admin mode: capture the scanned card for the web UI. */
+                    if (url[0] != '\0')
                     {
-                        ESP_LOGI(TAG, "playing track 1/%d: %s", n, sound_path);
-                        render_image(image_path);
-                        audio_play(sound_path);
+                        admin_set_last_card(url);
                     }
                 }
                 else
                 {
-                    ESP_LOGW(TAG, "no content for URL %s", url);
-                    draw_bitmap(NOT_FOUND_ART);
+                    /* Content playback — normal mode only. */
+                    int n = content_get_track_count(url);
+                    if (n > 0)
+                    {
+                        strncpy(s_current_url, url, sizeof(s_current_url) - 1);
+                        s_current_url[sizeof(s_current_url) - 1] = '\0';
+                        s_track_count = n;
+                        s_track_index = 0;
+
+                        char image_path[128] = { 0 };
+                        content_get_track_image(url, 0, image_path,
+                                                sizeof(image_path));
+
+                        char sound_path[128] = { 0 };
+                        if (content_get_track(url, 0, sound_path,
+                                              sizeof(sound_path)) == ESP_OK)
+                        {
+                            ESP_LOGI(TAG, "playing track 1/%d: %s", n, sound_path);
+                            if (image_path[0] != '\0')
+                            {
+                                render_image(image_path);
+                            }
+                            else
+                            {
+                                ht16d35x_clear();
+                                ht16d35x_flush();
+                            }
+                            audio_play(sound_path);
+                        }
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "no content for URL %s", url);
+                        draw_bitmap(NOT_FOUND_ART);
+                    }
                 }
             }
 
+            state_unlock();
+        }
+        else if (!card && card_present)
+        {
+            /* Card removed: stop playback so controls don't act on a ghost
+             * card. */
+            state_lock();
+            if (s_track_count > 0)
+            {
+                audio_stop();
+                s_track_count = 0;
+                s_track_index = 0;
+                s_current_url[0] = '\0';
+            }
             state_unlock();
         }
 

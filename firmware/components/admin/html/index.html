@@ -22,7 +22,13 @@ button.danger{color:#e5484d}
 .item .u{font-size:13px;word-break:break-all;flex:1}
 .item .thumb{width:48px;height:48px;object-fit:cover;border-radius:6px;background:#000;flex:none}
 .hint{color:#8b93a3;font-size:12px}
-.preview{display:none;width:128px;height:128px;image-rendering:pixelated;background:#000;border:1px solid #2a2f3a;border-radius:6px;margin:0 0 12px}
+.warn{color:#f5a623;font-size:12px;margin:0 0 12px}
+.pv{display:inline-flex;flex-direction:column;align-items:center;gap:4px;margin:0 8px 12px 0}
+.pv-canvas{image-rendering:pixelated;background:#000;border:1px solid #2a2f3a;border-radius:6px}
+.pv-name{font-size:11px;color:#8b93a3;max-width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tabs{display:flex;gap:8px;margin:0 0 16px}
+.tab{flex:1;background:#181b22;border:1px solid #2a2f3a;color:#8b93a3;border-radius:8px;min-height:40px;padding:8px 12px;font-size:14px;font-weight:600;cursor:pointer}
+.tab.active{background:#f5a623;color:#201503;border-color:#f5a623}
 #status{margin-top:12px;font-size:13px;min-height:18px}
 #status.ok{color:#2fbf71}
 #status.err{color:#e5484d}
@@ -38,20 +44,26 @@ button.danger{color:#e5484d}
 <input id='pin' type='password' maxlength='4' inputmode='numeric' pattern='[0-9]*' placeholder='0000'>
 <button id='unlock'>Unlock</button>
 </div>
-<div class='card'>
+<div id='appSection' style='display:none'>
+<div class='tabs'>
+<button class='tab active' id='tabNew'>New</button>
+<button class='tab' id='tabBrowse'>Browse</button>
+</div>
+<div class='card' id='addCard'>
 <h2>Add content</h2>
 <label for='url'>Card URL (NFC tag target)</label>
 <input id='url' type='text' placeholder='https://example.com/card'>
-<label for='sound'>Sound file</label>
-<input id='sound' type='file' accept='audio/*,.mp3,.wav,.aac,.ogg,.opus'>
-<label for='image'>Image file (optional)</label>
-<input id='image' type='file' accept='image/*'>
-<canvas id='preview' width='128' height='128' class='preview'></canvas>
+<p id='cardwarn' class='warn' style='display:none'></p>
+<label for='files'>Select a folder (.mp3 + images, paired by name)</label>
+<input id='files' type='file' webkitdirectory multiple>
+<p id='filesummary' class='hint'></p>
+<div id='previews'></div>
 <button id='add' disabled>Add content</button>
 </div>
-<div class='card'>
+<div class='card' id='browseCard'>
 <h2>Content</h2>
 <div id='list'><p class='hint'>Loading...</p></div>
+</div>
 </div>
 <p id='status'></p>
 <audio id='player' preload='none'></audio>
@@ -61,6 +73,13 @@ function q(s){return document.querySelector(s)}
 var unlocked=false;
 function pin(){return q('#pin').value.trim()}
 function setStatus(t,c){var e=q('#status');e.textContent=t;e.className=c||''}
+function showTab(name){
+  var add=name==='new';
+  q('#tabNew').className='tab'+(add?' active':'');
+  q('#tabBrowse').className='tab'+(add?'':' active');
+  q('#addCard').style.display=add?'block':'none';
+  q('#browseCard').style.display=add?'none':'block';
+}
 async function unlock(){
   var p=pin();
   if(!p){setStatus('Enter the access code first.','err');return}
@@ -70,6 +89,8 @@ async function unlock(){
     if(r.ok){
       unlocked=true;
       q('#unlockCard').style.display='none';
+      q('#appSection').style.display='block';
+      showTab('new');
       q('#add').disabled=false;
       load();
       setStatus('Unlocked.','ok');
@@ -109,12 +130,6 @@ function drawPlaceholder(cv){
   g.strokeStyle='#3a4150';
   g.lineWidth=2;
   g.beginPath();g.moveTo(14,14);g.lineTo(34,34);g.moveTo(34,14);g.lineTo(14,34);g.stroke();
-}
-function clearPreview(){
-  var cv=q('#preview');
-  cv.style.display='none';
-  var g=cv.getContext('2d');
-  g.clearRect(0,0,cv.width,cv.height);
 }
 async function loadThumb(cv,path){
   var name=path.split('/').pop();
@@ -161,7 +176,8 @@ async function load(){
     if(it.image){loadThumb(cv,it.image)}else{drawPlaceholder(cv)}
     var u=document.createElement('div');
     u.className='u';
-    u.textContent=it.url;
+    var count=(it.tracks&&it.tracks.length)?it.tracks.length:(it.sound?1:0);
+    u.textContent=count>0?(it.url+' ('+count+' track'+(count===1?'':'s')+')'):it.url;
     d.appendChild(u);
     var p=document.createElement('button');
     p.className='ghost play';
@@ -205,23 +221,91 @@ function scaleTo16x16Bitmap(file,cb){
   img.onerror=function(){URL.revokeObjectURL(url);cb(null)};
   img.src=url;
 }
+var lastSeq=null;
+function showCardWarn(msg){
+  var e=q('#cardwarn');
+  if(msg){e.textContent=msg;e.style.display='block'}
+  else{e.style.display='none'}
+}
+async function pollLastCard(){
+  try{
+    var r=await fetch('/api/last-card');
+    if(!r.ok){return}
+    var d=await r.json();
+    if(d.url&&d.seq!==lastSeq){
+      lastSeq=d.seq;
+      q('#url').value=d.url;
+      showCardWarn(d.exists?'This card already has content - adding will replace it.':'');
+    }
+  }catch(e){}
+}
+var selectedTracks=[];
+var AUDIO_EXTS=['.mp3'];
+var IMAGE_EXTS=['.png','.jpg','.jpeg','.gif','.bmp','.webp','.img'];
+function fileExt(n){var i=n.lastIndexOf('.');return i>=0?n.slice(i).toLowerCase():''}
+function fileBase(n){var i=n.lastIndexOf('.');return (i>=0?n.slice(0,i):n).toLowerCase()}
+function isAudio(n){return AUDIO_EXTS.indexOf(fileExt(n))>=0}
+function isImage(n){return IMAGE_EXTS.indexOf(fileExt(n))>=0}
+function clearPreviews(){
+  var el=q('#previews');el.innerHTML='';
+  q('#filesummary').textContent='';
+  selectedTracks=[];
+}
+async function buildPlaylist(files){
+  var audios=[];var imgs={};
+  for(var i=0;i<files.length;i++){
+    var f=files[i];
+    if(isAudio(f.name)){audios.push(f)}
+    else if(isImage(f.name)){imgs[fileBase(f.name)]=f}
+  }
+  audios.sort(function(a,b){return a.name<b.name?-1:(a.name>b.name?1:0)});
+  var tracks=[];
+  for(var j=0;j<audios.length;j++){
+    var a=audios[j];
+    var img=imgs[fileBase(a.name)]||null;
+    var bmp=null;
+    if(img){bmp=await new Promise(function(res){scaleTo16x16Bitmap(img,res)})}
+    tracks.push({audio:a,image:img,bitmap:bmp,name:fileBase(a.name)});
+  }
+  return tracks;
+}
+function renderPreviews(tracks){
+  var el=q('#previews');el.innerHTML='';
+  var n=0;
+  for(var i=0;i<tracks.length;i++){
+    var t=tracks[i];
+    if(!t.bitmap){continue}
+    n++;
+    var d=document.createElement('div');d.className='pv';
+    var cv=document.createElement('canvas');cv.width=64;cv.height=64;cv.className='pv-canvas';
+    renderBitmap(cv,t.bitmap,4);
+    var cap=document.createElement('span');cap.className='pv-name';cap.textContent=t.name;
+    d.appendChild(cv);d.appendChild(cap);el.appendChild(d);
+  }
+  q('#filesummary').textContent=tracks.length+' track'+(tracks.length===1?'':'s')+' ('+n+' with image'+(n===1?'':'s')+')';
+}
 async function add(){
   if(!unlocked){setStatus('Enter the access code first.','err');return}
   var u=q('#url').value.trim();
   if(!u){setStatus('Enter a card URL first.','err');return}
-  var s=q('#sound').files[0];
-  if(!s){setStatus('Choose a sound file.','err');return}
-  var im=q('#image').files[0];
-  var bytes=null;
-  if(im){bytes=await new Promise(function(res){scaleTo16x16Bitmap(im,res)})}
+  var tracks=selectedTracks;
+  if(!tracks.length){setStatus('Choose audio files.','err');return}
+  var manifest=[];
   var fd=new FormData();
   fd.append('url',u);
-  fd.append('sound',s);
-  if(bytes){fd.append('image',new Blob([bytes],{type:'application/octet-stream'}),'icon.img')}
+  for(var i=0;i<tracks.length;i++){
+    var t=tracks[i];
+    var audioName=t.audio.name;
+    var imageName=t.bitmap?(t.name+'.img'):'';
+    manifest.push({s:audioName,i:imageName});
+    fd.append('sound',t.audio,audioName);
+    if(t.bitmap){fd.append('image',new Blob([t.bitmap],{type:'application/octet-stream'}),imageName)}
+  }
+  fd.append('manifest',JSON.stringify(manifest));
   setStatus('Uploading...','');
   try{
     var r=await fetch('/api/add',{method:'POST',credentials:'same-origin',body:fd});
-    if(r.ok){setStatus('Added '+u,'ok');q('#url').value='';q('#sound').value='';q('#image').value='';clearPreview();load()}
+    if(r.ok){setStatus('Added '+u,'ok');q('#url').value='';q('#files').value='';clearPreviews();showCardWarn('');load()}
     else{setStatus('Add failed ('+r.status+')','err')}
   }catch(e){setStatus('Add failed: '+e,'err')}
 }
@@ -234,16 +318,18 @@ async function del(u){
 }
 q('#unlock').onclick=unlock;
 q('#add').onclick=add;
-q('#image').addEventListener('change',function(){
-  var f=q('#image').files[0];
-  if(!f){clearPreview();return}
-  scaleTo16x16Bitmap(f,function(bytes){
-    if(!bytes){clearPreview();return}
-    renderBitmap(q('#preview'),bytes,8);
-    q('#preview').style.display='block';
-  });
+q('#files').addEventListener('change',async function(){
+  var files=q('#files').files;
+  if(!files.length){clearPreviews();return}
+  var tracks=await buildPlaylist(files);
+  selectedTracks=tracks;
+  renderPreviews(tracks);
 });
-load();
+q('#tabNew').onclick=function(){showTab('new')};
+q('#tabBrowse').onclick=function(){showTab('browse')};
+q('#url').addEventListener('input',function(){showCardWarn('')});
+pollLastCard();
+setInterval(pollLastCard,2000);
 </script>
 </body>
 </html>

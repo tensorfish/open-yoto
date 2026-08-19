@@ -560,3 +560,141 @@ esp_err_t content_list(char *out, size_t cap)
     cJSON_free(json);
     return ESP_OK;
 }
+
+esp_err_t content_add_playlist(const char *url,
+                               const char *const tracks[],
+                               const char *const track_images[],
+                               int n,
+                               const char *cover_image)
+{
+    cJSON *card;
+    cJSON *new_card;
+    cJSON *tracks_arr;
+    cJSON *images_arr;
+    char media[CONTENT_MEDIA_PATH_MAX];
+    int idx;
+    int i;
+
+    if (s_root == NULL || s_cards == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (url == NULL || tracks == NULL || n <= 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Locate and drop any existing card with the same URL (idempotent). */
+    idx = -1;
+    i = 0;
+    cJSON_ArrayForEach(card, s_cards)
+    {
+        cJSON *u = cJSON_GetObjectItemCaseSensitive(card, "url");
+        if (u != NULL && cJSON_IsString(u) && u->valuestring != NULL
+            && strcmp(u->valuestring, url) == 0)
+        {
+            idx = i;
+            break;
+        }
+        i++;
+    }
+    if (idx >= 0)
+    {
+        cJSON_DeleteItemFromArray(s_cards, idx);
+    }
+
+    new_card = cJSON_CreateObject();
+    tracks_arr = cJSON_CreateArray();
+    images_arr = cJSON_CreateArray();
+    if (new_card == NULL || tracks_arr == NULL || images_arr == NULL)
+    {
+        cJSON_Delete(new_card);
+        cJSON_Delete(tracks_arr);
+        cJSON_Delete(images_arr);
+        return ESP_ERR_NO_MEM;
+    }
+
+    for (i = 0; i < n; i++)
+    {
+        content_make_media_path(tracks[i], media, sizeof(media));
+        cJSON_AddItemToArray(tracks_arr, cJSON_CreateString(media));
+
+        if (track_images != NULL && track_images[i] != NULL
+            && track_images[i][0] != '\0')
+        {
+            content_make_media_path(track_images[i], media, sizeof(media));
+            cJSON_AddItemToArray(images_arr, cJSON_CreateString(media));
+        }
+        else
+        {
+            cJSON_AddItemToArray(images_arr, cJSON_CreateString(""));
+        }
+    }
+
+    cJSON_AddStringToObject(new_card, "url", url);
+    cJSON_AddItemToObject(new_card, "tracks", tracks_arr);
+    cJSON_AddItemToObject(new_card, "track_images", images_arr);
+
+    if (cover_image != NULL && cover_image[0] != '\0')
+    {
+        content_make_media_path(cover_image, media, sizeof(media));
+        cJSON_AddStringToObject(new_card, "image", media);
+    }
+
+    cJSON_AddItemToArray(s_cards, new_card);
+
+    return content_save();
+}
+
+esp_err_t content_get_track_image(const char *url, int index,
+                                  char *image_path, size_t ip)
+{
+    cJSON *card;
+    cJSON *images;
+    cJSON *item;
+    cJSON *cover;
+    const char *val = NULL;
+
+    if (image_path != NULL && ip > 0)
+    {
+        image_path[0] = '\0';
+    }
+
+    card = content_find_card(url);
+    if (card == NULL)
+    {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    images = cJSON_GetObjectItemCaseSensitive(card, "track_images");
+    if (images != NULL && cJSON_IsArray(images))
+    {
+        item = cJSON_GetArrayItem(images, index);
+        if (item != NULL && cJSON_IsString(item) && item->valuestring != NULL
+            && item->valuestring[0] != '\0')
+        {
+            val = item->valuestring;
+        }
+    }
+
+    if (val == NULL)
+    {
+        cover = cJSON_GetObjectItemCaseSensitive(card, "image");
+        if (cover != NULL && cJSON_IsString(cover) && cover->valuestring != NULL
+            && cover->valuestring[0] != '\0')
+        {
+            val = cover->valuestring;
+        }
+    }
+
+    if (val == NULL)
+    {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (image_path != NULL && ip > 0)
+    {
+        snprintf(image_path, ip, "%s", val);
+    }
+    return ESP_OK;
+}

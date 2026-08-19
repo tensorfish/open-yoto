@@ -49,6 +49,10 @@ static const char *TAG = "battery";
  * schematic. 3300 mV is a conservative single-cell "low" threshold. */
 #define BATTERY_LOW_VOLTAGE_MV  3300
 
+/* Charger STAT line: open-drain, active-low while charging. TODO: confirm
+ * polarity against the schematic. */
+#define BATTERY_CHG_STAT_ACTIVE_LOW 1
+
 static adc_oneshot_unit_handle_t s_adc1_handle;
 static bool s_gauge_present = false;
 
@@ -253,4 +257,15 @@ bool battery_is_low(void)
         return true;
     }
     return (battery_voltage() < (float)BATTERY_LOW_VOLTAGE_MV);
+}
+
+bool battery_is_charging(void)
+{
+    bool level = iox_get_pin(IOX_CHG_STAT);
+
+#if BATTERY_CHG_STAT_ACTIVE_LOW
+    return !level;
+#else
+    return level;
+#endif
 }

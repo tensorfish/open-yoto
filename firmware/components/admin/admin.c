@@ -35,6 +35,7 @@
 #include "esp_wifi_default.h"
 #include "mbedtls/base64.h"
 #include "cJSON.h"
+#include "freertos/FreeRTOS.h"
 
 static const char *TAG = "admin";
 
@@ -51,6 +52,9 @@ static const char *TAG = "admin";
 #define ADMIN_URL_MAX           512
 #define ADMIN_LIST_MAX          16384
 #define ADMIN_BODY_MAX          (4 * 1024 * 1024)
+#define ADMIN_MAX_TRACKS        32
+#define ADMIN_MAX_FILES         64
+#define ADMIN_MANIFEST_MAX      4096
 #define ADMIN_BOUNDARY_MAX      128
 
 /* Active-session state. */
@@ -65,6 +69,12 @@ static httpd_handle_t   s_server;
 static esp_netif_t     *s_ap_netif;
 static admin_code_cb_t  s_code_cb;
 
+/* Most recently scanned non-admin card URL, captured for the web UI. Guarded
+ * by s_last_card_lock (main loop writes it; the HTTP task reads it). */
+static char s_last_card_url[ADMIN_URL_MAX];
+static portMUX_TYPE s_last_card_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_last_card_seq;
+
 /* ------------------------------------------------------------------ page -- */
 
 /* The single-page admin UI is embedded via ESP-IDF EMBED_FILES (see
@@ -72,19 +82,46 @@ static admin_code_cb_t  s_code_cb;
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 
-/* A parsed add request: multipart fills raw byte references, JSON fills URL or
- * data-URL spec strings. Exactly one representation is used per media field. */
+/* One uploaded file part: data points into the request body (kept alive for
+ * the duration of the add request). */
+typedef struct
+{
+    char             name[ADMIN_NAME_MAX];  /* original basename */
+    const uint8_t   *data;
+    size_t           len;
+    char             ext[16];
+    bool             is_image;
+} admin_file_t;
+
+/* A parsed add request. Single-add and playlist fields may both be populated;
+ * the handler picks one path based on manifest_count. */
 typedef struct
 {
     char             url[ADMIN_URL_MAX];
-    const char      *sound_spec;
-    const char      *image_spec;
+
+    /* Single-add (legacy): spec strings (copied) or raw bytes (into body). */
+    char             sound_spec[ADMIN_URL_MAX];
+    char             image_spec[ADMIN_URL_MAX];
     const uint8_t   *sound_data;
     size_t           sound_len;
     char             sound_ext[16];
     const uint8_t   *image_data;
     size_t           image_len;
     char             image_ext[16];
+
+    /* Playlist: ordered manifest entries + collected file parts. */
+    struct
+    {
+        char         sound[ADMIN_NAME_MAX];
+        char         image[ADMIN_NAME_MAX];
+    } manifest[ADMIN_MAX_TRACKS];
+    int              manifest_count;
+    admin_file_t     files[ADMIN_MAX_FILES];
+    int              file_count;
+
+    /* Owning pointer to the multipart body (NULL for JSON); freed by the
+     * handler after ingest. */
+    char            *body;
 } admin_add_req_t;
 
 /* --------------------------------------------------------------- helpers -- */
@@ -560,6 +597,69 @@ static esp_err_t admin_get_boundary(const char *ct, char *boundary, size_t bound
     return ESP_OK;
 }
 
+/* Parse a manifest JSON array into out->manifest (ordered [{"s","i"},...]). */
+static esp_err_t admin_parse_manifest(const char *json, admin_add_req_t *out)
+{
+    cJSON *root = cJSON_Parse(json);
+    cJSON *item;
+    int i = 0;
+
+    if (root == NULL || !cJSON_IsArray(root))
+    {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    out->manifest_count = 0;
+    cJSON_ArrayForEach(item, root)
+    {
+        cJSON *s;
+        cJSON *im;
+
+        if (i >= ADMIN_MAX_TRACKS)
+        {
+            break;
+        }
+        s = cJSON_GetObjectItemCaseSensitive(item, "s");
+        im = cJSON_GetObjectItemCaseSensitive(item, "i");
+        if (s != NULL && cJSON_IsString(s))
+        {
+            snprintf(out->manifest[i].sound, sizeof(out->manifest[i].sound),
+                     "%s", s->valuestring);
+        }
+        if (im != NULL && cJSON_IsString(im))
+        {
+            snprintf(out->manifest[i].image, sizeof(out->manifest[i].image),
+                     "%s", im->valuestring);
+        }
+        i++;
+    }
+    out->manifest_count = i;
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+/* Find an uploaded file part by original basename and kind. */
+static const admin_file_t *admin_find_file(const admin_add_req_t *add,
+                                           const char *name, bool is_image)
+{
+    int i;
+
+    if (name == NULL || name[0] == '\0')
+    {
+        return NULL;
+    }
+    for (i = 0; i < add->file_count; i++)
+    {
+        if (add->files[i].is_image == is_image
+            && strcmp(add->files[i].name, name) == 0)
+        {
+            return &add->files[i];
+        }
+    }
+    return NULL;
+}
+
 /** Parse a multipart/form-data body into an add-request (no media written yet). */
 static esp_err_t admin_parse_multipart(char *body, size_t len,
                                        const char *boundary, admin_add_req_t *out)
@@ -626,17 +726,61 @@ static esp_err_t admin_parse_multipart(char *body, size_t len,
         {
             admin_copy_field(out->url, sizeof(out->url), data, part_len);
         }
-        else if (strcmp(name, "sound") == 0)
+        else if (strcmp(name, "manifest") == 0)
         {
-            out->sound_data = (const uint8_t *)data;
-            out->sound_len = part_len;
-            admin_media_ext(out->sound_ext, sizeof(out->sound_ext), filename, mime, ".mp3");
+            char manifest_buf[ADMIN_MANIFEST_MAX];
+            size_t copy = (part_len < sizeof(manifest_buf) - 1)
+                        ? part_len : sizeof(manifest_buf) - 1;
+
+            memcpy(manifest_buf, data, copy);
+            manifest_buf[copy] = '\0';
+            if (admin_parse_manifest(manifest_buf, out) != ESP_OK)
+            {
+                return ESP_ERR_INVALID_ARG;
+            }
         }
-        else if (strcmp(name, "image") == 0)
+        else if (strcmp(name, "sound") == 0 || strcmp(name, "image") == 0)
         {
-            out->image_data = (const uint8_t *)data;
-            out->image_len = part_len;
-            admin_media_ext(out->image_ext, sizeof(out->image_ext), filename, mime, ".png");
+            bool is_image = (strcmp(name, "image") == 0);
+            char media_ext[16];
+
+            /* Derive the extension once so the sound kind can be validated. */
+            admin_media_ext(media_ext, sizeof(media_ext), filename, mime,
+                            is_image ? ".img" : ".mp3");
+
+            /* The player decodes MP3 only — reject any other audio container. */
+            if (!is_image && strcmp(media_ext, ".mp3") != 0)
+            {
+                ESP_LOGE(TAG, "unsupported audio type %s", media_ext);
+                return ESP_ERR_INVALID_ARG;
+            }
+
+            /* Record the first part of each kind for the single-add path. */
+            if (!is_image && out->sound_data == NULL)
+            {
+                out->sound_data = (const uint8_t *)data;
+                out->sound_len = part_len;
+                snprintf(out->sound_ext, sizeof(out->sound_ext), "%s", media_ext);
+            }
+            else if (is_image && out->image_data == NULL)
+            {
+                out->image_data = (const uint8_t *)data;
+                out->image_len = part_len;
+                snprintf(out->image_ext, sizeof(out->image_ext), "%s", media_ext);
+            }
+
+            /* Collect every part for the playlist path. */
+            if (out->file_count < ADMIN_MAX_FILES)
+            {
+                admin_file_t *f = &out->files[out->file_count];
+
+                admin_copy_field(f->name, sizeof(f->name), filename, strlen(filename));
+                f->data = (const uint8_t *)data;
+                f->len = part_len;
+                snprintf(f->ext, sizeof(f->ext), "%s", media_ext);
+                f->is_image = is_image;
+                out->file_count++;
+            }
         }
 
         if (mark == NULL)
@@ -684,12 +828,12 @@ static esp_err_t admin_parse_json_add(const char *body, admin_add_req_t *out)
     item = cJSON_GetObjectItem(root, "sound");
     if (item != NULL && cJSON_IsString(item))
     {
-        out->sound_spec = item->valuestring;
+        snprintf(out->sound_spec, sizeof(out->sound_spec), "%s", item->valuestring);
     }
     item = cJSON_GetObjectItem(root, "image");
     if (item != NULL && cJSON_IsString(item))
     {
-        out->image_spec = item->valuestring;
+        snprintf(out->image_spec, sizeof(out->image_spec), "%s", item->valuestring);
     }
 
     cJSON_Delete(root);
@@ -719,8 +863,13 @@ static esp_err_t admin_parse_add_request(httpd_req_t *req, const char *ct,
             return err;
         }
         err = admin_parse_multipart(body, body_len, boundary, out);
-        free(body);
-        return err;
+        if (err != ESP_OK)
+        {
+            free(body);
+            return err;
+        }
+        out->body = body;   /* kept alive for ingest; the handler frees it */
+        return ESP_OK;
     }
 
     if (strncmp(ct, "application/json", 16) == 0)
@@ -750,7 +899,7 @@ static esp_err_t admin_ingest_add(const admin_add_req_t *add,
         err = admin_save_media(add->sound_data, add->sound_len, add->sound_ext,
                                sound_name, sound_name_len);
     }
-    else if (add->sound_spec != NULL && add->sound_spec[0] != '\0')
+    else if (add->sound_spec[0] != '\0')
     {
         err = admin_ingest_spec(add->sound_spec, ".mp3", sound_name, sound_name_len);
     }
@@ -765,12 +914,79 @@ static esp_err_t admin_ingest_add(const admin_add_req_t *add,
         err = admin_save_media(add->image_data, add->image_len, add->image_ext,
                                image_name, image_name_len);
     }
-    else if (add->image_spec != NULL && add->image_spec[0] != '\0')
+    else if (add->image_spec[0] != '\0')
     {
         err = admin_ingest_spec(add->image_spec, ".png", image_name, image_name_len);
     }
     return err;
 }
+
+/* Save a playlist's files and register a playlist mapping entry. */
+static esp_err_t admin_ingest_playlist(const admin_add_req_t *add)
+{
+    char tracks[ADMIN_MAX_TRACKS][ADMIN_NAME_MAX];
+    char track_images[ADMIN_MAX_TRACKS][ADMIN_NAME_MAX];
+    const char *track_ptrs[ADMIN_MAX_TRACKS];
+    const char *image_ptrs[ADMIN_MAX_TRACKS];
+    char cover[ADMIN_NAME_MAX] = { 0 };
+    int i;
+
+    if (add->manifest_count <= 0 || add->manifest_count > ADMIN_MAX_TRACKS)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (i = 0; i < add->manifest_count; i++)
+    {
+        const admin_file_t *sf;
+        const admin_file_t *ifile;
+
+        sf = admin_find_file(add, add->manifest[i].sound, false);
+        ifile = admin_find_file(add, add->manifest[i].image, true);
+
+        if (sf == NULL)
+        {
+            ESP_LOGE(TAG, "manifest references missing sound %s",
+                     add->manifest[i].sound);
+            return ESP_ERR_NOT_FOUND;
+        }
+        if (admin_save_media(sf->data, sf->len, sf->ext,
+                             tracks[i], sizeof(tracks[i])) != ESP_OK)
+        {
+            return ESP_FAIL;
+        }
+
+        if (ifile != NULL)
+        {
+            if (admin_save_media(ifile->data, ifile->len, ifile->ext,
+                                 track_images[i], sizeof(track_images[i])) != ESP_OK)
+            {
+                return ESP_FAIL;
+            }
+        }
+        else
+        {
+            track_images[i][0] = '\0';
+        }
+    }
+
+    /* Use the first track's image as the card cover (list thumbnail). */
+    if (track_images[0][0] != '\0')
+    {
+        snprintf(cover, sizeof(cover), "%s", track_images[0]);
+    }
+
+    for (i = 0; i < add->manifest_count; i++)
+    {
+        track_ptrs[i] = tracks[i];
+        image_ptrs[i] = track_images[i];
+    }
+
+    return content_add_playlist(add->url, track_ptrs, image_ptrs,
+                                add->manifest_count,
+                                cover[0] != '\0' ? cover : NULL);
+}
+
 
 /* ----------------------------------------------------------------- auth -- */
 
@@ -957,9 +1173,52 @@ static esp_err_t admin_list_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Return the most recently scanned card URL (and whether it is already
+ * mapped) so the web UI can pre-fill the add-content form. */
+static esp_err_t admin_last_card_handler(httpd_req_t *req)
+{
+    char url[ADMIN_URL_MAX];
+    bool exists;
+    cJSON *root;
+    char *json;
+    uint32_t seq;
+
+    portENTER_CRITICAL(&s_last_card_lock);
+    snprintf(url, sizeof(url), "%s", s_last_card_url);
+    seq = s_last_card_seq;
+    portEXIT_CRITICAL(&s_last_card_lock);
+
+    exists = (url[0] != '\0'
+              && content_lookup(url, NULL, 0, NULL, 0) == ESP_OK);
+
+    root = cJSON_CreateObject();
+    if (root == NULL)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+
+    cJSON_AddStringToObject(root, "url", url);
+    cJSON_AddBoolToObject(root, "exists", exists);
+    cJSON_AddNumberToObject(root, "seq", (double)seq);
+
+    json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == NULL)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    cJSON_free(json);
+    return ESP_OK;
+}
+
 static esp_err_t admin_add_handler(httpd_req_t *req)
 {
-    admin_add_req_t add;
+    admin_add_req_t *add;
     char ct[256] = { 0 };
     size_t ct_len;
     esp_err_t err;
@@ -972,7 +1231,14 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    memset(&add, 0, sizeof(add));
+    /* The request struct is ~15 KB (manifest + file tables); keep it off the
+     * httpd task's stack. */
+    add = calloc(1, sizeof(*add));
+    if (add == NULL)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
 
     ct_len = httpd_req_get_hdr_value_len(req, "Content-Type");
     if (ct_len > 0 && ct_len < sizeof(ct))
@@ -980,30 +1246,41 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
         httpd_req_get_hdr_value_str(req, "Content-Type", ct, sizeof(ct));
     }
 
-    err = admin_parse_add_request(req, ct, &add);
+    err = admin_parse_add_request(req, ct, add);
     if (err != ESP_OK)
     {
+        free(add->body);
+        free(add);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad request");
         return ESP_FAIL;
     }
-    if (add.url[0] == '\0')
+    if (add->url[0] == '\0')
     {
+        free(add->body);
+        free(add);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing url");
         return ESP_FAIL;
     }
 
-    err = admin_ingest_add(&add, sound_name, sizeof(sound_name),
-                           image_name, sizeof(image_name));
-    if (err != ESP_OK)
+    if (add->manifest_count > 0)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "media save failed");
-        return ESP_FAIL;
+        err = admin_ingest_playlist(add);
     }
+    else
+    {
+        err = admin_ingest_add(add, sound_name, sizeof(sound_name),
+                               image_name, sizeof(image_name));
+        if (err == ESP_OK)
+        {
+            err = content_add(add->url, sound_name, image_name);
+        }
+    }
+    free(add->body);
+    free(add);
 
-    err = content_add(add.url, sound_name, image_name);
     if (err != ESP_OK)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "content add failed");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "add failed");
         return ESP_FAIL;
     }
 
@@ -1184,6 +1461,13 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
         .handler = admin_list_handler,
         .user_ctx = NULL,
     };
+    static const httpd_uri_t last_card_uri =
+    {
+        .uri = "/api/last-card",
+        .method = HTTP_GET,
+        .handler = admin_last_card_handler,
+        .user_ctx = NULL,
+    };
     static const httpd_uri_t add_uri =
     {
         .uri = "/api/add",
@@ -1218,6 +1502,11 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
         return err;
     }
     err = httpd_register_uri_handler(server, &list_uri);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &last_card_uri);
     if (err != ESP_OK)
     {
         return err;
@@ -1263,6 +1552,10 @@ static void admin_teardown(void)
     s_code = 0;
     s_code_str[0] = '\0';
     s_session_token[0] = '\0';
+    portENTER_CRITICAL(&s_last_card_lock);
+    s_last_card_url[0] = '\0';
+    s_last_card_seq = 0;
+    portEXIT_CRITICAL(&s_last_card_lock);
     s_active = false;
 }
 
@@ -1385,6 +1678,7 @@ esp_err_t admin_start(uint16_t *code_out)
     httpd_cfg = (httpd_config_t)HTTPD_DEFAULT_CONFIG();
     httpd_cfg.max_uri_handlers = 8;
     httpd_cfg.max_open_sockets = 4;
+    httpd_cfg.stack_size = 32768;
     err = httpd_start(&s_server, &httpd_cfg);
     if (err != ESP_OK)
     {
@@ -1427,6 +1721,26 @@ esp_err_t admin_stop(void)
 bool admin_is_active(void)
 {
     return s_active;
+}
+
+void admin_set_last_card(const char *url)
+{
+    portENTER_CRITICAL(&s_last_card_lock);
+    if (url == NULL || url[0] == '\0')
+    {
+        s_last_card_url[0] = '\0';
+    }
+    else
+    {
+        snprintf(s_last_card_url, sizeof(s_last_card_url), "%s", url);
+        s_last_card_seq++;
+    }
+    portEXIT_CRITICAL(&s_last_card_lock);
+
+    if (url != NULL && url[0] != '\0')
+    {
+        ESP_LOGI(TAG, "last scanned card: %s", url);
+    }
 }
 
 void admin_set_code_callback(admin_code_cb_t cb)

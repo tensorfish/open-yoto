@@ -77,6 +77,38 @@ esp_err_t content_get_track(const char *url, int index,
  */
 esp_err_t content_add(const char *url, const char *sound_name,
                       const char *image_name);
+/**
+ * Add or replace a playlist card: an ordered list of audio tracks, each with
+ * an optional per-track image, plus an optional cover image.
+ *
+ * @param url          URL key.
+ * @param tracks       array of n bare sound file names (no directory).
+ * @param track_images array of n bare image file names (no directory); each
+ *                     entry may be "" for a track with no image.
+ * @param n            number of tracks (and track_images entries).
+ * @param cover_image  bare cover file name, or NULL/"" for none.
+ * @return ESP_OK on success, ESP_ERR_NO_MEM on allocation failure,
+ *         ESP_FAIL on any file IO error.
+ */
+esp_err_t content_add_playlist(const char *url,
+                               const char *const tracks[],
+                               const char *const track_images[],
+                               int n,
+                               const char *cover_image);
+
+/**
+ * Copy the image media path for a card's index-th track into image_path.
+ * Falls back to the card's cover image when the track has no image.
+ *
+ * @param url        URL key.
+ * @param index      zero-based track index.
+ * @param image_path output buffer (or NULL to skip).
+ * @param ip         size of image_path in bytes.
+ * @return ESP_OK if a non-empty path was written, ESP_ERR_NOT_FOUND if no
+ *         image is available, ESP_ERR_INVALID_STATE if not initialized.
+ */
+esp_err_t content_get_track_image(const char *url, int index,
+                                  char *image_path, size_t ip);
 
 /**
  * Remove the mapping entry whose URL matches url and persist the change.

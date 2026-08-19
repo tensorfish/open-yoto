@@ -44,6 +44,13 @@ esp_err_t admin_stop(void);
 
 /** Return true while admin mode is active. */
 bool admin_is_active(void);
+/**
+ * Record the most recently scanned non-admin card URL so the web UI can
+ * pre-fill the add-content form. Pass NULL or "" to clear it.
+ *
+ * @param url NUL-terminated URL (may be NULL to clear).
+ */
+void admin_set_last_card(const char *url);
 
 /** Register the callback used to display the access code (may be NULL). */
 void admin_set_code_callback(admin_code_cb_t cb);

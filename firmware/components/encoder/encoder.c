@@ -164,7 +164,7 @@ static void encoder_poll_buttons(void)
             if (btn->count < ENCODER_BTN_SAMPLES)
             {
                 btn->count++;
-                if (btn->count == ENCODER_BTN_SAMPLES)
+                if (btn->count == ENCODER_BTN_SAMPLES && !btn->pressed)
                 {
                     btn->pressed = true;
                     btn->held_ticks = 0;
