@@ -3,9 +3,10 @@
  *
  * Lifecycle: admin_start() mounts the content store, brings up the Wi-Fi
  * stack and an open AP, pins a static address, starts esp_http_server, and
- * issues a random 4-digit access code. admin_stop() reverses that. The 4-digit
- * code gates POST /api/add and POST /api/delete; GET / and GET /api/list stay
- * open so the page and content list always render.
+ * issues a random 4-digit access code. admin_stop() reverses that. The code is
+ * exchanged at POST /api/login for a session cookie (yoto_session), which
+ * gates POST /api/add and POST /api/delete; GET / and GET /api/list stay open
+ * so the page and content list always render.
  *
  * Depends on the content component (content.h) for the SD card, media files
  * (/sdcard/media/) and mapping.json (/sdcard/mapping.json). Media received by
@@ -41,7 +42,7 @@ static const char *TAG = "admin";
 #define ADMIN_SSID              "openyoto"
 #define ADMIN_CHANNEL           1
 #define ADMIN_MAX_CONN          4
-#define ADMIN_AUTH_USER         "admin"
+#define ADMIN_COOKIE_NAME       "yoto_session"
 
 /* Content store layout owned jointly with the content component. */
 #define ADMIN_MEDIA_DIR         "/sdcard/media"
@@ -59,253 +60,23 @@ static bool             s_wifi_inited;
 static bool             s_wifi_started;
 static uint16_t         s_code;
 static char             s_code_str[8];
+static char             s_session_token[33];
 static httpd_handle_t   s_server;
 static esp_netif_t     *s_ap_netif;
 static admin_code_cb_t  s_code_cb;
 
 /* ------------------------------------------------------------------ page -- */
-/*
- * Single-page admin UI. Embedded inline to keep the component self-contained.
- * Deliberately uses single quotes throughout so the C literal needs no
- * escapes; dynamic markup is built through the DOM API.
- */
-static const char ADMIN_PAGE_HTML[] =
-"<!doctype html>\n"
-"<html lang='en'>\n"
-"<head>\n"
-"<meta charset='utf-8'>\n"
-"<meta name='viewport' content='width=device-width,initial-scale=1'>\n"
-"<title>openyoto admin</title>\n"
-"<style>\n"
-"*{box-sizing:border-box}html{-webkit-text-size-adjust:100%;touch-action:manipulation;-webkit-tap-highlight-color:transparent}\n"
-"body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;color:#e6e9ef;line-height:1.5}\n"
-".wrap{max-width:640px;margin:0 auto;padding:24px 16px 48px}\n"
-"h1{font-size:22px;margin:0 0 4px}\n"
-".sub{color:#8b93a3;font-size:13px;margin:0 0 20px}\n"
-".card{background:#181b22;border:1px solid #2a2f3a;border-radius:12px;padding:16px;margin:0 0 16px}\n"
-".card h2{font-size:13px;margin:0 0 12px;text-transform:uppercase;letter-spacing:.08em;color:#8b93a3}\n"
-"label{display:block;font-size:12px;color:#8b93a3;margin:0 0 4px}\n"
-"input{width:100%;min-height:46px;padding:10px 12px;border:1px solid #2a2f3a;border-radius:8px;background:#10131a;color:#e6e9ef;margin:0 0 12px;font-size:16px}\n"
-"button{min-height:46px;background:#f5a623;color:#201503;border:0;border-radius:8px;padding:10px 16px;font-size:16px;font-weight:600;cursor:pointer;touch-action:manipulation}\n"
-"button.ghost{background:transparent;border:1px solid #2a2f3a;color:#e6e9ef}\n"
-"button.danger{color:#e5484d}\n"
-".item{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #2a2f3a}\n"
-".item:last-child{border-bottom:0}\n"
-".item .u{font-size:13px;word-break:break-all;flex:1}\n"
-".item .thumb{width:48px;height:48px;object-fit:cover;border-radius:6px;background:#000;flex:none}\n"
-".hint{color:#8b93a3;font-size:12px}\n"
-".preview{display:none;width:128px;height:128px;image-rendering:pixelated;background:#000;border:1px solid #2a2f3a;border-radius:6px;margin:0 0 12px}\n"
-"#status{margin-top:12px;font-size:13px;min-height:18px}\n"
-"#status.ok{color:#2fbf71}\n"
-"#status.err{color:#e5484d}\n"
-"</style>\n"
-"</head>\n"
-"<body>\n"
-"<div class='wrap'>\n"
-"<h1>openyoto admin</h1>\n"
-"<p class='sub'>SoftAP content manager</p>\n"
-"<div class='card'>\n"
-"<h2>Access code</h2>\n"
-"<p class='hint'>Enter the 4-digit code shown on the player to unlock changes.</p>\n"
-"<input id='pin' type='password' maxlength='4' inputmode='numeric' pattern='[0-9]*' placeholder='0000'>\n"
-"</div>\n"
-"<div class='card'>\n"
-"<h2>Add content</h2>\n"
-"<label for='url'>Card URL (NFC tag target)</label>\n"
-"<input id='url' type='text' placeholder='https://example.com/card'>\n"
-"<label for='sound'>Sound file</label>\n"
-"<input id='sound' type='file' accept='audio/*,.mp3,.wav,.aac,.ogg,.opus'>\n"
-"<label for='image'>Image file (optional)</label>\n"
-"<input id='image' type='file' accept='image/*'>\n"
-"<canvas id='preview' width='128' height='128' class='preview'></canvas>\n"
-"<button id='add'>Add content</button>\n"
-"</div>\n"
-"<div class='card'>\n"
-"<h2>Content</h2>\n"
-"<div id='list'><p class='hint'>Loading...</p></div>\n"
-"</div>\n"
-"<p id='status'></p>\n"
-"<audio id='player' preload='none'></audio>\n"
-"</div>\n"
-"<script>\n"
-"function q(s){return document.querySelector(s)}\n"
-"function pin(){return q('#pin').value.trim()}\n"
-"function setStatus(t,c){var e=q('#status');e.textContent=t;e.className=c||''}\n"
-"function authHeaders(){var o={};var p=pin();if(p){o['X-Pin']=p}return o}\n"
-"function firstSound(it){\n"
-"  if(it.tracks&&it.tracks.length){return it.tracks[0]}\n"
-"  return it.sound\n"
-"}\n"
-"function renderBitmap(cv,bytes,scale){\n"
-"  var tmp=document.createElement('canvas');\n"
-"  tmp.width=16;tmp.height=16;\n"
-"  var tg=tmp.getContext('2d');\n"
-"  var img=tg.createImageData(16,16);\n"
-"  for(var y=0;y<16;y++){\n"
-"    for(var x=0;x<16;x++){\n"
-"      if((bytes[y*2+(x>>3)]>>(7-(x&7)))&1){\n"
-"        var i=(y*16+x)*4;\n"
-"        img.data[i]=img.data[i+1]=img.data[i+2]=img.data[i+3]=255;\n"
-"      }\n"
-"    }\n"
-"  }\n"
-"  tg.putImageData(img,0,0);\n"
-"  cv.width=16*scale;cv.height=16*scale;\n"
-"  var g=cv.getContext('2d');\n"
-"  g.imageSmoothingEnabled=false;\n"
-"  g.drawImage(tmp,0,0,cv.width,cv.height);\n"
-"}\n"
-"function drawPlaceholder(cv){\n"
-"  cv.width=48;cv.height=48;\n"
-"  var g=cv.getContext('2d');\n"
-"  g.fillStyle='#161a21';\n"
-"  g.fillRect(0,0,48,48);\n"
-"  g.strokeStyle='#3a4150';\n"
-"  g.lineWidth=2;\n"
-"  g.beginPath();g.moveTo(14,14);g.lineTo(34,34);g.moveTo(34,14);g.lineTo(14,34);g.stroke();\n"
-"}\n"
-"function clearPreview(){\n"
-"  var cv=q('#preview');\n"
-"  cv.style.display='none';\n"
-"  var g=cv.getContext('2d');\n"
-"  g.clearRect(0,0,cv.width,cv.height);\n"
-"}\n"
-"async function loadThumb(cv,path){\n"
-"  var name=path.split('/').pop();\n"
-"  try{\n"
-"    var r=await fetch('/media/'+name);\n"
-"    if(!r.ok){drawPlaceholder(cv);return}\n"
-"    var buf=await r.arrayBuffer();\n"
-"    if(buf.byteLength<32){drawPlaceholder(cv);return}\n"
-"    renderBitmap(cv,new Uint8Array(buf),3);\n"
-"  }catch(e){drawPlaceholder(cv)}\n"
-"}\n"
-"var player=q('#player');\n"
-"var currentTrack=null;\n"
-"function setPlayButtons(){\n"
-"  var bs=document.querySelectorAll('button.play');\n"
-"  for(var i=0;i<bs.length;i++){bs[i].textContent='Play'}\n"
-"}\n"
-"function toggleSound(it,btn){\n"
-"  var s=firstSound(it);\n"
-"  if(!s){setStatus('No sound for this card.','err');return}\n"
-"  var src='/media/'+s.split('/').pop();\n"
-"  if(currentTrack===src&&!player.paused){player.pause();btn.textContent='Play';return}\n"
-"  setPlayButtons();\n"
-"  if(currentTrack!==src){player.src=src;currentTrack=src}\n"
-"  var p=player.play();\n"
-"  if(p&&p.catch){p.catch(function(){setStatus('Playback failed.','err')})}\n"
-"  btn.textContent='Pause';\n"
-"}\n"
-"player.addEventListener('ended',setPlayButtons);\n"
-"async function load(){\n"
-"  var r=await fetch('/api/list');\n"
-"  var items=await r.json();\n"
-"  var el=q('#list');\n"
-"  el.innerHTML='';\n"
-"  if(!items.length){el.innerHTML='<p class=hint>No content yet.</p>';return}\n"
-"  for(var i=0;i<items.length;i++){\n"
-"    var it=items[i];\n"
-"    var d=document.createElement('div');\n"
-"    d.className='item';\n"
-"    var cv=document.createElement('canvas');\n"
-"    cv.className='thumb';\n"
-"    cv.width=48;cv.height=48;\n"
-"    d.appendChild(cv);\n"
-"    if(it.image){loadThumb(cv,it.image)}else{drawPlaceholder(cv)}\n"
-"    var u=document.createElement('div');\n"
-"    u.className='u';\n"
-"    u.textContent=it.url;\n"
-"    d.appendChild(u);\n"
-"    var p=document.createElement('button');\n"
-"    p.className='ghost play';\n"
-"    p.textContent='Play';\n"
-"    p.onclick=(function(entry,btn){return function(){toggleSound(entry,btn)}})(it,p);\n"
-"    d.appendChild(p);\n"
-"    var b=document.createElement('button');\n"
-"    b.className='ghost danger';\n"
-"    b.textContent='Delete';\n"
-"    b.onclick=(function(entry){return function(){del(entry)}})(it.url);\n"
-"    d.appendChild(b);\n"
-"    el.appendChild(d);\n"
-"  }\n"
-"}\n"
-"function scaleTo16x16Bitmap(file,cb){\n"
-"  var img=new Image();\n"
-"  var url=URL.createObjectURL(file);\n"
-"  img.onload=function(){\n"
-"    URL.revokeObjectURL(url);\n"
-"    var c=document.createElement('canvas');\n"
-"    c.width=16;c.height=16;\n"
-"    var g=c.getContext('2d');\n"
-"    g.drawImage(img,0,0,16,16);\n"
-"    var d=g.getImageData(0,0,16,16).data;\n"
-"    var bytes=new Uint8Array(32);\n"
-"    for(var y=0;y<16;y++){\n"
-"      var b0=0;var b1=0;\n"
-"      for(var x=0;x<8;x++){\n"
-"        var i=(y*16+x)*4;\n"
-"        var l=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];\n"
-"        if(l>128){b0|=1<<(7-x)}\n"
-"        var j=i+32;\n"
-"        var l2=0.299*d[j]+0.587*d[j+1]+0.114*d[j+2];\n"
-"        if(l2>128){b1|=1<<(7-x)}\n"
-"      }\n"
-"      bytes[y*2]=b0;bytes[y*2+1]=b1;\n"
-"    }\n"
-"    cb(bytes);\n"
-"  };\n"
-"  img.onerror=function(){URL.revokeObjectURL(url);cb(null)};\n"
-"  img.src=url;\n"
-"}\n"
-"async function add(){\n"
-"  var u=q('#url').value.trim();\n"
-"  if(!u){setStatus('Enter a card URL first.','err');return}\n"
-"  var s=q('#sound').files[0];\n"
-"  if(!s){setStatus('Choose a sound file.','err');return}\n"
-"  var im=q('#image').files[0];\n"
-"  var bytes=null;\n"
-"  if(im){bytes=await new Promise(function(res){scaleTo16x16Bitmap(im,res)})}\n"
-"  var fd=new FormData();\n"
-"  fd.append('url',u);\n"
-"  fd.append('pin',pin());\n"
-"  fd.append('sound',s);\n"
-"  if(bytes){fd.append('image',new Blob([bytes],{type:'application/octet-stream'}),'icon.img')}\n"
-"  setStatus('Uploading...','');\n"
-"  try{\n"
-"    var r=await fetch('/api/add',{method:'POST',headers:authHeaders(),body:fd});\n"
-"    if(r.ok){setStatus('Added '+u,'ok');q('#url').value='';q('#sound').value='';q('#image').value='';clearPreview();load()}\n"
-"    else{setStatus('Add failed ('+r.status+')','err')}\n"
-"  }catch(e){setStatus('Add failed: '+e,'err')}\n"
-"}\n"
-"async function del(u){\n"
-"  if(!pin()){setStatus('Enter the access code first.','err');return}\n"
-"  if(!confirm('Delete '+u+'?')){return}\n"
-"  var r=await fetch('/api/delete',{method:'POST',headers:Object.assign({'Content-Type':'application/json'},authHeaders()),body:JSON.stringify({url:u})});\n"
-"  if(r.ok){setStatus('Deleted '+u,'ok');load()}\n"
-"  else{setStatus('Delete failed ('+r.status+')','err')}\n"
-"}\n"
-"q('#add').onclick=add;\n"
-"q('#image').addEventListener('change',function(){\n"
-"  var f=q('#image').files[0];\n"
-"  if(!f){clearPreview();return}\n"
-"  scaleTo16x16Bitmap(f,function(bytes){\n"
-"    if(!bytes){clearPreview();return}\n"
-"    renderBitmap(q('#preview'),bytes,8);\n"
-"    q('#preview').style.display='block';\n"
-"  });\n"
-"});\n"
-"load();\n"
-"</script>\n"
-"</body>\n"
-"</html>\n";
+
+/* The single-page admin UI is embedded via ESP-IDF EMBED_FILES (see
+ * CMakeLists.txt); the linker exposes it as these byte symbols. */
+extern const uint8_t index_html_start[] asm("_binary_index_html_start");
+extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 
 /* A parsed add request: multipart fills raw byte references, JSON fills URL or
  * data-URL spec strings. Exactly one representation is used per media field. */
 typedef struct
 {
     char             url[ADMIN_URL_MAX];
-    char             pin[8];
     const char      *sound_spec;
     const char      *image_spec;
     const uint8_t   *sound_data;
@@ -855,10 +626,6 @@ static esp_err_t admin_parse_multipart(char *body, size_t len,
         {
             admin_copy_field(out->url, sizeof(out->url), data, part_len);
         }
-        else if (strcmp(name, "pin") == 0)
-        {
-            admin_copy_field(out->pin, sizeof(out->pin), data, part_len);
-        }
         else if (strcmp(name, "sound") == 0)
         {
             out->sound_data = (const uint8_t *)data;
@@ -898,7 +665,7 @@ static esp_err_t admin_parse_multipart(char *body, size_t len,
 
 /* ---------------------------------------------------------------- JSON --- */
 
-/** Parse a raw JSON add request (`url`, `pin`, `sound`, `image`). */
+/** Parse a raw JSON add request (`url`, `sound`, `image`). */
 static esp_err_t admin_parse_json_add(const char *body, admin_add_req_t *out)
 {
     cJSON *root = cJSON_Parse(body);
@@ -913,11 +680,6 @@ static esp_err_t admin_parse_json_add(const char *body, admin_add_req_t *out)
     if (item != NULL && cJSON_IsString(item))
     {
         snprintf(out->url, sizeof(out->url), "%s", item->valuestring);
-    }
-    item = cJSON_GetObjectItem(root, "pin");
-    if (item != NULL && cJSON_IsString(item))
-    {
-        snprintf(out->pin, sizeof(out->pin), "%s", item->valuestring);
     }
     item = cJSON_GetObjectItem(root, "sound");
     if (item != NULL && cJSON_IsString(item))
@@ -1018,72 +780,110 @@ static bool admin_pin_match(const char *pin)
     return (s_code != 0 && pin != NULL && strcmp(pin, s_code_str) == 0);
 }
 
-/** Validate HTTP Basic auth: user "admin", password = active code. */
-static bool admin_basic_auth_ok(httpd_req_t *req)
+/** Extract the raw PIN from a login body: JSON {"pin":"..."} or form pin=.... */
+static bool admin_extract_pin(const char *body, const char *ct,
+                              char *pin, size_t pin_len)
 {
-    char auth[128];
-    size_t auth_len = httpd_req_get_hdr_value_len(req, "Authorization");
-    const char *b64;
-    size_t b64_len;
-    unsigned char decoded[64];
-    size_t out_len = 0;
-    char expect[16];
+    const char *p;
+    size_t n;
 
-    if (auth_len == 0 || auth_len >= sizeof(auth))
+    if (body == NULL || pin_len == 0)
     {
         return false;
     }
-    httpd_req_get_hdr_value_str(req, "Authorization", auth, sizeof(auth));
-    if (strncmp(auth, "Basic ", 6) != 0)
+    pin[0] = '\0';
+
+    if (ct != NULL && strncmp(ct, "application/json", 16) == 0)
+    {
+        cJSON *root = cJSON_Parse(body);
+        cJSON *item;
+
+        if (root == NULL)
+        {
+            return false;
+        }
+        item = cJSON_GetObjectItem(root, "pin");
+        if (item != NULL && cJSON_IsString(item))
+        {
+            snprintf(pin, pin_len, "%s", item->valuestring);
+        }
+        cJSON_Delete(root);
+        return pin[0] != '\0';
+    }
+
+    p = strstr(body, "pin=");
+    if (p == NULL)
     {
         return false;
     }
-    b64 = auth + 6;
-    b64_len = strlen(b64);
-    if (mbedtls_base64_decode(decoded, sizeof(decoded), &out_len,
-                              (const unsigned char *)b64, b64_len) != 0)
+    p += 4;
+    n = strcspn(p, "&");
+    if (n >= pin_len)
     {
-        return false;
+        n = pin_len - 1;
     }
-    decoded[out_len] = '\0';
-    snprintf(expect, sizeof(expect), ADMIN_AUTH_USER ":%s", s_code_str);
-    return (strcmp((const char *)decoded, expect) == 0);
+    memcpy(pin, p, n);
+    pin[n] = '\0';
+    while (n > 0 && (pin[n - 1] == ' ' || pin[n - 1] == '\r' || pin[n - 1] == '\n'))
+    {
+        pin[--n] = '\0';
+    }
+    return pin[0] != '\0';
 }
 
-/** Gate write operations: accept body PIN, X-Pin header, ?pin=, or Basic auth. */
-static bool admin_authorized(httpd_req_t *req, const char *pin)
+/** Generate a fresh 32-hex-char session token into `out` (at least 33 bytes). */
+static void admin_new_token(char *out)
 {
-    char val[32];
-    size_t hl;
-    char query[256];
+    static const char hex[] = "0123456789abcdef";
+    uint8_t raw[16];
+    size_t i;
 
-    if (admin_pin_match(pin))
+    esp_fill_random(raw, sizeof(raw));
+    for (i = 0; i < sizeof(raw); i++)
     {
-        return true;
+        out[2 * i]     = hex[raw[i] >> 4];
+        out[2 * i + 1] = hex[raw[i] & 0x0f];
     }
+    out[32] = '\0';
+}
 
-    hl = httpd_req_get_hdr_value_len(req, "X-Pin");
-    if (hl > 0 && hl < sizeof(val))
+/** Return true when the request carries a matching yoto_session cookie. */
+static bool admin_session_ok(httpd_req_t *req)
+{
+    char cookie[128] = { 0 };
+    size_t cookie_len = httpd_req_get_hdr_value_len(req, "Cookie");
+    const char *name = ADMIN_COOKIE_NAME;
+    size_t name_len = strlen(name);
+    char *cur;
+    char *save = NULL;
+
+    if (s_session_token[0] == '\0' || cookie_len == 0 || cookie_len >= sizeof(cookie))
     {
-        httpd_req_get_hdr_value_str(req, "X-Pin", val, sizeof(val));
-        if (admin_pin_match(val))
+        return false;
+    }
+    httpd_req_get_hdr_value_str(req, "Cookie", cookie, sizeof(cookie));
+
+    for (cur = strtok_r(cookie, ";", &save); cur != NULL;
+         cur = strtok_r(NULL, ";", &save))
+    {
+        while (*cur == ' ')
         {
-            return true;
+            cur++;
+        }
+        if (strncmp(cur, name, name_len) == 0 && cur[name_len] == '=')
+        {
+            const char *val = cur + name_len + 1;
+            size_t vlen = strlen(val);
+
+            while (vlen > 0 && val[vlen - 1] == ' ')
+            {
+                vlen--;
+            }
+            return (vlen == strlen(s_session_token) &&
+                    memcmp(val, s_session_token, vlen) == 0);
         }
     }
-
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
-    {
-        char qpin[16];
-
-        if (httpd_query_key_value(query, "pin", qpin, sizeof(qpin)) == ESP_OK &&
-            admin_pin_match(qpin))
-        {
-            return true;
-        }
-    }
-
-    return admin_basic_auth_ok(req);
+    return false;
 }
 
 /* ------------------------------------------------------------ handlers -- */
@@ -1092,7 +892,46 @@ static esp_err_t admin_root_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_sendstr(req, ADMIN_PAGE_HTML);
+    return httpd_resp_send(req, (const char *)index_html_start,
+                           (ssize_t)(index_html_end - index_html_start));
+}
+
+static esp_err_t admin_login_handler(httpd_req_t *req)
+{
+    char ct[64] = { 0 };
+    size_t ct_len = httpd_req_get_hdr_value_len(req, "Content-Type");
+    char *body = NULL;
+    size_t body_len = 0;
+    char pin[8] = { 0 };
+    char cookie[80];
+    esp_err_t err;
+
+    if (ct_len > 0 && ct_len < sizeof(ct))
+    {
+        httpd_req_get_hdr_value_str(req, "Content-Type", ct, sizeof(ct));
+    }
+
+    err = admin_read_body(req, &body, &body_len);
+    if (err != ESP_OK)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad request");
+        return ESP_FAIL;
+    }
+
+    if (!admin_extract_pin(body, ct, pin, sizeof(pin)) || !admin_pin_match(pin))
+    {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "unauthorized");
+        return ESP_FAIL;
+    }
+    free(body);
+
+    admin_new_token(s_session_token);
+    snprintf(cookie, sizeof(cookie),
+             ADMIN_COOKIE_NAME "=%s; Path=/; HttpOnly", s_session_token);
+    httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
 static esp_err_t admin_list_handler(httpd_req_t *req)
@@ -1127,6 +966,12 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
     char sound_name[ADMIN_NAME_MAX] = { 0 };
     char image_name[ADMIN_NAME_MAX] = { 0 };
 
+    if (!admin_session_ok(req))
+    {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "unauthorized");
+        return ESP_FAIL;
+    }
+
     memset(&add, 0, sizeof(add));
 
     ct_len = httpd_req_get_hdr_value_len(req, "Content-Type");
@@ -1139,11 +984,6 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
     if (err != ESP_OK)
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad request");
-        return ESP_FAIL;
-    }
-    if (!admin_authorized(req, add.pin[0] ? add.pin : NULL))
-    {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "unauthorized");
         return ESP_FAIL;
     }
     if (add.url[0] == '\0')
@@ -1175,15 +1015,19 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
 static esp_err_t admin_delete_handler(httpd_req_t *req)
 {
     char url[ADMIN_URL_MAX] = { 0 };
-    char pin[8] = { 0 };
     char query[512] = { 0 };
     esp_err_t err;
     size_t content_len;
 
+    if (!admin_session_ok(req))
+    {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "unauthorized");
+        return ESP_FAIL;
+    }
+
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
     {
         httpd_query_key_value(query, "url", url, sizeof(url));
-        httpd_query_key_value(query, "pin", pin, sizeof(pin));
     }
 
     content_len = req->content_len;
@@ -1217,15 +1061,9 @@ static esp_err_t admin_delete_handler(httpd_req_t *req)
                 if (root != NULL)
                 {
                     cJSON *ju = cJSON_GetObjectItem(root, "url");
-                    cJSON *jp = cJSON_GetObjectItem(root, "pin");
-
                     if (ju != NULL && cJSON_IsString(ju))
                     {
                         snprintf(url, sizeof(url), "%s", ju->valuestring);
-                    }
-                    if (jp != NULL && cJSON_IsString(jp))
-                    {
-                        snprintf(pin, sizeof(pin), "%s", jp->valuestring);
                     }
                     cJSON_Delete(root);
                 }
@@ -1237,11 +1075,6 @@ static esp_err_t admin_delete_handler(httpd_req_t *req)
     if (url[0] == '\0')
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing url");
-        return ESP_FAIL;
-    }
-    if (!admin_authorized(req, pin[0] ? pin : NULL))
-    {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "unauthorized");
         return ESP_FAIL;
     }
 
@@ -1365,6 +1198,13 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
         .handler = admin_delete_handler,
         .user_ctx = NULL,
     };
+    static const httpd_uri_t login_uri =
+    {
+        .uri = "/api/login",
+        .method = HTTP_POST,
+        .handler = admin_login_handler,
+        .user_ctx = NULL,
+    };
     esp_err_t err;
 
     err = httpd_register_uri_handler(server, &root_uri);
@@ -1383,6 +1223,11 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
         return err;
     }
     err = httpd_register_uri_handler(server, &add_uri);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &login_uri);
     if (err != ESP_OK)
     {
         return err;
@@ -1417,6 +1262,7 @@ static void admin_teardown(void)
     }
     s_code = 0;
     s_code_str[0] = '\0';
+    s_session_token[0] = '\0';
     s_active = false;
 }
 
@@ -1444,6 +1290,7 @@ esp_err_t admin_start(uint16_t *code_out)
     {
         return ESP_ERR_INVALID_STATE;
     }
+    s_session_token[0] = '\0';
 
     /* The write path needs the SD card and mapping.json; content_init() is
      * safe to call again if the application already mounted the store. */

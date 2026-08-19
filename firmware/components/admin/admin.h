@@ -3,8 +3,9 @@
  *
  * Brings up an open Wi-Fi SoftAP ("openyoto", channel 1) with a static
  * 192.168.4.1 address and an embedded HTTP server. A random 4-digit access
- * code gates every write operation (add/delete); reads are unauthenticated so
- * the landing page and content list always render.
+ * code is exchanged at POST /api/login for a session cookie, which gates every
+ * write operation (add/delete); reads are unauthenticated so the landing page
+ * and content list always render.
  *
  * The code is surfaced through an optional callback (admin_set_code_callback)
  * so the application can draw it on the player display.

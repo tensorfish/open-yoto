@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>openyoto admin</title>
+<style>
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;color:#e6e9ef;line-height:1.5}
+.wrap{max-width:640px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:#8b93a3;font-size:13px;margin:0 0 20px}
+.card{background:#181b22;border:1px solid #2a2f3a;border-radius:12px;padding:16px;margin:0 0 16px}
+.card h2{font-size:13px;margin:0 0 12px;text-transform:uppercase;letter-spacing:.08em;color:#8b93a3}
+label{display:block;font-size:12px;color:#8b93a3;margin:0 0 4px}
+input{width:100%;min-height:46px;padding:10px 12px;border:1px solid #2a2f3a;border-radius:8px;background:#10131a;color:#e6e9ef;margin:0 0 12px;font-size:16px}
+button{min-height:46px;background:#f5a623;color:#201503;border:0;border-radius:8px;padding:10px 16px;font-size:16px;font-weight:600;cursor:pointer;touch-action:manipulation}
+button.ghost{background:transparent;border:1px solid #2a2f3a;color:#e6e9ef}
+button.danger{color:#e5484d}
+.item{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #2a2f3a}
+.item:last-child{border-bottom:0}
+.item .u{font-size:13px;word-break:break-all;flex:1}
+.item .thumb{width:48px;height:48px;object-fit:cover;border-radius:6px;background:#000;flex:none}
+.hint{color:#8b93a3;font-size:12px}
+.preview{display:none;width:128px;height:128px;image-rendering:pixelated;background:#000;border:1px solid #2a2f3a;border-radius:6px;margin:0 0 12px}
+#status{margin-top:12px;font-size:13px;min-height:18px}
+#status.ok{color:#2fbf71}
+#status.err{color:#e5484d}
+</style>
+</head>
+<body>
+<div class='wrap'>
+<h1>openyoto admin</h1>
+<p class='sub'>SoftAP content manager</p>
+<div class='card' id='unlockCard'>
+<h2>Access code</h2>
+<p class='hint'>Enter the 4-digit code shown on the player to unlock changes.</p>
+<input id='pin' type='password' maxlength='4' inputmode='numeric' pattern='[0-9]*' placeholder='0000'>
+<button id='unlock'>Unlock</button>
+</div>
+<div class='card'>
+<h2>Add content</h2>
+<label for='url'>Card URL (NFC tag target)</label>
+<input id='url' type='text' placeholder='https://example.com/card'>
+<label for='sound'>Sound file</label>
+<input id='sound' type='file' accept='audio/*,.mp3,.wav,.aac,.ogg,.opus'>
+<label for='image'>Image file (optional)</label>
+<input id='image' type='file' accept='image/*'>
+<canvas id='preview' width='128' height='128' class='preview'></canvas>
+<button id='add' disabled>Add content</button>
+</div>
+<div class='card'>
+<h2>Content</h2>
+<div id='list'><p class='hint'>Loading...</p></div>
+</div>
+<p id='status'></p>
+<audio id='player' preload='none'></audio>
+</div>
+<script>
+function q(s){return document.querySelector(s)}
+var unlocked=false;
+function pin(){return q('#pin').value.trim()}
+function setStatus(t,c){var e=q('#status');e.textContent=t;e.className=c||''}
+async function unlock(){
+  var p=pin();
+  if(!p){setStatus('Enter the access code first.','err');return}
+  setStatus('Unlocking...','');
+  try{
+    var r=await fetch('/api/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin:p})});
+    if(r.ok){
+      unlocked=true;
+      q('#unlockCard').style.display='none';
+      q('#add').disabled=false;
+      load();
+      setStatus('Unlocked.','ok');
+    }else{
+      setStatus(r.status===401?'Wrong code.':'Unlock failed ('+r.status+')','err');
+    }
+  }catch(e){setStatus('Unlock failed: '+e,'err')}
+}
+function firstSound(it){
+  if(it.tracks&&it.tracks.length){return it.tracks[0]}
+  return it.sound
+}
+function renderBitmap(cv,bytes,scale){
+  var tmp=document.createElement('canvas');
+  tmp.width=16;tmp.height=16;
+  var tg=tmp.getContext('2d');
+  var img=tg.createImageData(16,16);
+  for(var y=0;y<16;y++){
+    for(var x=0;x<16;x++){
+      if((bytes[y*2+(x>>3)]>>(7-(x&7)))&1){
+        var i=(y*16+x)*4;
+        img.data[i]=img.data[i+1]=img.data[i+2]=img.data[i+3]=255;
+      }
+    }
+  }
+  tg.putImageData(img,0,0);
+  cv.width=16*scale;cv.height=16*scale;
+  var g=cv.getContext('2d');
+  g.imageSmoothingEnabled=false;
+  g.drawImage(tmp,0,0,cv.width,cv.height);
+}
+function drawPlaceholder(cv){
+  cv.width=48;cv.height=48;
+  var g=cv.getContext('2d');
+  g.fillStyle='#161a21';
+  g.fillRect(0,0,48,48);
+  g.strokeStyle='#3a4150';
+  g.lineWidth=2;
+  g.beginPath();g.moveTo(14,14);g.lineTo(34,34);g.moveTo(34,14);g.lineTo(14,34);g.stroke();
+}
+function clearPreview(){
+  var cv=q('#preview');
+  cv.style.display='none';
+  var g=cv.getContext('2d');
+  g.clearRect(0,0,cv.width,cv.height);
+}
+async function loadThumb(cv,path){
+  var name=path.split('/').pop();
+  try{
+    var r=await fetch('/media/'+name);
+    if(!r.ok){drawPlaceholder(cv);return}
+    var buf=await r.arrayBuffer();
+    if(buf.byteLength<32){drawPlaceholder(cv);return}
+    renderBitmap(cv,new Uint8Array(buf),3);
+  }catch(e){drawPlaceholder(cv)}
+}
+var player=q('#player');
+var currentTrack=null;
+function setPlayButtons(){
+  var bs=document.querySelectorAll('button.play');
+  for(var i=0;i<bs.length;i++){bs[i].textContent='Play'}
+}
+function toggleSound(it,btn){
+  var s=firstSound(it);
+  if(!s){setStatus('No sound for this card.','err');return}
+  var src='/media/'+s.split('/').pop();
+  if(currentTrack===src&&!player.paused){player.pause();btn.textContent='Play';return}
+  setPlayButtons();
+  if(currentTrack!==src){player.src=src;currentTrack=src}
+  var p=player.play();
+  if(p&&p.catch){p.catch(function(){setStatus('Playback failed.','err')})}
+  btn.textContent='Pause';
+}
+player.addEventListener('ended',setPlayButtons);
+async function load(){
+  var r=await fetch('/api/list');
+  var items=await r.json();
+  var el=q('#list');
+  el.innerHTML='';
+  if(!items.length){el.innerHTML='<p class=hint>No content yet.</p>';return}
+  for(var i=0;i<items.length;i++){
+    var it=items[i];
+    var d=document.createElement('div');
+    d.className='item';
+    var cv=document.createElement('canvas');
+    cv.className='thumb';
+    cv.width=48;cv.height=48;
+    d.appendChild(cv);
+    if(it.image){loadThumb(cv,it.image)}else{drawPlaceholder(cv)}
+    var u=document.createElement('div');
+    u.className='u';
+    u.textContent=it.url;
+    d.appendChild(u);
+    var p=document.createElement('button');
+    p.className='ghost play';
+    p.textContent='Play';
+    p.onclick=(function(entry,btn){return function(){toggleSound(entry,btn)}})(it,p);
+    d.appendChild(p);
+    var b=document.createElement('button');
+    b.className='ghost danger';
+    b.textContent='Delete';
+    b.onclick=(function(entry){return function(){del(entry)}})(it.url);
+    b.disabled=!unlocked;
+    d.appendChild(b);
+    el.appendChild(d);
+  }
+}
+function scaleTo16x16Bitmap(file,cb){
+  var img=new Image();
+  var url=URL.createObjectURL(file);
+  img.onload=function(){
+    URL.revokeObjectURL(url);
+    var c=document.createElement('canvas');
+    c.width=16;c.height=16;
+    var g=c.getContext('2d');
+    g.drawImage(img,0,0,16,16);
+    var d=g.getImageData(0,0,16,16).data;
+    var bytes=new Uint8Array(32);
+    for(var y=0;y<16;y++){
+      var b0=0;var b1=0;
+      for(var x=0;x<8;x++){
+        var i=(y*16+x)*4;
+        var l=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+        if(l>128){b0|=1<<(7-x)}
+        var j=i+32;
+        var l2=0.299*d[j]+0.587*d[j+1]+0.114*d[j+2];
+        if(l2>128){b1|=1<<(7-x)}
+      }
+      bytes[y*2]=b0;bytes[y*2+1]=b1;
+    }
+    cb(bytes);
+  };
+  img.onerror=function(){URL.revokeObjectURL(url);cb(null)};
+  img.src=url;
+}
+async function add(){
+  if(!unlocked){setStatus('Enter the access code first.','err');return}
+  var u=q('#url').value.trim();
+  if(!u){setStatus('Enter a card URL first.','err');return}
+  var s=q('#sound').files[0];
+  if(!s){setStatus('Choose a sound file.','err');return}
+  var im=q('#image').files[0];
+  var bytes=null;
+  if(im){bytes=await new Promise(function(res){scaleTo16x16Bitmap(im,res)})}
+  var fd=new FormData();
+  fd.append('url',u);
+  fd.append('sound',s);
+  if(bytes){fd.append('image',new Blob([bytes],{type:'application/octet-stream'}),'icon.img')}
+  setStatus('Uploading...','');
+  try{
+    var r=await fetch('/api/add',{method:'POST',credentials:'same-origin',body:fd});
+    if(r.ok){setStatus('Added '+u,'ok');q('#url').value='';q('#sound').value='';q('#image').value='';clearPreview();load()}
+    else{setStatus('Add failed ('+r.status+')','err')}
+  }catch(e){setStatus('Add failed: '+e,'err')}
+}
+async function del(u){
+  if(!unlocked){setStatus('Enter the access code first.','err');return}
+  if(!confirm('Delete '+u+'?')){return}
+  var r=await fetch('/api/delete',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u})});
+  if(r.ok){setStatus('Deleted '+u,'ok');load()}
+  else{setStatus('Delete failed ('+r.status+')','err')}
+}
+q('#unlock').onclick=unlock;
+q('#add').onclick=add;
+q('#image').addEventListener('change',function(){
+  var f=q('#image').files[0];
+  if(!f){clearPreview();return}
+  scaleTo16x16Bitmap(f,function(bytes){
+    if(!bytes){clearPreview();return}
+    renderBitmap(q('#preview'),bytes,8);
+    q('#preview').style.display='block';
+  });
+});
+load();
+</script>
+</body>
+</html>
