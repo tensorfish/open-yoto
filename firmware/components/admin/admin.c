@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include "esp_err.h"
@@ -93,6 +94,7 @@ static const char ADMIN_PAGE_HTML[] =
 ".item .u{font-size:13px;word-break:break-all;flex:1}\n"
 ".item .thumb{width:48px;height:48px;object-fit:cover;border-radius:6px;background:#000;flex:none}\n"
 ".hint{color:#8b93a3;font-size:12px}\n"
+".preview{display:none;width:128px;height:128px;image-rendering:pixelated;background:#000;border:1px solid #2a2f3a;border-radius:6px;margin:0 0 12px}\n"
 "#status{margin-top:12px;font-size:13px;min-height:18px}\n"
 "#status.ok{color:#2fbf71}\n"
 "#status.err{color:#e5484d}\n"
@@ -115,6 +117,7 @@ static const char ADMIN_PAGE_HTML[] =
 "<input id='sound' type='file' accept='audio/*,.mp3,.wav,.aac,.ogg,.opus'>\n"
 "<label for='image'>Image file (optional)</label>\n"
 "<input id='image' type='file' accept='image/*'>\n"
+"<canvas id='preview' width='128' height='128' class='preview'></canvas>\n"
 "<button id='add'>Add content</button>\n"
 "</div>\n"
 "<div class='card'>\n"
@@ -122,12 +125,79 @@ static const char ADMIN_PAGE_HTML[] =
 "<div id='list'><p class='hint'>Loading...</p></div>\n"
 "</div>\n"
 "<p id='status'></p>\n"
+"<audio id='player' preload='none'></audio>\n"
 "</div>\n"
 "<script>\n"
 "function q(s){return document.querySelector(s)}\n"
 "function pin(){return q('#pin').value.trim()}\n"
 "function setStatus(t,c){var e=q('#status');e.textContent=t;e.className=c||''}\n"
 "function authHeaders(){var o={};var p=pin();if(p){o['X-Pin']=p}return o}\n"
+"function firstSound(it){\n"
+"  if(it.tracks&&it.tracks.length){return it.tracks[0]}\n"
+"  return it.sound\n"
+"}\n"
+"function renderBitmap(cv,bytes,scale){\n"
+"  var tmp=document.createElement('canvas');\n"
+"  tmp.width=16;tmp.height=16;\n"
+"  var tg=tmp.getContext('2d');\n"
+"  var img=tg.createImageData(16,16);\n"
+"  for(var y=0;y<16;y++){\n"
+"    for(var x=0;x<16;x++){\n"
+"      if((bytes[y*2+(x>>3)]>>(7-(x&7)))&1){\n"
+"        var i=(y*16+x)*4;\n"
+"        img.data[i]=img.data[i+1]=img.data[i+2]=img.data[i+3]=255;\n"
+"      }\n"
+"    }\n"
+"  }\n"
+"  tg.putImageData(img,0,0);\n"
+"  cv.width=16*scale;cv.height=16*scale;\n"
+"  var g=cv.getContext('2d');\n"
+"  g.imageSmoothingEnabled=false;\n"
+"  g.drawImage(tmp,0,0,cv.width,cv.height);\n"
+"}\n"
+"function drawPlaceholder(cv){\n"
+"  cv.width=48;cv.height=48;\n"
+"  var g=cv.getContext('2d');\n"
+"  g.fillStyle='#161a21';\n"
+"  g.fillRect(0,0,48,48);\n"
+"  g.strokeStyle='#3a4150';\n"
+"  g.lineWidth=2;\n"
+"  g.beginPath();g.moveTo(14,14);g.lineTo(34,34);g.moveTo(34,14);g.lineTo(14,34);g.stroke();\n"
+"}\n"
+"function clearPreview(){\n"
+"  var cv=q('#preview');\n"
+"  cv.style.display='none';\n"
+"  var g=cv.getContext('2d');\n"
+"  g.clearRect(0,0,cv.width,cv.height);\n"
+"}\n"
+"async function loadThumb(cv,path){\n"
+"  var name=path.split('/').pop();\n"
+"  try{\n"
+"    var r=await fetch('/media/'+name);\n"
+"    if(!r.ok){drawPlaceholder(cv);return}\n"
+"    var buf=await r.arrayBuffer();\n"
+"    if(buf.byteLength<32){drawPlaceholder(cv);return}\n"
+"    renderBitmap(cv,new Uint8Array(buf),3);\n"
+"  }catch(e){drawPlaceholder(cv)}\n"
+"}\n"
+"var player=q('#player');\n"
+"var currentTrack=null;\n"
+"function setPlayButtons(){\n"
+"  var bs=document.querySelectorAll('button.play');\n"
+"  for(var i=0;i<bs.length;i++){bs[i].textContent='Play'}\n"
+"}\n"
+"function toggleSound(it,btn){\n"
+"  var s=firstSound(it);\n"
+"  if(!s){setStatus('No sound for this card.','err');return}\n"
+"  var src='/media/'+s.split('/').pop();\n"
+"  if(currentTrack===src&&!player.paused){player.pause();btn.textContent='Play';return}\n"
+"  setPlayButtons();\n"
+"  if(currentTrack!==src){player.src=src;currentTrack=src}\n"
+"  var p=player.play();\n"
+"  if(p&&p.catch){p.catch(function(){setStatus('Playback failed.','err')})}\n"
+"  btn.textContent='Pause';\n"
+"}\n"
+"player.addEventListener('ended',setPlayButtons);\n"
 "async function load(){\n"
 "  var r=await fetch('/api/list');\n"
 "  var items=await r.json();\n"
@@ -138,14 +208,20 @@ static const char ADMIN_PAGE_HTML[] =
 "    var it=items[i];\n"
 "    var d=document.createElement('div');\n"
 "    d.className='item';\n"
-"    var t=document.createElement('img');\n"
-"    t.className='thumb';\n"
-"    if(it.image){t.src=it.image}\n"
-"    d.appendChild(t);\n"
+"    var cv=document.createElement('canvas');\n"
+"    cv.className='thumb';\n"
+"    cv.width=48;cv.height=48;\n"
+"    d.appendChild(cv);\n"
+"    if(it.image){loadThumb(cv,it.image)}else{drawPlaceholder(cv)}\n"
 "    var u=document.createElement('div');\n"
 "    u.className='u';\n"
 "    u.textContent=it.url;\n"
 "    d.appendChild(u);\n"
+"    var p=document.createElement('button');\n"
+"    p.className='ghost play';\n"
+"    p.textContent='Play';\n"
+"    p.onclick=(function(entry,btn){return function(){toggleSound(entry,btn)}})(it,p);\n"
+"    d.appendChild(p);\n"
 "    var b=document.createElement('button');\n"
 "    b.className='ghost danger';\n"
 "    b.textContent='Delete';\n"
@@ -154,21 +230,51 @@ static const char ADMIN_PAGE_HTML[] =
 "    el.appendChild(d);\n"
 "  }\n"
 "}\n"
+"function scaleTo16x16Bitmap(file,cb){\n"
+"  var img=new Image();\n"
+"  var url=URL.createObjectURL(file);\n"
+"  img.onload=function(){\n"
+"    URL.revokeObjectURL(url);\n"
+"    var c=document.createElement('canvas');\n"
+"    c.width=16;c.height=16;\n"
+"    var g=c.getContext('2d');\n"
+"    g.drawImage(img,0,0,16,16);\n"
+"    var d=g.getImageData(0,0,16,16).data;\n"
+"    var bytes=new Uint8Array(32);\n"
+"    for(var y=0;y<16;y++){\n"
+"      var b0=0;var b1=0;\n"
+"      for(var x=0;x<8;x++){\n"
+"        var i=(y*16+x)*4;\n"
+"        var l=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];\n"
+"        if(l>128){b0|=1<<(7-x)}\n"
+"        var j=i+32;\n"
+"        var l2=0.299*d[j]+0.587*d[j+1]+0.114*d[j+2];\n"
+"        if(l2>128){b1|=1<<(7-x)}\n"
+"      }\n"
+"      bytes[y*2]=b0;bytes[y*2+1]=b1;\n"
+"    }\n"
+"    cb(bytes);\n"
+"  };\n"
+"  img.onerror=function(){URL.revokeObjectURL(url);cb(null)};\n"
+"  img.src=url;\n"
+"}\n"
 "async function add(){\n"
 "  var u=q('#url').value.trim();\n"
 "  if(!u){setStatus('Enter a card URL first.','err');return}\n"
 "  var s=q('#sound').files[0];\n"
 "  if(!s){setStatus('Choose a sound file.','err');return}\n"
 "  var im=q('#image').files[0];\n"
+"  var bytes=null;\n"
+"  if(im){bytes=await new Promise(function(res){scaleTo16x16Bitmap(im,res)})}\n"
 "  var fd=new FormData();\n"
 "  fd.append('url',u);\n"
 "  fd.append('pin',pin());\n"
 "  fd.append('sound',s);\n"
-"  if(im){fd.append('image',im)}\n"
+"  if(bytes){fd.append('image',new Blob([bytes],{type:'application/octet-stream'}),'icon.img')}\n"
 "  setStatus('Uploading...','');\n"
 "  try{\n"
 "    var r=await fetch('/api/add',{method:'POST',headers:authHeaders(),body:fd});\n"
-"    if(r.ok){setStatus('Added '+u,'ok');q('#url').value='';q('#sound').value='';q('#image').value='';load()}\n"
+"    if(r.ok){setStatus('Added '+u,'ok');q('#url').value='';q('#sound').value='';q('#image').value='';clearPreview();load()}\n"
 "    else{setStatus('Add failed ('+r.status+')','err')}\n"
 "  }catch(e){setStatus('Add failed: '+e,'err')}\n"
 "}\n"
@@ -180,6 +286,15 @@ static const char ADMIN_PAGE_HTML[] =
 "  else{setStatus('Delete failed ('+r.status+')','err')}\n"
 "}\n"
 "q('#add').onclick=add;\n"
+"q('#image').addEventListener('change',function(){\n"
+"  var f=q('#image').files[0];\n"
+"  if(!f){clearPreview();return}\n"
+"  scaleTo16x16Bitmap(f,function(bytes){\n"
+"    if(!bytes){clearPreview();return}\n"
+"    renderBitmap(q('#preview'),bytes,8);\n"
+"    q('#preview').style.display='block';\n"
+"  });\n"
+"});\n"
 "load();\n"
 "</script>\n"
 "</body>\n"
@@ -1141,6 +1256,78 @@ static esp_err_t admin_delete_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
+static esp_err_t admin_media_handler(httpd_req_t *req)
+{
+    const char *uri = req->uri;
+    const char *name;
+    const char *ext;
+    const char *ctype = "application/octet-stream";
+    char path[ADMIN_PATH_MAX];
+    uint8_t buf[1024];
+    FILE *fp;
+    size_t n;
+    esp_err_t err;
+
+    if (uri == NULL || strncmp(uri, "/media/", 7) != 0)
+    {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+        return ESP_FAIL;
+    }
+    name = uri + 7;
+    if (name[0] == '\0' || strchr(name, '/') != NULL || strstr(name, "..") != NULL)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad request");
+        return ESP_FAIL;
+    }
+
+    ext = strrchr(name, '.');
+    if (ext != NULL)
+    {
+        if (strcasecmp(ext, ".mp3") == 0)
+        {
+            ctype = "audio/mpeg";
+        }
+        else if (strcasecmp(ext, ".wav") == 0)
+        {
+            ctype = "audio/wav";
+        }
+        else if (strcasecmp(ext, ".ogg") == 0 || strcasecmp(ext, ".opus") == 0)
+        {
+            ctype = "audio/ogg";
+        }
+        else if (strcasecmp(ext, ".aac") == 0)
+        {
+            ctype = "audio/aac";
+        }
+        else if (strcasecmp(ext, ".img") == 0)
+        {
+            ctype = "application/octet-stream";
+        }
+    }
+
+    snprintf(path, sizeof(path), ADMIN_MEDIA_DIR "/%s", name);
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+    {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, ctype);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0)
+    {
+        err = httpd_resp_send_chunk(req, (const char *)buf, (ssize_t)n);
+        if (err != ESP_OK)
+        {
+            fclose(fp);
+            return err;
+        }
+    }
+    fclose(fp);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t admin_register_handlers(httpd_handle_t server)
 {
     static const httpd_uri_t root_uri =
@@ -1148,6 +1335,13 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
         .uri = "/",
         .method = HTTP_GET,
         .handler = admin_root_handler,
+        .user_ctx = NULL,
+    };
+    static const httpd_uri_t media_uri =
+    {
+        .uri = "/media/*",
+        .method = HTTP_GET,
+        .handler = admin_media_handler,
         .user_ctx = NULL,
     };
     static const httpd_uri_t list_uri =
@@ -1174,6 +1368,11 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
     esp_err_t err;
 
     err = httpd_register_uri_handler(server, &root_uri);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &media_uri);
     if (err != ESP_OK)
     {
         return err;

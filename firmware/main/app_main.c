@@ -251,6 +251,66 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
     }
 }
 
+
+/* Battery is re-checked on this period in the main loop. */
+#define BATTERY_CHECK_PERIOD_MS 30000
+static uint32_t s_battery_check_ticks = 0;
+
+/*
+ * Render a 16x16 one-bit image file (32 bytes) to the display.
+ *
+ * @param[in] path path relative to the content mount point (e.g. "media/x.img").
+ */
+static void render_image(const char *path)
+{
+    char full[160];
+    FILE *f;
+    uint8_t bmp[32];
+    size_t n;
+
+    if (path == NULL || path[0] == '\0')
+    {
+        return;
+    }
+
+    snprintf(full, sizeof(full), "%s/%s", CONTENT_MOUNT_POINT, path);
+    f = fopen(full, "rb");
+    if (f == NULL)
+    {
+        ESP_LOGW(TAG, "cannot open image %s", full);
+        return;
+    }
+
+    n = fread(bmp, 1, sizeof(bmp), f);
+    fclose(f);
+
+    if (n == sizeof(bmp))
+    {
+        draw_bitmap(bmp);
+    }
+}
+
+/*
+ * Check the battery and show the low-battery art when it is depleted.
+ */
+static void battery_periodic_check(void)
+{
+    uint32_t now = xTaskGetTickCount();
+
+    if ((int32_t)(now - s_battery_check_ticks) < pdMS_TO_TICKS(BATTERY_CHECK_PERIOD_MS))
+    {
+        return;
+    }
+    s_battery_check_ticks = now;
+
+    if (battery_is_low())
+    {
+        ESP_LOGW(TAG, "low battery (%.1f mV, %d%%)",
+                 (double)battery_voltage(), battery_soc());
+        draw_bitmap(LOW_BATTERY_ART);
+    }
+}
+
 /* ------------------------------------------------------------ app_main --- */
 void app_main(void)
 {
@@ -302,6 +362,8 @@ void app_main(void)
             continue;
         }
 
+        battery_periodic_check();
+
         uint8_t uid_len = sizeof(uid);
         if (cr95hf_poll(uid, &uid_len, url, sizeof(url)))
         {
@@ -339,12 +401,15 @@ void app_main(void)
                     s_track_count = n;
                     s_track_index = 0;
 
+                    char image_path[128] = { 0 };
+                    content_lookup(url, NULL, 0, image_path, sizeof(image_path));
+
                     char sound_path[128] = { 0 };
                     if (content_get_track(url, 0, sound_path,
                                           sizeof(sound_path)) == ESP_OK)
                     {
                         ESP_LOGI(TAG, "playing track 1/%d: %s", n, sound_path);
-                        /* TODO: decode + draw the 16x16 image for this card. */
+                        render_image(image_path);
                         audio_play(sound_path);
                     }
                 }
