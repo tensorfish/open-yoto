@@ -15,6 +15,11 @@ __pycache__/
 site/
 .cache/
 
+# ESP-IDF build output
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
 # Firmware input & generated RE artifacts (regenerable via analysis/*.py)
 yoto-firmware.bin
 output/
