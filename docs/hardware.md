@@ -13,6 +13,14 @@ based on the detected hardware.
 The configs were recovered as standalone JSON objects from the app image and
 are saved in `output/hwconfig_*.json` (see [Methodology](methodology.md)).
 
+!!! note "Module & PSRAM"
+    The Yoto V3 is an **ESP32-WROVER-E** module: 8 MB QIO flash **and 8 MB QIO
+    PSRAM**. (Adafruit's CircuitPython board definition declares the same.)
+    Adafruit has also already reversed this hardware — their
+    `Adafruit_CircuitPython_YotoPlayer` library exists; their one known gap is
+    the `aw881xx` speaker-amp init sequence, which remains uncracked (the
+    headphone path via ES8156 works).
+
 ## Hardware revisions
 
 | Config | Display | NFC | SD | Audio codec | Fuel gauge | Charger | Qi |

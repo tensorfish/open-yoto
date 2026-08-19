@@ -12,20 +12,22 @@ site_author = "open-yoto"
 
 nav = [
   { "Overview" = "index.md" },
-  { "Hardware & Ports" = "hardware.md" },
-  { "Flow Charts" = "flow.md" },
-  { "How to Decompile" = "decompile.md" },
-  { "The Firmware (open-yoto)" = "open-yoto-firmware.md" },
-  { "Build Environment" = "build-setup.md" },
-  { "Firmware Frameworks" = "firmware-options.md" },
-  { "NFC / RFID (CR95HF)" = "subsystems/nfc.md" },
-  { "SD Card & Storage" = "subsystems/storage.md" },
-  { "Display" = "subsystems/display.md" },
-  { "Audio" = "subsystems/audio.md" },
-  { "Power & Battery" = "subsystems/power.md" },
-  { "Wi-Fi & Bluetooth" = "subsystems/connectivity.md" },
-  { "Boot & OTA" = "subsystems/boot.md" },
-  { "Methodology" = "methodology.md" },
+  { "open-yoto Firmware" = [
+      { "How It Works" = "open-yoto-firmware.md" },
+      { "Build & Flash" = "build-setup.md" },
+  ]},
+  { "Reverse Engineering" = [
+      { "Hardware & Ports" = "hardware.md" },
+      { "How to Decompile" = "decompile.md" },
+      { "NFC / RFID (CR95HF)" = "subsystems/nfc.md" },
+      { "SD Card & Storage" = "subsystems/storage.md" },
+      { "Display" = "subsystems/display.md" },
+      { "Audio" = "subsystems/audio.md" },
+      { "Power & Battery" = "subsystems/power.md" },
+      { "Wi-Fi & Bluetooth" = "subsystems/connectivity.md" },
+      { "Boot & OTA" = "subsystems/boot.md" },
+      { "Methodology" = "methodology.md" },
+  ]},
   { "AI Agents (detailed)" = [
       { "Index" = "ai/index.md" },
       { "Decompilation & Tooling" = "ai/decompile.md" },
@@ -36,11 +38,8 @@ nav = [
       { "Power" = "ai/power.md" },
       { "Connectivity" = "ai/connectivity.md" },
       { "Boot" = "ai/boot.md" },
-      { "Firmware Frameworks" = "ai/firmware-options.md" },
   ]},
 ]
-
-# extra_css = ["stylesheets/extra.css"]
 # extra_javascript = ["javascripts/extra.js"]
 
 [project.theme]
