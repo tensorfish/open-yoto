@@ -41,7 +41,7 @@
 #define PIN_SPI_MOSI                GPIO_NUM_22
 #define PIN_SPI_MISO                GPIO_NUM_26
 #define PIN_SPI_SCLK                GPIO_NUM_23
-#define SPI_HOST                    SPI2_HOST
+/* (display SPI host is SPI2_HOST — used directly, not via this header) */
 
 /* ----------------------------------------------------------------- SDMMC -- */
 /* 1-bit SD card (hwconfig_05 "sd1"). 4-bit variant adds d1=4, d2=12, d3=13.   */

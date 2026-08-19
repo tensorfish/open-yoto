@@ -1,0 +1,763 @@
+/*
+ * cr95hf.c — ST CR95HF NFC transceiver driver (UART transport).
+ *
+ * The CR95HF is a 13.56 MHz multi-protocol transceiver reached over a simple
+ * UART host interface (57600 8-N-2). This driver owns the UART link, drives
+ * ISO14443-3A tag activation (REQA -> anticollision -> select), and reads and
+ * writes a single NDEF URI record on a Type 2 tag (NTAG / MIFARE Ultralight).
+ *
+ * Host protocol (CR95HF datasheet DS10311 / AN3954):
+ *   host -> CR95HF : [command][length][data...]   (length counts data bytes)
+ *   CR95HF -> host : [result code][length][data...]
+ *
+ * The final byte of every SendRecv payload is a transmit-flag byte: 0x07
+ * emits a 7-bit short frame (REQA/WUPA), 0x08 adds odd parity (anticollision),
+ * and 0x28 adds parity + CRC-A (select / read / write).
+ */
+#include "cr95hf.h"
+#include "board_pins.h"
+
+#include "driver/uart.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+#include <string.h>
+
+static const char *TAG = "cr95hf";
+
+/* ---------------------------------------------------------------- CR95HF
+ * Host-interface command codes and result codes (DS10311 / AN3954).
+ */
+#define CR95HF_CMD_IDN              0x01
+#define CR95HF_CMD_PROTOCOL_SELECT  0x02
+#define CR95HF_CMD_SENDRECV         0x04
+
+#define CR95HF_CODE_SUCCESS         0x00   /* command executed successfully  */
+#define CR95HF_CODE_DATA            0x80   /* SendRecv: tag data returned   */
+#define CR95HF_CODE_TIMEOUT         0x87   /* SendRecv: no tag in the field */
+
+#define CR95HF_PROTO_ISO14443A      0x02
+
+/* SendRecv transmit flags (appended as the final payload byte). */
+#define CR95HF_TX_SHORT_FRAME       0x07   /* 7-bit REQA/WUPA, no CRC        */
+#define CR95HF_TX_PARITY            0x08   /* odd parity, no CRC (anticol)   */
+#define CR95HF_TX_CRC               0x28   /* parity + CRC-A (select/read/   */
+                                           /*  write)                         */
+
+/* ----------------------------------------------------------------- ISO14443
+ * ISO14443-3A activation bytes and Type 2 tag memory commands.
+ */
+#define ISO14443A_REQA              0x26
+#define ISO14443A_SEL_CL1           0x93
+#define ISO14443A_SEL_CL2           0x95
+#define ISO14443A_NVB_ANTICOLL      0x20
+#define ISO14443A_NVB_SELECT        0x70
+#define ISO14443A_CT                0x88   /* cascade tag (more UID follows) */
+#define ISO14443A_ACK               0x0A   /* MIFARE UL write acknowledge    */
+
+#define NFC_CMD_READ                0x30
+#define NFC_CMD_WRITE               0xA2
+
+/* ------------------------------------------------------------- NDEF / TLV
+ * Type 2 tag NDEF TLV tags and the short well-known URI record layout.
+ */
+#define NFC_TLV_NULL                0x00
+#define NFC_TLV_NDEF                0x03
+#define NFC_TLV_TERMINATOR          0xFE
+#define NDEF_URI_TYPE               0x55   /* 'U' well-known type */
+
+#define CR95HF_USER_PAGE            4      /* first user-data page (after CC) */
+#define CR95HF_RX_BUF_SIZE          256
+#define CR95HF_NDEF_BUF_SIZE        256
+#define CR95HF_UID_MAX              10
+#define CR95HF_URL_MAX              200
+#define CR95HF_TIMEOUT_MS           200
+
+/* ------------------------------------------------------------ URI prefixes
+ * NFC Forum RTD-URI identifier-code table. A URI record payload begins with
+ * one of these codes followed by the URI remainder (DS10311 / RTD-URI 1.0).
+ */
+static const char *const URI_PREFIXES[] =
+{
+    "",                             /* 0x00 full URI stored verbatim */
+    "http://www.",
+    "https://www.",
+    "http://",
+    "https://",
+    "tel:",
+    "mailto:",
+    "ftp://anonymous:anonymous@",
+    "ftp://ftp.",
+    "ftps://",
+    "sftp://",
+    "smb://",
+    "nfs://",
+    "ftp://",
+    "dav://",
+    "news:",
+    "telnet://",
+    "imap:",
+    "rtsp://",
+    "urn:",
+    "pop:",
+    "sip:",
+    "sips:",
+    "tftp:",
+    "btspp://",
+    "btl2cap://",
+    "btgoep://",
+    "tcpobex://",
+    "irdaobex://",
+    "file://",
+    "urn:epc:id:",
+    "urn:epc:tag:",
+    "urn:epc:pat:",
+    "urn:epc:raw:",
+    "urn:epc:",
+    "urn:nfc:",
+};
+#define URI_PREFIX_COUNT            (sizeof(URI_PREFIXES) / sizeof(URI_PREFIXES[0]))
+
+/* Prefixes recognized when encoding a URL (longest match first). */
+typedef struct
+{
+    const char *prefix;
+    uint8_t     code;
+} uri_prefix_map_t;
+
+static const uri_prefix_map_t URI_PREFIX_MAP[] =
+{
+    { "https://www.", 0x02 },
+    { "http://www.",  0x01 },
+    { "https://",     0x04 },
+    { "http://",      0x03 },
+};
+#define URI_PREFIX_MAP_COUNT        (sizeof(URI_PREFIX_MAP) / sizeof(URI_PREFIX_MAP[0]))
+
+/* Serializes access to the UART: one command/response transaction at a time. */
+static SemaphoreHandle_t s_uart_mutex = NULL;
+
+/** Look up the URI prefix string for an RTD-URI identifier code. */
+static const char *cr95hf_uri_prefix(uint8_t code)
+{
+    if (code >= URI_PREFIX_COUNT)
+    {
+        return "";
+    }
+    return URI_PREFIXES[code];
+}
+
+/** Read exactly @p len bytes from the UART, or time out. */
+static esp_err_t cr95hf_read_exact(uint8_t *buf, size_t len, uint32_t timeout_ms)
+{
+    size_t total = 0;
+
+    while (total < len)
+    {
+        int got = uart_read_bytes(NFC_UART_PORT, &buf[total], len - total,
+                                  pdMS_TO_TICKS(timeout_ms));
+        if (got <= 0)
+        {
+            return ESP_ERR_TIMEOUT;
+        }
+        total += (size_t)got;
+    }
+    return ESP_OK;
+}
+
+/**
+ * Send one CR95HF command frame and read the response frame.
+ *
+ * @param cmd        command code
+ * @param data       command payload bytes (may be NULL when data_len == 0)
+ * @param data_len   payload length in bytes
+ * @param code       out: response result code
+ * @param rsp        out: response data bytes
+ * @param rsp_len    out: response data length in bytes
+ * @param timeout_ms per-chunk UART read timeout
+ */
+static esp_err_t cr95hf_transact(uint8_t cmd, const uint8_t *data,
+                                 uint8_t data_len, uint8_t *code,
+                                 uint8_t *rsp, uint8_t *rsp_len,
+                                 uint32_t timeout_ms)
+{
+    uint8_t frame[CR95HF_RX_BUF_SIZE];
+    uint8_t len = 0;
+    esp_err_t err;
+    int written;
+
+    if ((size_t)data_len + 2 > sizeof(frame))
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    frame[0] = cmd;
+    frame[1] = data_len;
+    if (data_len > 0)
+    {
+        memcpy(&frame[2], data, data_len);
+    }
+
+    uart_flush_input(NFC_UART_PORT);
+
+    written = uart_write_bytes(NFC_UART_PORT, frame, (size_t)data_len + 2);
+    if (written != (int)data_len + 2)
+    {
+        return ESP_FAIL;
+    }
+
+    err = cr95hf_read_exact(code, 1, timeout_ms);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    err = cr95hf_read_exact(&len, 1, timeout_ms);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    if (len > 0)
+    {
+        if (rsp == NULL)
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
+        err = cr95hf_read_exact(rsp, len, timeout_ms);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+    }
+
+    if (rsp_len != NULL)
+    {
+        *rsp_len = len;
+    }
+    return ESP_OK;
+}
+
+/** SendRecv: exchange raw RF bytes with the tag using the given TX flags. */
+static esp_err_t cr95hf_send_recv(const uint8_t *rf, uint8_t rf_len,
+                                  uint8_t flags, uint8_t *code,
+                                  uint8_t *rsp, uint8_t *rsp_len)
+{
+    uint8_t data[CR95HF_RX_BUF_SIZE];
+
+    if ((size_t)rf_len + 1 > sizeof(data))
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    memcpy(data, rf, rf_len);
+    data[rf_len] = flags;
+
+    return cr95hf_transact(CR95HF_CMD_SENDRECV, data, (uint8_t)(rf_len + 1),
+                           code, rsp, rsp_len, CR95HF_TIMEOUT_MS);
+}
+
+/**
+ * Activate a Type A tag and return its UID (4 or 7 bytes). Runs REQA,
+ * anticollision and select (cascade levels 1 and 2). Returns false when no
+ * tag is in the field.
+ */
+static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len)
+{
+    uint8_t reqa = ISO14443A_REQA;
+    uint8_t anticol1[2] = { ISO14443A_SEL_CL1, ISO14443A_NVB_ANTICOLL };
+    uint8_t anticol2[2] = { ISO14443A_SEL_CL2, ISO14443A_NVB_ANTICOLL };
+    uint8_t select1[7];
+    uint8_t select2[7];
+    uint8_t cl1[5];
+    uint8_t cl2[5];
+    uint8_t code;
+    uint8_t rsp[16];
+    uint8_t rsp_len;
+    esp_err_t err;
+
+    err = cr95hf_send_recv(&reqa, 1, CR95HF_TX_SHORT_FRAME, &code, rsp, &rsp_len);
+    if (err != ESP_OK)
+    {
+        return false;
+    }
+    if (code == CR95HF_CODE_TIMEOUT)
+    {
+        return false;               /* no tag in the RF field */
+    }
+    if (code != CR95HF_CODE_DATA || rsp_len < 2)
+    {
+        return false;               /* no valid ATQA */
+    }
+
+    err = cr95hf_send_recv(anticol1, 2, CR95HF_TX_PARITY, &code, rsp, &rsp_len);
+    if (err != ESP_OK || code != CR95HF_CODE_DATA || rsp_len < 5)
+    {
+        return false;
+    }
+    memcpy(cl1, rsp, 5);
+
+    select1[0] = ISO14443A_SEL_CL1;
+    select1[1] = ISO14443A_NVB_SELECT;
+    memcpy(&select1[2], cl1, 5);
+    err = cr95hf_send_recv(select1, 7, CR95HF_TX_CRC, &code, rsp, &rsp_len);
+    if (err != ESP_OK || code != CR95HF_CODE_DATA || rsp_len < 1)
+    {
+        return false;               /* rsp[0] is the SAK */
+    }
+
+    if (cl1[0] != ISO14443A_CT)
+    {
+        if (*uid_len < 4)
+        {
+            return false;
+        }
+        memcpy(uid, cl1, 4);        /* 4-byte UID (single cascade level) */
+        *uid_len = 4;
+        return true;
+    }
+
+    /* Cascade tag 0x88: a 7-byte UID — run cascade level 2. */
+    err = cr95hf_send_recv(anticol2, 2, CR95HF_TX_PARITY, &code, rsp, &rsp_len);
+    if (err != ESP_OK || code != CR95HF_CODE_DATA || rsp_len < 5)
+    {
+        return false;
+    }
+    memcpy(cl2, rsp, 5);
+
+    select2[0] = ISO14443A_SEL_CL2;
+    select2[1] = ISO14443A_NVB_SELECT;
+    memcpy(&select2[2], cl2, 5);
+    err = cr95hf_send_recv(select2, 7, CR95HF_TX_CRC, &code, rsp, &rsp_len);
+    if (err != ESP_OK || code != CR95HF_CODE_DATA || rsp_len < 1)
+    {
+        return false;
+    }
+
+    if (*uid_len < 7)
+    {
+        return false;
+    }
+    uid[0] = cl1[1];                /* first 3 UID bytes follow the 0x88 tag */
+    uid[1] = cl1[2];
+    uid[2] = cl1[3];
+    memcpy(&uid[3], cl2, 4);
+    *uid_len = 7;
+    return true;
+}
+
+/** Read 4 pages (16 bytes) starting at @p page into @p out16. */
+static esp_err_t cr95hf_read_pages(uint8_t page, uint8_t *out16)
+{
+    uint8_t rf[2] = { NFC_CMD_READ, page };
+    uint8_t code;
+    uint8_t rsp[16];
+    uint8_t rsp_len;
+    esp_err_t err;
+
+    err = cr95hf_send_recv(rf, 2, CR95HF_TX_CRC, &code, rsp, &rsp_len);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    if (code != CR95HF_CODE_DATA || rsp_len < 16)
+    {
+        return ESP_FAIL;
+    }
+
+    memcpy(out16, rsp, 16);
+    return ESP_OK;
+}
+
+/**
+ * Decode a short well-known URI record ("D1 01 <plen> 55 <prefix> <uri>")
+ * into @p url, reconstructing the full URL from the prefix code.
+ */
+static bool cr95hf_decode_uri(const uint8_t *rec, size_t rec_len,
+                              char *url, size_t url_cap)
+{
+    uint8_t header;
+    uint8_t tnf;
+    bool short_record;
+    uint8_t type_len;
+    uint8_t payload_len;
+    uint8_t prefix;
+    const char *prefix_str;
+    size_t prefix_len;
+    size_t uri_len;
+    size_t cap;
+    size_t copy_prefix;
+    size_t copy_uri;
+
+    if (rec_len < 4)
+    {
+        return false;
+    }
+
+    header = rec[0];
+    tnf = header & 0x07;
+    short_record = (header & 0x10) != 0;
+
+    if (tnf != 0x01 || !short_record)
+    {
+        return false;               /* not a short well-known record */
+    }
+
+    type_len = rec[1];
+    payload_len = rec[2];
+
+    if (type_len != 1 || rec[3] != NDEF_URI_TYPE)
+    {
+        return false;               /* not a URI record */
+    }
+    if ((size_t)3 + type_len + payload_len > rec_len)
+    {
+        return false;
+    }
+
+    prefix = rec[4];
+    prefix_str = cr95hf_uri_prefix(prefix);
+    prefix_len = strlen(prefix_str);
+    uri_len = (size_t)payload_len - 1;   /* payload = prefix code + URI bytes */
+
+    if (url == NULL || url_cap == 0)
+    {
+        return true;                /* caller only needs a URL-present signal */
+    }
+
+    cap = url_cap - 1;
+    copy_prefix = (prefix_len < cap) ? prefix_len : cap;
+    copy_uri = (cap > copy_prefix) ? (cap - copy_prefix) : 0;
+    if (copy_uri > uri_len)
+    {
+        copy_uri = uri_len;
+    }
+
+    if (copy_prefix > 0)
+    {
+        memcpy(url, prefix_str, copy_prefix);
+    }
+    if (copy_uri > 0)
+    {
+        memcpy(url + copy_prefix, &rec[5], copy_uri);
+    }
+    url[copy_prefix + copy_uri] = '\0';
+
+    return true;
+}
+
+/** Walk the Type 2 tag TLV structure and decode the first NDEF URI record. */
+static bool cr95hf_parse_ndef(const uint8_t *buf, size_t len,
+                              char *url, size_t url_cap)
+{
+    size_t i = 0;
+
+    while (i + 2 <= len)
+    {
+        uint8_t tlv = buf[i];
+
+        if (tlv == NFC_TLV_NULL)
+        {
+            i += 1;
+            continue;
+        }
+        if (tlv == NFC_TLV_TERMINATOR)
+        {
+            break;
+        }
+        if (tlv == NFC_TLV_NDEF)
+        {
+            uint8_t lb = buf[i + 1];
+            size_t hdr;
+            size_t ndef_len;
+
+            if (lb == 0xFF)
+            {
+                if (i + 4 > len)
+                {
+                    break;
+                }
+                ndef_len = ((size_t)buf[i + 2] << 8) | buf[i + 3];
+                hdr = 4;
+            }
+            else
+            {
+                ndef_len = lb;
+                hdr = 2;
+            }
+
+            if (i + hdr + ndef_len > len)
+            {
+                break;
+            }
+            return cr95hf_decode_uri(&buf[i + hdr], ndef_len, url, url_cap);
+        }
+
+        /* Any other TLV: tag byte, length byte, then length payload bytes. */
+        i += 2 + buf[i + 1];
+    }
+
+    return false;
+}
+
+/** Read the tag user pages and decode the NDEF URI record within them. */
+static bool cr95hf_read_url(char *url, size_t url_cap)
+{
+    uint8_t buf[CR95HF_NDEF_BUF_SIZE];
+    uint8_t page;
+    size_t used = 0;
+
+    for (page = CR95HF_USER_PAGE; used + 16 <= sizeof(buf); page = (uint8_t)(page + 4))
+    {
+        if (cr95hf_read_pages(page, &buf[used]) != ESP_OK)
+        {
+            break;
+        }
+        used += 16;
+    }
+
+    return cr95hf_parse_ndef(buf, used, url, url_cap);
+}
+
+/**
+ * Split @p url into a URI prefix code and a remainder, returning the code and
+ * advancing @p remainder past the matched prefix (or to the start of @p url
+ * when no prefix matches).
+ */
+static uint8_t cr95hf_encode_uri(const char *url, const char **remainder)
+{
+    size_t i;
+
+    for (i = 0; i < URI_PREFIX_MAP_COUNT; i++)
+    {
+        size_t plen = strlen(URI_PREFIX_MAP[i].prefix);
+
+        if (strncmp(url, URI_PREFIX_MAP[i].prefix, plen) == 0)
+        {
+            *remainder = url + plen;
+            return URI_PREFIX_MAP[i].code;
+        }
+    }
+
+    *remainder = url;
+    return 0x00;                    /* no prefix match: store the full URI */
+}
+
+/** Build the NDEF URI record + TLV and write it page by page from page 4. */
+static esp_err_t cr95hf_write_ndef(const char *url)
+{
+    uint8_t record[CR95HF_NDEF_BUF_SIZE];
+    uint8_t tlv[CR95HF_NDEF_BUF_SIZE + 8];
+    const char *remainder = NULL;
+    uint8_t prefix;
+    size_t uri_len;
+    size_t payload_len;
+    size_t record_len;
+    size_t tlv_len;
+    size_t off;
+    esp_err_t err;
+
+    prefix = cr95hf_encode_uri(url, &remainder);
+    uri_len = strlen(remainder);
+
+    if (uri_len == 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (uri_len > CR95HF_URL_MAX)
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    payload_len = 1 + uri_len;      /* prefix code + URI bytes */
+    if (payload_len > 0xFF)
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* NDEF short well-known URI record: D1 01 <plen> 'U' <prefix> <uri>. */
+    record[0] = 0xD1;
+    record[1] = 0x01;
+    record[2] = (uint8_t)payload_len;
+    record[3] = NDEF_URI_TYPE;
+    record[4] = prefix;
+    memcpy(&record[5], remainder, uri_len);
+    record_len = 5 + uri_len;
+
+    /* Wrap in an NDEF-message TLV, terminate, and pad to whole 4-byte pages. */
+    tlv[0] = NFC_TLV_NDEF;
+    tlv[1] = (uint8_t)record_len;
+    memcpy(&tlv[2], record, record_len);
+    tlv_len = 2 + record_len;
+    tlv[tlv_len++] = NFC_TLV_TERMINATOR;
+    while ((tlv_len % 4) != 0)
+    {
+        tlv[tlv_len++] = 0x00;
+    }
+
+    for (off = 0; off < tlv_len; off += 4)
+    {
+        uint8_t rf[6];
+        uint8_t code;
+        uint8_t rsp[4];
+        uint8_t rsp_len;
+        uint8_t page = (uint8_t)(CR95HF_USER_PAGE + (off / 4));
+
+        rf[0] = NFC_CMD_WRITE;
+        rf[1] = page;
+        rf[2] = tlv[off + 0];
+        rf[3] = tlv[off + 1];
+        rf[4] = tlv[off + 2];
+        rf[5] = tlv[off + 3];
+
+        err = cr95hf_send_recv(rf, 6, CR95HF_TX_CRC, &code, rsp, &rsp_len);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+        if (code != CR95HF_CODE_DATA || rsp_len < 1 || rsp[0] != ISO14443A_ACK)
+        {
+            return ESP_FAIL;
+        }
+    }
+
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------- init */
+
+esp_err_t cr95hf_init(void)
+{
+    uart_config_t cfg =
+    {
+        .baud_rate  = NFC_UART_BAUD,
+        .data_bits  = UART_DATA_8_BITS,
+        .parity     = UART_PARITY_DISABLE,
+        .stop_bits  = UART_STOP_BITS_2,       /* CR95HF requires 8-N-2 */
+        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    uint8_t proto[2] = { CR95HF_PROTO_ISO14443A, 0x00 };
+    uint8_t code;
+    uint8_t rsp[16];
+    uint8_t rsp_len;
+    esp_err_t err;
+
+    if (s_uart_mutex == NULL)
+    {
+        s_uart_mutex = xSemaphoreCreateMutex();
+        if (s_uart_mutex == NULL)
+        {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    err = uart_param_config(NFC_UART_PORT, &cfg);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    err = uart_set_pin(NFC_UART_PORT, PIN_NFC_TX, PIN_NFC_RX,
+                       UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    err = uart_driver_install(NFC_UART_PORT, CR95HF_RX_BUF_SIZE, 0, 0, NULL, 0);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    uart_flush_input(NFC_UART_PORT);
+
+    /* Identity probe: Idn returns code 0x00 on a healthy link. */
+    err = cr95hf_transact(CR95HF_CMD_IDN, NULL, 0, &code, rsp, &rsp_len,
+                          CR95HF_TIMEOUT_MS);
+    if (err != ESP_OK || code != CR95HF_CODE_SUCCESS)
+    {
+        ESP_LOGE(TAG, "CR95HF Idn probe failed (err=%d code=0x%02x)", err, code);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    /* Select ISO14443A so SendRecv exchanges with Type A tags. */
+    err = cr95hf_transact(CR95HF_CMD_PROTOCOL_SELECT, proto, 2, &code, rsp,
+                          &rsp_len, CR95HF_TIMEOUT_MS);
+    if (err != ESP_OK || code != CR95HF_CODE_SUCCESS)
+    {
+        ESP_LOGE(TAG, "CR95HF ProtocolSelect failed (err=%d code=0x%02x)", err, code);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    ESP_LOGI(TAG, "CR95HF ready (UART%d 57600 8-N-2, TX=%d RX=%d)",
+             NFC_UART_PORT, PIN_NFC_TX, PIN_NFC_RX);
+
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------- poll */
+
+bool cr95hf_poll(uint8_t *uid, uint8_t *uid_len, char *url, size_t url_cap)
+{
+    bool ok;
+
+    if (uid == NULL || uid_len == NULL || *uid_len == 0)
+    {
+        return false;
+    }
+    if (s_uart_mutex == NULL)
+    {
+        return false;
+    }
+
+    if (url != NULL && url_cap > 0)
+    {
+        url[0] = '\0';
+    }
+
+    xSemaphoreTake(s_uart_mutex, portMAX_DELAY);
+
+    ok = cr95hf_activate(uid, uid_len);
+    if (ok && url != NULL && url_cap > 0)
+    {
+        /* URL read is best-effort: a tag without a URI still yields its UID. */
+        cr95hf_read_url(url, url_cap);
+    }
+
+    xSemaphoreGive(s_uart_mutex);
+    return ok;
+}
+
+/* --------------------------------------------------------------- write url */
+
+esp_err_t cr95hf_write_url(const char *url)
+{
+    uint8_t uid[CR95HF_UID_MAX];
+    uint8_t uid_len = sizeof(uid);
+    esp_err_t err;
+
+    if (url == NULL || url[0] == '\0')
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_uart_mutex == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_uart_mutex, portMAX_DELAY);
+
+    if (!cr95hf_activate(uid, &uid_len))
+    {
+        xSemaphoreGive(s_uart_mutex);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    err = cr95hf_write_ndef(url);
+
+    xSemaphoreGive(s_uart_mutex);
+    return err;
+}

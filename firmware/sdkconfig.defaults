@@ -11,4 +11,6 @@ CONFIG_FREERTOS_HZ=1000
 # Flash size — the Yoto is an ESP32-WROVER-E module with 8 MB flash.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
-# Wi-Fi is NOT enabled here — the hidden upload mode is a later, opt-in feature.
+# Large single-app partition table (the default 1 MB factory partition is too
+# small once WiFi + HTTP server + MP3 + TLS are linked in).
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
