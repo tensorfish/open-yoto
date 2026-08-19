@@ -178,7 +178,7 @@ static void skip_track(int delta)
 {
     char sound_path[128];
 
-    if (s_track_count <= 0)
+    if (s_track_count <= 1)
     {
         return;
     }
