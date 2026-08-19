@@ -1,6 +1,6 @@
 # sdkconfig.defaults — Yoto firmware sensible defaults.
-# Most peripheral drivers are enabled by the components that use them; these
-# are the project-wide choices.
+# Most peripherals are configured at runtime via board_pins.h; these are the
+# project-wide choices applied on a fresh build.
 
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
@@ -8,25 +8,7 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 
-# I2C master (component iox / battery / codec)
-CONFIG_I2C_MASTER_ENABLE=y
-CONFIG_I2C_MASTER_SDA=21
-CONFIG_I2C_MASTER_SCL=25
-CONFIG_I2C_MASTER_FREQUENCY=100000
-
-# SPI master (display)
-CONFIG_SPI_MASTER_IN_IRAM=n
-
-# SDMMC + FAT filesystem (storage)
-CONFIG_SDMMC_HOST_DEFAULT_ASSERT_HEAP_ALLOC_FAIL=n
-
-# I2S standard driver (audio)
-CONFIG_I2S_ISR_IRAM_SAFE=n
-
-# ADC (battery / light / temp)
-CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM=n
-
-# UART (NFC)
-CONFIG_UART_ISR_IN_IRAM=n
+# Flash size — the Yoto is an ESP32-WROVER-E module with 8 MB flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
 # Wi-Fi is NOT enabled here — the hidden upload mode is a later, opt-in feature.

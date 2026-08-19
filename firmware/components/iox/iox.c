@@ -78,14 +78,12 @@ esp_err_t iox_init(void)
     }
 
     /* apply factory direction + output defaults */
-    const uint8_t (*dir)[2] = IOX0_DIR;
-    const uint8_t (*out)[2] = IOX0_OUT;
+    static const uint8_t *const dirs[2] = { IOX0_DIR, IOX1_DIR };
+    static const uint8_t *const outs[2] = { IOX0_OUT, IOX1_OUT };
     for (int exp = 0; exp < 2; exp++) {
-        dir = (exp == 0) ? &IOX0_DIR : &IOX1_DIR;
-        out = (exp == 0) ? &IOX0_OUT : &IOX1_OUT;
         for (int port = 0; port < 2; port++) {
-            iox_write_reg(exp, IOX_REG_CONFIG_0 + port, (*dir)[port]);
-            iox_write_reg(exp, IOX_REG_OUTPUT_0 + port, (*out)[port]);
+            iox_write_reg(exp, IOX_REG_CONFIG_0 + port, dirs[exp][port]);
+            iox_write_reg(exp, IOX_REG_OUTPUT_0 + port, outs[exp][port]);
         }
     }
 
