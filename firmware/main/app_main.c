@@ -341,6 +341,7 @@ void app_main(void)
 
     uint8_t uid[10];
     char url[128];
+    bool card_present = false;
 
     while (1)
     {
@@ -352,7 +353,8 @@ void app_main(void)
 
         /* Poll NFC in BOTH modes — the magic card toggles admin on and off. */
         uint8_t uid_len = sizeof(uid);
-        if (cr95hf_poll(uid, &uid_len, url, sizeof(url)))
+        bool card = cr95hf_poll(uid, &uid_len, url, sizeof(url));
+        if (card && !card_present)
         {
             ESP_LOGI(TAG, "card: UID len=%u URL=%s", uid_len, url);
 
@@ -408,6 +410,9 @@ void app_main(void)
                 }
             }
         }
+
+        /* Remember presence so a held card acts once, not every poll. */
+        card_present = card;
 
         /* Battery check only in normal mode (don't overwrite the admin code). */
         if (!admin_is_active())
