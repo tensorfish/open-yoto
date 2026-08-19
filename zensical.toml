@@ -15,6 +15,7 @@ nav = [
   { "Hardware & Ports" = "hardware.md" },
   { "Flow Charts" = "flow.md" },
   { "How to Decompile" = "decompile.md" },
+  { "The Firmware (open-yoto)" = "open-yoto-firmware.md" },
   { "Build Environment" = "build-setup.md" },
   { "Custom Rust Firmware" = "custom-firmware.md" },
   { "Firmware Frameworks" = "firmware-options.md" },
