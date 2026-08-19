@@ -2,16 +2,18 @@
 icon: lucide/radio
 ---
 
-# open-yoto
+# open-yoto — Reverse Engineering
 
-This project has two parts:
+This project has three parts:
 
 1. **[open-yoto firmware](open-yoto-firmware.md)** — a from-scratch, open-source
    firmware for the Yoto Player (C / ESP-IDF). It reads NFC cards, plays the
    matching audio + picture, and has an offline admin mode to load your own
    content. No Wi-Fi / Bluetooth / cloud unless admin mode is turned on.
-2. **Reverse engineering** — a map of the *original* stock firmware in
-   `yoto-firmware.bin` (the 8 MiB flash dump), documented below.
+2. **Reverse engineering** (this section) — a map of the *original* stock
+   firmware in `yoto-firmware.bin` (the 8 MiB flash dump), documented below.
+3. **[Research](ai/index.md)** — dense, evidence-backed detail (exact strings,
+   function addresses, pin maps) for AI agents and tooling.
 
 ## Summary
 

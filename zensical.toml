@@ -1,7 +1,7 @@
 [project]
 site_url = "https://open-yoto.example/"
-site_name = "Yoto Firmware Reverse Engineering"
-site_description = "Hardware, ports, and subsystem map of the Yoto Player ESP32 firmware"
+site_name = "open-yoto"
+site_description = "Custom firmware, reverse engineering, and research for the Yoto Player ESP32"
 site_author = "open-yoto"
 
 # copyright = "Copyright &copy; 2026 Your name"
@@ -11,36 +11,45 @@ site_author = "open-yoto"
 # edit_uri = "edit/main/docs/"
 
 nav = [
-  { "Overview" = "index.md" },
   { "open-yoto Firmware" = [
+      { "Overview" = "firmware/index.md" },
       { "How It Works" = "open-yoto-firmware.md" },
       { "Build & Flash" = "build-setup.md" },
   ]},
   { "Reverse Engineering" = [
-      { "Hardware & Ports" = "hardware.md" },
-      { "How to Decompile" = "decompile.md" },
-      { "NFC / RFID (CR95HF)" = "subsystems/nfc.md" },
-      { "SD Card & Storage" = "subsystems/storage.md" },
-      { "Display" = "subsystems/display.md" },
-      { "Audio" = "subsystems/audio.md" },
-      { "Power & Battery" = "subsystems/power.md" },
-      { "Wi-Fi & Bluetooth" = "subsystems/connectivity.md" },
-      { "Boot & OTA" = "subsystems/boot.md" },
-      { "Methodology" = "methodology.md" },
+      { "Overview" = "index.md" },
+      { "Subsystems" = [
+          { "Overview" = "subsystems/index.md" },
+          { "NFC / RFID (CR95HF)" = "subsystems/nfc.md" },
+          { "SD Card & Storage" = "subsystems/storage.md" },
+          { "Display" = "subsystems/display.md" },
+          { "Audio" = "subsystems/audio.md" },
+          { "Power & Battery" = "subsystems/power.md" },
+          { "Wi-Fi & Bluetooth" = "subsystems/connectivity.md" },
+          { "Boot & OTA" = "subsystems/boot.md" },
+      ]},
+      { "Reference" = [
+          { "Overview" = "reference/index.md" },
+          { "Hardware & Ports" = "hardware.md" },
+          { "How to Decompile" = "decompile.md" },
+          { "Methodology" = "methodology.md" },
+      ]},
   ]},
-  { "AI Agents (detailed)" = [
-      { "Index" = "ai/index.md" },
+  { "Research" = [
+      { "Overview" = "ai/index.md" },
       { "Decompilation & Tooling" = "ai/decompile.md" },
-      { "NFC" = "ai/nfc.md" },
-      { "Storage" = "ai/storage.md" },
-      { "Display" = "ai/display.md" },
-      { "Audio" = "ai/audio.md" },
-      { "Power" = "ai/power.md" },
-      { "Connectivity" = "ai/connectivity.md" },
-      { "Boot" = "ai/boot.md" },
+      { "Subsystems" = [
+          { "Overview" = "ai/subsystems/index.md" },
+          { "NFC" = "ai/nfc.md" },
+          { "Storage" = "ai/storage.md" },
+          { "Display" = "ai/display.md" },
+          { "Audio" = "ai/audio.md" },
+          { "Power" = "ai/power.md" },
+          { "Connectivity" = "ai/connectivity.md" },
+          { "Boot" = "ai/boot.md" },
+      ]},
   ]},
 ]
-# extra_javascript = ["javascripts/extra.js"]
 
 [project.theme]
 # variant = "classic"

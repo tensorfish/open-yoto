@@ -1,3 +1,7 @@
+---
+icon: lucide/battery-charging
+---
+
 # Power & Battery — CW2215B/CW2015, SGM41513/41511/ETA6003, HUSB238, CV8013N/CV8085
 
 Dense reference for AI agents reverse-engineering the Yoto ESP32 firmware power subsystem:

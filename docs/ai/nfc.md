@@ -1,3 +1,7 @@
+---
+icon: lucide/contact-round
+---
+
 # NFC / RFID — ST CR95HF
 
 Dense reference for AI agents reverse-engineering the Yoto ESP32 firmware NFC subsystem.

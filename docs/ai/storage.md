@@ -1,3 +1,7 @@
+---
+icon: lucide/hard-drive
+---
+
 # SD card & storage — AI reference
 
 Yoto ESP32 firmware. Scope: SD transport (SDMMC 1-bit/4-bit or SPI), FatFS

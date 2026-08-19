@@ -6,7 +6,7 @@ icon: lucide/file-code-2
 
 A short guide to reproducing the reverse engineering. Full detail (exact
 commands, addresses, caveats) is in the
-[AI agents section](ai/decompile.md).
+[Research section](ai/decompile.md).
 
 ## What you need
 

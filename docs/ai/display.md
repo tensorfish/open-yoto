@@ -1,3 +1,7 @@
+---
+icon: lucide/monitor
+---
+
 # Display & Nightlight (HT16D35x LED matrix, GC9306 TFT, AW2028H nightlight)
 
 Dense reference for AI agents reverse-engineering the Yoto ESP32 firmware.

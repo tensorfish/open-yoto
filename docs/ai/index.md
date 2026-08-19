@@ -2,12 +2,12 @@
 icon: lucide/bot
 ---
 
-# AI Agents — Detailed Reference
+# Research — Detailed Reference
 
-This section is **for AI agents and tooling**, not human readers. It contains
-the dense, evidence-backed detail: exact strings with line numbers, pin
-numbers, function addresses, protocol specifics, and file pointers. The
-human-facing pages (top level) are intentionally simpler.
+This section holds the dense, evidence-backed research findings: exact strings
+with line numbers, pin numbers, function addresses, protocol specifics, and
+file pointers. It is written for AI agents and tooling, not human readers —
+the human-facing pages under **Reverse Engineering** are intentionally simpler.
 
 ## Index
 
