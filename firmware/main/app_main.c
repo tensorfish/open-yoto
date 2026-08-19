@@ -11,6 +11,8 @@
 #include <string.h>
 
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 
 #include "board_pins.h"
@@ -145,15 +147,29 @@ static void show_admin_code(uint16_t code)
 }
 
 /* ------------------------------------------------------------- encoder --- */
-/* Playback/power state. */
+/* Playback/power state, guarded by s_state_mutex (shared by the encoder task
+ * and the main loop). */
 static bool s_powered_off = false;
 static char s_current_url[128];
 static int s_track_index = 0;
 static int s_track_count = 0;
+static SemaphoreHandle_t s_state_mutex;
+
+/* Serialize access to playback/track state across the two tasks. */
+static void state_lock(void)
+{
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+}
+
+static void state_unlock(void)
+{
+    xSemaphoreGive(s_state_mutex);
+}
 
 /* Toggle play/pause for the currently loaded audio. */
 static void play_pause_toggle(void)
 {
+    state_lock();
     if (audio_is_paused())
     {
         audio_resume();
@@ -162,15 +178,21 @@ static void play_pause_toggle(void)
     {
         audio_pause();
     }
+    state_unlock();
 }
 
-/* Toggle power: "off" stops audio and blanks the display; "on" resumes. */
+/* Toggle power: "off" stops audio, ends admin mode, and blanks the display. */
 static void power_toggle(void)
 {
+    state_lock();
     s_powered_off = !s_powered_off;
     if (s_powered_off)
     {
         audio_stop();
+        if (admin_is_active())
+        {
+            admin_stop();
+        }
         ht16d35x_clear();
         ht16d35x_flush();
         ESP_LOGI(TAG, "powered off");
@@ -179,6 +201,7 @@ static void power_toggle(void)
     {
         ESP_LOGI(TAG, "powered on");
     }
+    state_unlock();
 }
 
 /* Advance/rewind the current card's tracks by delta (wraps around). */
@@ -186,25 +209,25 @@ static void skip_track(int delta)
 {
     char sound_path[128];
 
-    if (s_track_count <= 1)
+    state_lock();
+    if (s_track_count > 1)
     {
-        return;
-    }
+        s_track_index += delta;
+        s_track_index %= s_track_count;
+        if (s_track_index < 0)
+        {
+            s_track_index += s_track_count;
+        }
 
-    s_track_index += delta;
-    s_track_index %= s_track_count;
-    if (s_track_index < 0)
-    {
-        s_track_index += s_track_count;
+        if (content_get_track(s_current_url, s_track_index,
+                              sound_path, sizeof(sound_path)) == ESP_OK)
+        {
+            ESP_LOGI(TAG, "track %d/%d: %s", s_track_index + 1,
+                     s_track_count, sound_path);
+            audio_play(sound_path);
+        }
     }
-
-    if (content_get_track(s_current_url, s_track_index,
-                          sound_path, sizeof(sound_path)) == ESP_OK)
-    {
-        ESP_LOGI(TAG, "track %d/%d: %s", s_track_index + 1,
-                 s_track_count, sound_path);
-        audio_play(sound_path);
-    }
+    state_unlock();
 }
 
 /*
@@ -213,6 +236,17 @@ static void skip_track(int delta)
  */
 static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
 {
+    bool power_gesture =
+        (event == ENCODER_EVT_LONG_PRESS &&
+         (encoder_id == ENCODER_ID_1 || encoder_id == ENCODER_ID_POWER)) ||
+        (event == ENCODER_EVT_SHORT_PRESS && encoder_id == ENCODER_ID_POWER);
+
+    /* While "off", ignore everything except the power-toggle gestures. */
+    if (s_powered_off && !power_gesture)
+    {
+        return;
+    }
+
     if (event == ENCODER_EVT_TURN)
     {
         if (encoder_id == ENCODER_ID_0)
@@ -325,6 +359,15 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
+    /* Mutex serializing playback/track state between the encoder task and
+     * this main loop. */
+    s_state_mutex = xSemaphoreCreateMutex();
+    if (s_state_mutex == NULL)
+    {
+        ESP_LOGE(TAG, "xSemaphoreCreateMutex failed");
+        return;
+    }
+
     /* I2C bus + IO expanders first. */
     ESP_ERROR_CHECK(iox_init());
     ESP_ERROR_CHECK(battery_init());
@@ -365,6 +408,8 @@ void app_main(void)
         if (card && !card_present)
         {
             ESP_LOGI(TAG, "card: UID len=%u URL=%s", uid_len, url);
+
+            state_lock();
 
             if (strcmp(url, MAGIC_URL) == 0)
             {
@@ -418,6 +463,8 @@ void app_main(void)
                     draw_bitmap(NOT_FOUND_ART);
                 }
             }
+
+            state_unlock();
         }
 
         /* Remember presence so a held card acts once, not every poll. */
