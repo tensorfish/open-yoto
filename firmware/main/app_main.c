@@ -45,6 +45,14 @@ static const uint8_t LOW_BATTERY_ART[32] = {
     0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0,
 };
 
+/* "Not found" indicator — an X, shown when a scanned card has no content. */
+static const uint8_t NOT_FOUND_ART[32] = {
+    0x80, 0x01, 0x40, 0x02, 0x20, 0x04, 0x10, 0x08,
+    0x08, 0x10, 0x04, 0x20, 0x02, 0x40, 0x01, 0x80,
+    0x01, 0x80, 0x02, 0x40, 0x04, 0x20, 0x08, 0x10,
+    0x10, 0x08, 0x20, 0x04, 0x40, 0x02, 0x80, 0x01,
+};
+
 /* (admin-mode indicator removed — the 4-digit code is shown instead.) */
 
 /* 3x5 digit font. Each digit is 3 columns; each byte is one column with bit 0
@@ -407,6 +415,7 @@ void app_main(void)
                 else
                 {
                     ESP_LOGW(TAG, "no content for URL %s", url);
+                    draw_bitmap(NOT_FOUND_ART);
                 }
             }
         }
