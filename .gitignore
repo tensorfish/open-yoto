@@ -19,6 +19,8 @@ site/
 firmware/build/
 firmware/sdkconfig
 firmware/sdkconfig.old
+firmware/dependencies.lock
+firmware/managed_components/
 
 # Firmware input & generated RE artifacts (regenerable via analysis/*.py)
 yoto-firmware.bin
