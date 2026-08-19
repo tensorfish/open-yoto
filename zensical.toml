@@ -17,7 +17,6 @@ nav = [
   { "How to Decompile" = "decompile.md" },
   { "The Firmware (open-yoto)" = "open-yoto-firmware.md" },
   { "Build Environment" = "build-setup.md" },
-  { "Custom Rust Firmware" = "custom-firmware.md" },
   { "Firmware Frameworks" = "firmware-options.md" },
   { "NFC / RFID (CR95HF)" = "subsystems/nfc.md" },
   { "SD Card & Storage" = "subsystems/storage.md" },
@@ -37,7 +36,6 @@ nav = [
       { "Power" = "ai/power.md" },
       { "Connectivity" = "ai/connectivity.md" },
       { "Boot" = "ai/boot.md" },
-      { "Custom Rust Firmware" = "ai/custom-firmware.md" },
       { "Firmware Frameworks" = "ai/firmware-options.md" },
   ]},
 ]

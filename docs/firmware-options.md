@@ -53,11 +53,10 @@ flowchart TD
 - **Want Rust specifically** → prefer `esp-idf-hal` (wraps ESP-IDF's mature
   drivers) over `esp-hal`, to avoid reimplementing FAT/codec/NFC/networking.
 
-## Two important corrections to earlier notes
+## Hardware notes
 
 1. **The Yoto V3 has PSRAM** — the board definition declares 8 MB QIO flash +
-   8 MB QIO PSRAM (ESP32-WROVER-E module). So the "no PSRAM" caveat in the
-   [Rust firmware](custom-firmware.md) notes is too strict for the V3.
+   8 MB QIO PSRAM (ESP32-WROVER-E module).
 2. **Adafruit already reversed this hardware** — the
    `Adafruit_CircuitPython_YotoPlayer` library exists. Their known gap: the
    `aw881xx`/`AW88194` speaker amp init sequence (speaker output unproven;
