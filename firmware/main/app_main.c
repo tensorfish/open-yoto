@@ -355,15 +355,7 @@ void app_main(void)
             continue;
         }
 
-        if (admin_is_active())
-        {
-            /* Web server runs in its own task; the code is already on screen. */
-            vTaskDelay(pdMS_TO_TICKS(200));
-            continue;
-        }
-
-        battery_periodic_check();
-
+        /* Poll NFC in BOTH modes — the magic card toggles admin on and off. */
         uint8_t uid_len = sizeof(uid);
         if (cr95hf_poll(uid, &uid_len, url, sizeof(url)))
         {
@@ -371,11 +363,12 @@ void app_main(void)
 
             if (strcmp(url, MAGIC_URL) == 0)
             {
-                /* Toggle admin mode. */
                 if (admin_is_active())
                 {
                     admin_stop();
-                    draw_bitmap(ADMIN_ART);
+                    ht16d35x_clear();
+                    ht16d35x_flush();
+                    ESP_LOGI(TAG, "admin mode off");
                 }
                 else
                 {
@@ -391,8 +384,9 @@ void app_main(void)
                     }
                 }
             }
-            else
+            else if (!admin_is_active())
             {
+                /* Content playback — normal mode only. */
                 int n = content_get_track_count(url);
                 if (n > 0)
                 {
@@ -418,6 +412,12 @@ void app_main(void)
                     ESP_LOGW(TAG, "no content for URL %s", url);
                 }
             }
+        }
+
+        /* Battery check only in normal mode (don't overwrite the admin code). */
+        if (!admin_is_active())
+        {
+            battery_periodic_check();
         }
 
         vTaskDelay(pdMS_TO_TICKS(100));
