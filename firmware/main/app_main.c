@@ -483,7 +483,13 @@ void app_main(void)
     ESP_ERROR_CHECK(cr95hf_init());
     ESP_ERROR_CHECK(encoder_init());
     encoder_register_cb(encoder_cb);
-    ESP_ERROR_CHECK(content_init());
+    /* SD card is optional at boot: without it (or with a missing/failed
+     * mount) the device still boots and shows the low-battery art; content
+     * lookups fail gracefully afterwards. */
+    if (content_init() != ESP_OK)
+    {
+        ESP_LOGW(TAG, "content unavailable (no SD card?); continuing");
+    }
     ESP_ERROR_CHECK(audio_init());
     audio_set_volume(s_volume);
     admin_set_code_callback(show_admin_code);
