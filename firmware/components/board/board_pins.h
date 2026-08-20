@@ -49,10 +49,19 @@
 /* (display SPI host is SPI2_HOST — used directly, not via this header) */
 
 /* ----------------------------------------------------------------- SDMMC -- */
-/* 1-bit SD card (hwconfig_05 "sd1"). 4-bit variant adds d1=4, d2=12, d3=13.   */
+/* SD card: rev #05 runs 1-bit (hwconfig_05 "sd1"); rev #04 runs 4-bit
+ * (hwconfig_04 "sd4") with d1=4, d2=12, d3=13. clk/cmd/d0 are common.        */
 #define PIN_SD_CLK                  GPIO_NUM_14
 #define PIN_SD_CMD                  GPIO_NUM_15
 #define PIN_SD_D0                   GPIO_NUM_2
+#ifdef CONFIG_BOARD_REV_04
+#define PIN_SD_D1                   GPIO_NUM_4
+#define PIN_SD_D2                   GPIO_NUM_12
+#define PIN_SD_D3                   GPIO_NUM_13
+#define BOARD_SD_WIDTH              4
+#else
+#define BOARD_SD_WIDTH              1
+#endif
 #define SD_SLOT_CONFIG              SDMMC_SLOT_CONFIG_DEFAULT()
 
 /* ------------------------------------------------------------------ NFC -- */
@@ -81,10 +90,17 @@
 
 /* -------------------------------------------------------------- buttons --- */
 /* Rotary encoders (quadrature on ESP32 GPIO) + push buttons (via IO expander) */
+#ifdef CONFIG_BOARD_REV_04
+#define PIN_ENC0_A                  GPIO_NUM_35
+#define PIN_ENC0_B                  GPIO_NUM_39
+#define PIN_ENC1_A                  GPIO_NUM_27
+#define PIN_ENC1_B                  GPIO_NUM_36
+#else
 #define PIN_ENC0_A                  GPIO_NUM_26   /* shared with SPI MISO */
 #define PIN_ENC0_B                  GPIO_NUM_13
 #define PIN_ENC1_A                  GPIO_NUM_27
 #define PIN_ENC1_B                  GPIO_NUM_4
+#endif
 
 /* ------------------------------------------------------- IO expander ---- */
 /*
@@ -102,17 +118,22 @@
 #define PIN_IOX_INT                 GPIO_NUM_34
 
 /* expander 0 = ports 0..1 */
-#ifdef CONFIG_BOARD_REV_04
-/* GC9306 TFT control pins (rev #04 only; #05 uses the HT16D35x LED matrix). */
+/* GC9306 TFT control pins (rev #04 hardware; defined unconditionally so the
+ * gc9306 component compiles on both revisions — rev #05 doesn't use them). */
 #define IOX_TFT_CS                  IOX_PIN(0, 0, 0)   /* IOX.0.0 */
 #define IOX_TFT_DC                  IOX_PIN(0, 0, 1)   /* IOX.0.1 */
 #define IOX_TFT_RESET               IOX_PIN(0, 0, 2)   /* IOX.0.2 */
-#endif
 #define IOX_BTN_ENC0_PUSH           IOX_PIN(0, 0, 5)   /* IOX.0.5 */
 #define IOX_BTN_ENC1_PUSH           IOX_PIN(0, 0, 4)   /* IOX.0.4 */
+#ifdef CONFIG_BOARD_REV_04
+#define IOX_BAT_ALERT               IOX_PIN(0, 1, 0)   /* IOX.1.0 */
+#define IOX_CHG_STAT                IOX_PIN(0, 1, 7)   /* IOX.1.7 */
+#define IOX_PLUG_STAT               IOX_PIN(0, 1, 5)   /* IOX.1.5 */
+#else
 #define IOX_BAT_ALERT               IOX_PIN(0, 0, 6)   /* IOX.0.6 */
-#define IOX_BTN_POWER               IOX_PIN(0, 1, 3)   /* IOX.1.3 */
 #define IOX_CHG_STAT                IOX_PIN(0, 1, 4)   /* IOX.1.4 */
+#endif
+#define IOX_BTN_POWER               IOX_PIN(0, 1, 3)   /* IOX.1.3 */
 #define IOX_AUDIO_HPDETECT          IOX_PIN(0, 1, 1)   /* IOX.1.1 */
 
 /* expander 1 = ports 2..3 */
@@ -120,7 +141,11 @@
 #define IOX_DISP_CSN1               IOX_PIN(1, 0, 1)   /* IOX.2.1 */
 #define IOX_DISP_CSN2               IOX_PIN(1, 0, 2)   /* IOX.2.2 */
 #define IOX_DISP_CSN3               IOX_PIN(1, 0, 3)   /* IOX.2.3 */
+#ifdef CONFIG_BOARD_REV_04
+#define IOX_AUDIO_PACTRL            IOX_PIN(0, 0, 6)   /* IOX.0.6 */
+#else
 #define IOX_AUDIO_PACTRL            IOX_PIN(1, 0, 4)   /* IOX.2.4 */
+#endif
 #define IOX_POWER_PWREN             IOX_PIN(1, 0, 5)   /* IOX.2.5 */
 #define IOX_POWER_VINHOLD           IOX_PIN(1, 1, 1)   /* IOX.3.1 */
 #define IOX_POWER_VOUTEN            IOX_PIN(1, 1, 3)   /* IOX.3.3 */

@@ -18,7 +18,7 @@
 #include "board_pins.h"
 #include "iox.h"
 #include "battery.h"
-#include "ht16d35x.h"
+#include "display.h"
 #include "cr95hf.h"
 #include "encoder.h"
 #include "content.h"
@@ -74,7 +74,7 @@ static const uint8_t DIGIT_FONT[10][3] = {
 
 /* ------------------------------------------------------------ display --- */
 /*
- * Draw a 16x16 one-bit bitmap into the HT16D35x framebuffer.
+ * Draw a 16x16 one-bit bitmap into the display framebuffer.
  *
  * @param[in] bmp 32-byte bitmap (2 bytes per row; MSB of each byte is the
  *                leftmost pixel of that byte).
@@ -86,11 +86,11 @@ static void draw_bitmap(const uint8_t bmp[32])
         uint16_t row = ((uint16_t)bmp[y * 2] << 8) | bmp[y * 2 + 1];
         for (int x = 0; x < 16; x++)
         {
-            ht16d35x_set_pixel(x, y, (row & 0x8000) != 0);
+            display_set_pixel(x, y, (row & 0x8000) != 0);
             row <<= 1;
         }
     }
-    ht16d35x_flush();
+    display_flush();
 }
 
 /*
@@ -110,7 +110,7 @@ static void draw_digit(int x, int digit)
         uint8_t bits = DIGIT_FONT[digit][col];
         for (int row = 0; row < 5; row++)
         {
-            ht16d35x_set_pixel(x + col, 1 + row, (bits & 0x01) != 0);
+            display_set_pixel(x + col, 1 + row, (bits & 0x01) != 0);
             bits >>= 1;
         }
     }
@@ -123,7 +123,7 @@ static void draw_digit(int x, int digit)
  */
 static void draw_code(uint16_t code)
 {
-    ht16d35x_clear();
+    display_clear();
     int digits[4] = {
         (code / 1000) % 10,
         (code / 100) % 10,
@@ -134,7 +134,7 @@ static void draw_code(uint16_t code)
     {
         draw_digit(1 + i * 4, digits[i]);
     }
-    ht16d35x_flush();
+    display_flush();
 }
 
 /*
@@ -196,8 +196,8 @@ static void power_toggle(void)
         {
             admin_stop();
         }
-        ht16d35x_clear();
-        ht16d35x_flush();
+        display_clear();
+        display_flush();
         ESP_LOGI(TAG, "powered off");
     }
     else
@@ -240,8 +240,8 @@ static void skip_track(int delta)
         }
         else
         {
-            ht16d35x_clear();
-            ht16d35x_flush();
+            display_clear();
+            display_flush();
         }
     }
     state_unlock();
@@ -393,18 +393,18 @@ static void draw_battery_status(int soc, bool charging)
     };
     size_t i;
 
-    ht16d35x_clear();
+    display_clear();
 
     /* Horizontal bar: outline x 0..15, y 11..14; fill left-to-right. */
     for (int x = 0; x < 16; x++)
     {
-        ht16d35x_set_pixel(x, 11, true);
-        ht16d35x_set_pixel(x, 14, true);
+        display_set_pixel(x, 11, true);
+        display_set_pixel(x, 14, true);
     }
     for (int y = 11; y <= 14; y++)
     {
-        ht16d35x_set_pixel(0, y, true);
-        ht16d35x_set_pixel(15, y, true);
+        display_set_pixel(0, y, true);
+        display_set_pixel(15, y, true);
     }
     if (soc > 0)
     {
@@ -413,7 +413,7 @@ static void draw_battery_status(int soc, bool charging)
         {
             for (int y = 12; y <= 13; y++)
             {
-                ht16d35x_set_pixel(x, y, true);
+                display_set_pixel(x, y, true);
             }
         }
     }
@@ -422,11 +422,11 @@ static void draw_battery_status(int soc, bool charging)
     {
         for (i = 0; i < sizeof(bolt) / sizeof(bolt[0]); i++)
         {
-            ht16d35x_set_pixel(bolt[i][0], bolt[i][1], true);
+            display_set_pixel(bolt[i][0], bolt[i][1], true);
         }
     }
 
-    ht16d35x_flush();
+    display_flush();
 }
 
 
@@ -479,7 +479,7 @@ void app_main(void)
     /* I2C bus + IO expanders first. */
     ESP_ERROR_CHECK(iox_init());
     ESP_ERROR_CHECK(battery_init());
-    ESP_ERROR_CHECK(ht16d35x_init());
+    ESP_ERROR_CHECK(display_init());
     ESP_ERROR_CHECK(cr95hf_init());
     ESP_ERROR_CHECK(encoder_init());
     encoder_register_cb(encoder_cb);
@@ -552,8 +552,8 @@ void app_main(void)
                     if (admin_is_active())
                     {
                         admin_stop();
-                        ht16d35x_clear();
-                        ht16d35x_flush();
+                        display_clear();
+                        display_flush();
                         ESP_LOGI(TAG, "admin mode off");
                     }
                     else
@@ -605,8 +605,8 @@ void app_main(void)
                             }
                             else
                             {
-                                ht16d35x_clear();
-                                ht16d35x_flush();
+                                display_clear();
+                                display_flush();
                             }
                             audio_play(sound_path);
                         }

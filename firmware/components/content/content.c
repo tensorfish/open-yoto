@@ -1,8 +1,9 @@
 /*
  * content.c — SD-card content store: mapping.json index + media directory.
  *
- * Mounts a FatFS-formatted SD card on the SDMMC peripheral in 1-bit mode at
- * /sdcard, keeps a mapping.json index in memory as a cJSON tree, and persists
+ * Mounts a FatFS-formatted SD card on the SDMMC peripheral at /sdcard (1-bit
+ * bus on rev #05, 4-bit bus on rev #04 — see board_pins.h), keeps a
+ * mapping.json index in memory as a cJSON tree, and persists
  * every mutation back to the card. Lookups return the relative media paths
  * recorded in the mapping ("media/<file>"); callers join them onto
  * CONTENT_MOUNT_POINT to open the real file.
@@ -211,7 +212,15 @@ esp_err_t content_init(void)
     slot_config.clk = PIN_SD_CLK;
     slot_config.cmd = PIN_SD_CMD;
     slot_config.d0 = PIN_SD_D0;
-    slot_config.width = 1;
+#ifdef CONFIG_BOARD_REV_04
+    /* Rev #04 (hwconfig_04 "sd4"): 4-bit bus; d1/d2/d3 from board_pins.h. */
+    slot_config.d1 = PIN_SD_D1;
+    slot_config.d2 = PIN_SD_D2;
+    slot_config.d3 = PIN_SD_D3;
+    slot_config.width = BOARD_SD_WIDTH;
+#else
+    slot_config.width = BOARD_SD_WIDTH;
+#endif
     slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
     mount_config.format_if_mount_failed = false;
