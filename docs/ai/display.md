@@ -218,17 +218,28 @@ names.
 | `0x40109104` | backlight PWM init + set-brightness wrapper (logs `ht1d35x_hal`) |
 
 ### GC9306 TFT driver (tag `@DISP_GC9306` @ `0x3f41ce0b`)
-| Address | Likely role |
+
+Roles below were **verified by disassembly** with the Espressif Xtensa objdump
+(linear decode re-anchored at each function's `entry`); several differ from
+the earlier Ghidra guesses. The register init + pin protocol recovered from
+these functions is implemented in `firmware/components/gc9306/gc9306.c`.
+
+| Address | Verified role (objdump) |
 |---|---|
-| `0x40108380` | `gc9306_spi_init` — logs "Failed to initialised spi" (2964) |
-| `0x401083ec` | `gc9306_display_on` (sends 0x29) |
-| `0x40108454` | GC9306 command helper |
-| `0x4010854c` | `gc9306_display_init` — main init; allocates 2× frame buffers via `calloc(0x2d0,0x808)`; references `display_off/draw_rect/display_init/display_on/power_reset` |
-| `0x40108674` | GC9306 command helper |
-| `0x401086e0` | `gc9306_display_power_reset` / `_gc9306_reset` (references `_gc9306_reset` + `gc9306_upscale_draw_pixels`) |
-| `0x40108718` | GC9306 command helper (display-off path) |
-| `0x4010879c` | `gc9306_draw_rect` |
-| `0x401088e8` | `gc9306_upscale_draw_pixels` (large; upscales 16×16 → TFT) |
+| `0x40108308` / `0x4010832c` | SPI bus acquire / release (called around every draw/init op) |
+| `0x4010834c` | low-level SPI byte/buffer writer (builds the transaction struct; `a5` selects the transmit variant `0x40170d14`/`0x40170bdc`) |
+| `0x40108380` | plain byte write, no pin change (data write with current DC state; checks the DC pin is configured) — *not* `gc9306_spi_init` |
+| `0x401083ec` | assert DC low (`dev[12]=0`) then write byte — **command writer** — *not* `gc9306_display_on` |
+| `0x40108454` | set DC high (`dev[12]=1`) then write 4 bytes — **window/data writer** |
+| `0x401084d0` | pixel writer: expand a 3-byte colour ×N then SPI-write `N*3` bytes (`addx2 a12, a5, a5`); confirms **3 bytes/pixel** |
+| `0x4010854c` | `gc9306_display_init` — module init: wires the pin struct (`dev[12]=dc, dev[16]=cs, dev[20]=reset`) and allocates 2× frame buffers via `calloc(0x2d0,0x808)` |
+| `0x40108674` | display-off path: `0x28` (dispoff) + `0x10` (sleep in) with CS toggling |
+| `~0x4010871c` | display-on path: `0x11` (sleep out), delay 120 ms, `0x53`+`0x00`, `0x29` (display on) |
+| `0x4010879c` | `gc9306_draw_rect` — CASET/RASET/RAMWR with CS held across the rect, window data at DC high, pixel chunks of 1364 bytes (`0x554`) |
+| `0x401088e8` | `gc9306_upscale_draw_pixels` (large; 16×16 RGBA → panel) |
+| `0x40108946` | **register init sequence** — the 21-group `0xFE 0xEF` … `0xF2` command stream (replicated in `gc9306.c`) |
+| `0x401090c8` | backlight brightness: clamp 0–100, `duty = pct << 7`, LEDC |
+| `0x40109104` | backlight LEDC init (8-bit resolution path; string `GC9306_BACKLIGHT`) |
 
 ### Nightlight / ambient LED (tags `NIGHT_LIGHT` @ `0x3f420668`, `LEDS` @ `0x3f411e14`)
 | Address | Likely role |

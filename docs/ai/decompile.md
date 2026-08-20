@@ -39,17 +39,24 @@ dependencies = [
 # one-time setup (creates .venv/ and uv.lock; both already exist)
 uv sync
 
-# Ghidra is installed via Homebrew and located by pyghidra via this env var:
+# Ghidra (optional, for C pseudocode only) is installed via Homebrew and
+# located by pyghidra via this env var:
 export GHIDRA_INSTALL_DIR=/opt/homebrew/Cellar/ghidra/12.0.4/libexec
 ```
 
-Third-party reverse-engineering tools (GUI-only, not in `pyproject.toml`):
+Disassembly tooling (no extra install — ships with the ESP-IDF toolchain):
+
+| Tool | Role |
+|------|------|
+| `xtensa-esp32-elf-objdump` | **primary disassembler**; raw segments at real vaddrs via `--adjust-vma`; literal values printed inline make `l32r` string xrefs work (see 4c) |
+
+Third-party GUI tools (optional, not in `pyproject.toml`):
 
 | Tool | Plugin | Role |
 |------|--------|------|
 | Binary Ninja | `bnesp32` (**ESPFirmware** BinaryView) | auto-detects chip, creates segments at real addresses, loads ~2000 ESP32 ROM symbols |
 | Binary Ninja | `binja-xtensa` (Xtensa arch) | decompilation; BN Personal has no built-in Xtensa |
-| Ghidra 12.0.4 | built-in `Xtensa:LE:32:default` SLEIGH | primary decompile engine (much faster than BN's Python Xtensa) |
+| Ghidra 12.0.4 | built-in `Xtensa:LE:32:default` SLEIGH | optional C-level decompilation (much faster than BN's Python Xtensa) |
 
 ## Pipeline
 
@@ -63,10 +70,12 @@ graph TD
   E --> G[output/strings.txt<br/>25,732 unique]
   F --> H[output/hwconfig_00..05_*.json]
   F --> I[output/pinmap.json]
-  C --> J[bn_load.py / ESPFirmware]
-  J --> K[output/yoto_factory.bndb]
-  C --> L[ghidra_dump.py + ghidra_decompile.py / PyGhidra]
-  L --> M[output/decompiled/*.c<br/>output/decompiled_manifest.json]
+  C --> J[xtensa-esp32-elf-objdump<br/>segments at real vaddrs]
+  J --> K[/tmp/irom.dis<br/>linear disassembly + l32r xrefs]
+  C --> L[bn_load.py / ESPFirmware (optional)]
+  L --> M[output/yoto_factory.bndb]
+  C --> N[ghidra_dump.py + ghidra_decompile.py / PyGhidra (optional)]
+  N --> O[output/decompiled/*.c<br/>output/decompiled_manifest.json]
 ```
 
 ## Step 1 — Partition & app-image extraction
@@ -153,10 +162,72 @@ Binary Ninja's value: it loads ~2,000 ROM symbols (`< 0x40070000`) that Ghidra's
 raw-binary load does not, giving real names to ROM helper calls. Ghidra remains
 the primary decompiler (speed + SLEIGH Xtensa quality).
 
-## Step 4 — Ghidra / PyGhidra: memory-map + dump
+## Step 4 — Xtensa disassembly with the Espressif objdump (primary)
 
-Two Ghidra entry points exist. Both must **create the segments at their real
-addresses** (a flat binary load defaults to image base 0, which is wrong).
+The ESP-IDF toolchain ships an Xtensa-capable objdump; it is the default
+disassembler for this repo — **no Ghidra or Binary Ninja needed**. Location:
+
+```bash
+# on PATH after sourcing ESP-IDF:
+source $IDF_PATH/export.sh
+which xtensa-esp32-elf-objdump
+# or directly:
+ls ~/.espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/xtensa-esp32-elf-objdump
+```
+
+### 4a. Disassemble a whole segment
+
+Slice the code segment out of `output/factory.bin` at its file offset and
+disassemble with `--adjust-vma` set to the segment's load address (otherwise
+objdump starts at address 0):
+
+```bash
+# IROM (flash code): vaddr 0x400D0020, file offset 0xB0020, size 0x18F0CC
+python3 -c "d=open('output/factory.bin','rb').read(); \
+  open('/tmp/irom.bin','wb').write(d[0xB0020:0xB0020+0x18F0CC])"
+xtensa-esp32-elf-objdump -D -b binary -m xtensa --adjust-vma=0x400D0020 \
+  /tmp/irom.bin > /tmp/irom.dis
+# 625k lines; IRAM/RTC_IRAM segments likewise (see the segment table above)
+```
+
+### 4b. Disassemble one function cleanly
+
+Linear decode **drifts at embedded literal pools** (literals are decoded as
+instructions — expect garbage like `mul16u`/`orb`/`ill` between functions).
+Always re-anchor a window at the function's own address:
+
+```bash
+# function at vaddr 0x4010854c -> file offset 0xB0020 + (0x4010854c - 0x400D0020)
+python3 -c "d=open('output/factory.bin','rb').read(); \
+  open('/tmp/fn.bin','wb').write(d[0xE854C:0xE854C+0x300])"
+xtensa-esp32-elf-objdump -D -b binary -m xtensa --adjust-vma=0x4010854c \
+  /tmp/fn.bin
+```
+
+### 4c. Xtensa reading notes (verified against this image)
+
+- **Functions open with `entry a1, <frame>`**; a bare `retw.n` ends one. A
+  function boundary that does not start with `entry` in the linear decode is
+  a misaligned literal pool — re-anchor.
+- **Windowed ABI**: `call8` shifts the register window, so the caller's
+  `a10/a11/...` become the callee's `a2/a3/...`. A call's arguments are the
+  `mov`/`movi` instructions *immediately before* the `call8`.
+- **`l32r aN, <lit_addr> (<value>)`**: objdump prints the loaded 32-bit value
+  in parentheses. String/data references therefore show up as
+  `l32r aN, ... (0x3f4xxxxx)` — `grep '(0x3f4' irom.dis` is a working
+  **string xref** (this is exactly what Ghidra's Xtensa cannot do — see the
+  L32R caveat below).
+- **`call8` targets are 4-byte aligned**; a target that looks misaligned in
+  the linear decode is a decode-drift artifact, not a real call.
+- Calls with literal constants (e.g. `movi a11, 72` before `call8`) expose
+  command/data bytes directly — the GC9306 init table in
+  `firmware/components/gc9306/gc9306.c` was recovered this way.
+
+## Step 5 — Ghidra / PyGhidra: memory-map + dump (optional)
+
+Ghidra is only needed for C-level pseudocode. Both entry points must
+**create the segments at their real addresses** (a flat binary load defaults
+to image base 0, which is wrong).
 
 ### 4a. Headless (Java scripts)
 
@@ -214,7 +285,7 @@ open_program(
 
 (`analysis/ghidra_dump.py:46-73`, `analysis/ghidra_decompile.py:51-79`.)
 
-## Step 5 — Strings & hardware config
+## Step 6 — Strings & hardware config
 
 ```bash
 uv run python analysis/extract_strings.py     # -> output/strings.txt, strings_categorized.json
@@ -239,17 +310,23 @@ revisions (recovered order, not proven chronology) are:
 
 Full pin tables (GPIO/ADC/IOX, per revision) are in [Hardware & Ports](../hardware.md); this page only covers the tooling.
 
-## The L32R caveat (critical)
+## The L32R caveat (critical — and how to work around it)
 
-Ghidra's generic Xtensa SLEIGH does **not** resolve **`L32R` literal-pool
-references**. On ESP32, immediate 32-bit constants (including string/data
-pointers) are loaded via `L32R` from a literal pool embedded in the code
-segment; without resolving those, Ghidra cannot connect a string to the
-function that references it.
+On ESP32, immediate 32-bit constants (including string/data pointers) are
+loaded via **`L32R`** from a literal pool embedded in the code segment.
 
-Consequence, empirically: the string-xref pass in `ghidra_decompile.py` found
-exactly **one** keyword string with a reference, and that reference is a
-data→data pointer, not code→data:
+**Workaround (preferred): use the Espressif objdump, not Ghidra.** objdump
+prints the literal's *value* inline — `l32r a13, 0x400d4f04 (0x3f41ce65)` —
+so `grep '(0x3f4'` on the disassembly finds every code→string reference.
+This is how driver functions are located: find the string in DROM
+(vaddr = `0x3F400000 + file_offset` within segment 0), grep the value, and
+the matching `l32r` sits in the referencing function.
+
+Ghidra's generic Xtensa SLEIGH does **not** resolve L32R literal-pool
+references, so its string→function xrefs are unreliable. Consequence,
+empirically: the string-xref pass in `ghidra_decompile.py` found exactly
+**one** keyword string with a reference, and that reference is a data→data
+pointer, not code→data:
 
 ```json
 // output/string_xrefs.json (entire contents)

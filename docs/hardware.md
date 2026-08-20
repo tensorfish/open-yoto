@@ -38,6 +38,26 @@ matrix), two NFC transports (SPI vs UART), two SD transports (SPI vs SDMMC
 1/4-bit), and three charging stacks (USB-C-only, +Qi, and the earliest ADC
 battery read).
 
+### IOX factory direction/data (authoritative, from `output/hwconfig_*.json`)
+
+Each config carries the stock firmware's IOX port defaults — **use these
+exactly** when porting a revision; inferred values are wrong. Notably for
+**#04** (single IOX, `ET6416`):
+
+```json
+"iox": { "type": "ET6416",
+         "p0Dir": "0xB0", "p1Dir": "0xAF",
+         "p0Data": "0x30", "p1Data": "0xEF" }
+```
+
+- **`levelconvertor` (IOX.0.3) is active-low**: `p0Data` bit 3 = 0 enables
+  the display level shifter. Driving it high silently blocks the display
+  SPI/backlight domain while everything else (I²C, audio, logs) keeps
+  working — the classic "perfect logs, dead display" failure.
+- `pwren` (IOX.1.4) is an output driven LOW; `vinhold` (IOX.1.6) an output
+  driven HIGH; `pactrl` (IOX.0.6) an output driven LOW.
+- TFT `cs`/`dc`/`reset` (IOX.0.0–0.2) default LOW.
+
 ## Pin-mapping notation
 
 - `GPIO.n` — ESP32 general-purpose I/O pad `n`.

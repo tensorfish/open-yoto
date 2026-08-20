@@ -60,7 +60,12 @@ The build emits `build/bootloader/bootloader.bin` (flashed at `0x1000`),
 A minimal bring-up firmware (`main/test_main.c`) that skips NFC / SD / encoder
 and, on boot, just:
 
-- displays a border + cross on the 16×16 LED panel, and
+- **rev #05** (default): displays a border + cross on the 16×16 LED panel;
+- **rev #04** (`CONFIG_BOARD_REV_04=y`): PWM the TFT backlight (GPIO26 via
+  LEDC, **40 kHz** — the stock frequency from the factory image; the panel's
+  LED rail is AC-coupled, so a plain GPIO high passes nothing and a lower
+  PWM frequency is attenuated, leaving the display dim enough that colours
+  wash out) and draw a green/blue test pattern on the GC9306 TFT;
 - emits a repeating **1 kHz** beep on the headphone DAC (`audio_play_tone()`).
 
 This proves power, I²C, SPI/display, and I²S/ES8156 audio are alive.
@@ -71,6 +76,24 @@ from `main/Kconfig.projbuild`), or directly:
 ```bash
 echo 'CONFIG_APP_TEST_MODE=y' >> sdkconfig && idf.py build
 ```
+
+Rev #04 bring-up notes (verified against a physical unit):
+
+- The GC9306 driver (`components/gc9306/`) replicates the stock factory
+  image's register init byte-for-byte (extracted from `output/factory.bin`,
+  see `docs/ai/decompile.md` for the objdump workflow) — 21 command groups
+  opening with the GalaxyCore inter-register enable `0xFE 0xEF`, COLMOD
+  `0x06` = 18-bit RGB666, 3 bytes/pixel.
+- The IOX must use the authoritative `hwconfig_04` defaults
+  (`p0Dir=0xB0 p1Dir=0xAF p0Data=0x30 p1Data=0xEF`): the **level convertor
+  (IOX.0.3) enable is active-low**. Driving it high — the #05-style default —
+  silently blocks the whole display SPI/backlight domain while everything
+  else (I²C, audio, logs) keeps working.
+- **Panel colour transform (resolved)**: the GC9306 on this board renders
+  the 18-bit stream as `displayed = (XNOR(R,G), G, G XOR B)` per 6-bit
+  channel (recovered from two 4-stripe tests, 8/8 data points). The driver
+  sends the inverse `(XNOR(Rd,Gd), Gd, Gd XOR Bd)` so requested colours
+  display correctly (verified: red/green/blue/white stripes).
 
 Back to the normal firmware:
 
@@ -89,11 +112,12 @@ firmware/
 │   ├── test_main.c           # boot test firmware (display + beep)
 │   ├── Kconfig.projbuild     # CONFIG_APP_TEST_MODE switch
 │   └── CMakeLists.txt
-└── components/
+    ├── components/
     ├── board/board_pins.h    # THE pin map + I2C addresses (authoritative)
-    ├── iox/                  # PI4IOE5V6416 IO expander (buttons, display CS, power/amp ctrl)
+    ├── iox/                  # IO expander (buttons, display CS, power/amp ctrl)
     ├── battery/              # CW2215B fuel gauge + SGM41513 charger + ADC
-    ├── display/              # HT16D35x 16x16 LED matrix (SPI + IOX CS)
+    ├── display/              # HT16D35x 16x16 LED matrix (SPI + IOX CS)   [rev #05]
+    ├── gc9306/               # GC9306 TFT driver (stock init + 18-bit)    [rev #04]
     ├── nfc/                  # ST CR95HF over UART
     └── audio/                # I2S + ES8156 / aw881xx codec
 ```
@@ -102,16 +126,24 @@ firmware/
 
 **Implemented** (real bus + peripheral setup, compiles against ESP-IDF v5):
 
-- I2C master (SDA=21, SCL=25) + both IO expanders with the factory direction/data.
+- I2C master (SDA=21, SCL=25) + IO expander(s) with the factory direction/data
+  (rev #04: authoritative `hwconfig_04` values — note the active-low level
+  convertor on IOX.0.3, see the boot-test notes below).
 - ADC1 (VBAT=GPIO39, light=GPIO36, IR-temp=GPIO35).
-- SPI (MOSI=22, MISO=26, SCLK=23) + HT16D35x device handle.
+- SPI (MOSI=22, MISO=26, SCLK=23) + HT16D35x device handle [rev #05].
+- **GC9306 TFT driver [rev #04]**: register init replicated from the stock
+  factory image (21 groups, `0xFE 0xEF` inter-register enable, COLMOD 0x06 =
+  18-bit RGB666), CASET/RASET/RAMWR drawing with DC-high data and CS held per
+  rect, LEDC backlight on GPIO26 (40 kHz — the rail is AC-coupled), and the
+  empirically-derived colour pre-transform (see boot-test notes). Verified:
+  red/green/blue/white render correctly.
 - UART (CR95HF, TX=33, RX=32, 57600 8-N-1).
 - I2S standard TX (mclk=0, bclk=5, lrclk=18, dout=19, 44100 Hz 16-bit).
 
 **TODO** (register-level detail, marked in the `.c` files with datasheet refs):
 
 - CW2215B fuel-gauge register reads (VCELL/SOC).
-- HT16D35x frame format + 6-bit-gray fan-out.
+- HT16D35x frame format + 6-bit-gray fan-out [rev #05].
 - CR95HF command sequence (Idn/ProtocolSelect/SendRecv + ISO14443-3A activation).
 - ES8156 + aw881xx codec register init (the aw881xx init was not cracked by
   Adafruit either — speaker path is at-risk; headphone via ES8156 is the known-good path).

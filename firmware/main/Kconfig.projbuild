@@ -7,4 +7,21 @@ menu "open-yoto Application"
             Build a minimal test firmware that displays an image and emits a
             repeating beep on boot. Intended for hardware bring-up only.
 
+    config APP_SCAN_MODE
+        bool "Build the I2C bus scanner firmware"
+        default n
+        help
+            Build a bring-up firmware that enumerates the I2C bus (SDA=21,
+            SCL=25) and logs every responding 7-bit address, then idles.
+            Use it to identify the unit's hardware revision before porting
+            the full firmware.
+
+    config BOARD_REV_04
+        bool "Target hardware revision #04 (TFT, single IOX)"
+        default n
+        help
+            Select the older #04 board: GC9306 TFT, single IO expander
+            (0x20), ES8156 at 0x08, SDMMC 4-bit. Default (n) targets rev #05:
+            HT16D35x LED matrix, dual IOX (0x20/0x21), ES8156 at 0x09.
+
 endmenu

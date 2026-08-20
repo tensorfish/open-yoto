@@ -44,8 +44,19 @@ static esp_err_t iox_read_reg(uint8_t exp, uint8_t reg, uint8_t *val)
  * 8-bit port, recovered from the stock firmware's embedded config
  * (hwconfig_05: p0Dir=0xFE p1Dir=0xFF p2Dir=0x00 p3Dir=0xD4,
  *                p0Data=0xFF p1Data=0xFF p2Data=0x5F p3Data=0xDF). */
+#ifdef CONFIG_BOARD_REV_04
+/* Rev #04 (single IOX, ET6416): authoritative defaults from hwconfig_04 —
+ * p0Dir=0xB0 p1Dir=0xAF p0Data=0x30 p1Data=0xEF. Note the level convertor
+ * (IOX.0.3) and TFT cs/dc/reset (IOX.0.0-0.2) default LOW, pwren (IOX.1.4)
+ * is an output driven LOW, and pactrl (IOX.0.6) is an output driven LOW.
+ * The level-convertor enable is active-low: driving it high (the #05-style
+ * 0xFF default) blocks the display SPI/backlight domain. */
+static const uint8_t IOX0_DIR[2] = { 0xB0, 0xAF };
+static const uint8_t IOX0_OUT[2] = { 0x30, 0xEF };
+#else
 static const uint8_t IOX0_DIR[2] = { 0xFE, 0xFF };
 static const uint8_t IOX0_OUT[2] = { 0xFF, 0xFF };
+#endif
 static const uint8_t IOX1_DIR[2] = { 0x00, 0xD4 };
 static const uint8_t IOX1_OUT[2] = { 0x5F, 0xDF };
 

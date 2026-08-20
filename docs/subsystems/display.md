@@ -46,6 +46,38 @@ image — a firmware typo for `ht16d35x_hal`).
 The log tag is `@DISP_GC9306` (the `@` is part of the extracted string; the
 overlay tag is likewise `@UI_OVERLAY`).
 
+### Bring-up implementation (`firmware/components/gc9306/`, verified on hardware)
+
+The driver replicates the stock factory image's GC9306 driver exactly
+(function roles recovered with the Espressif objdump — see
+[ai/decompile.md](../ai/decompile.md)):
+
+- **Register init** — 21 command groups, 64 bytes, opening with the
+  GalaxyCore inter-register enable pair `0xFE 0xEF`, then vendor registers;
+  `COLMOD 0x06` = 18-bit RGB666. Init parameters are clocked at **DC low**
+  (inter-register mode), CS asserted per group — matching the stock driver's
+  byte stream (init function at `0x40108946`).
+- **Drawing** — CASET/RASET/RAMWR (`0x2A/0x2B/0x2C`) with parameter/pixel
+  data at **DC high**, CS held across the whole rect (stock `draw_rect` at
+  `0x4010879c`); 3 bytes/pixel RGB666, chunked (stock pixel writer
+  `0x401084d0`).
+- **Backlight** — GPIO26 via **LEDC PWM at 40 kHz** (stock frequency literal
+  `0x9C40` @ `0x400d4fd4`; brightness `duty = pct << 7` per the stock setter
+  `0x401090c8`). A plain GPIO high does **not** light it — the panel LED
+  rail is AC-coupled — and a lower PWM frequency is attenuated by the
+  coupling cap, leaving the display so dim that colours wash out (green
+  reads cyan, blue reads purple at 5 kHz; correct at 40 kHz full duty).
+- **Level convertor** — the IOX default `p0Data=0x30` drives IOX.0.3
+  (`levelconvertor`) **low**; the enable is **active-low**. Driving it high
+  (the #05-style default) silently blocks the display SPI/backlight domain.
+- **Colour transform (resolved)** — the GC9306 on this board renders the
+  18-bit stream as `displayed = (XNOR(R,G), G, G XOR B)` per 6-bit channel.
+  Recovered empirically: two 4-stripe tests (red/green/blue/white →
+  black/cyan/magenta/yellow, then the transformed sends →
+  blue/white/red/green) gave 8 data points that all fit the model. The
+  driver sends the inverse `(XNOR(Rd,Gd), Gd, Gd XOR Bd)`; a
+  red/green/blue/white stripe pattern verifies all channels.
+
 ## Rendering model
 
 The display renders **icons** (16×16 sprites) with optional **overlays**, plus

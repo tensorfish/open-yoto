@@ -5,8 +5,10 @@ icon: lucide/wrench
 # Methodology
 
 The reverse engineering was driven by a Python toolchain managed with
-[`uv`](https://docs.astral.sh/uv/), plus Binary Ninja (with the ESP32/Xtensa
-plugins) for decompilation.
+[`uv`](https://docs.astral.sh/uv/). Xtensa disassembly uses the **Espressif
+ESP-IDF toolchain's `xtensa-esp32-elf-objdump`** (no GUI, no Ghidra);
+Binary Ninja (ESPFirmware + Xtensa plugins) and Ghidra/PyGhidra are optional
+GUI extras.
 
 ## Pipeline
 
@@ -15,12 +17,14 @@ graph TD
   A[yoto-firmware.bin<br/>8 MiB flash] --> B[analysis/extract_app.py]
   B --> C[output/factory.bin<br/>app image]
   B --> D[output/layout.json<br/>partitions + segments]
-  C --> E[Binary Ninja<br/>ESPFirmware + Xtensa]
-  C --> F[analysis/extract_strings.py]
-  F --> G[output/strings.txt<br/>25,732 unique]
-  C --> H[analysis/extract_hwconfig.py]
-  H --> I[output/hwconfig_*.json<br/>6 hardware configs]
-  E --> J[output/yoto_factory.bndb<br/>analyzed database]
+  C --> E[analysis/extract_strings.py]
+  E --> F[output/strings.txt<br/>25,732 unique]
+  C --> G[analysis/extract_hwconfig.py]
+  G --> H[output/hwconfig_*.json<br/>6 hardware configs]
+  C --> I[xtensa-esp32-elf-objdump<br/>raw segment disassembly]
+  I --> J[code + literal-pool analysis]
+  C --> K[optional: Binary Ninja / Ghidra]
+  K --> L[output/yoto_factory.bndb / decompiled/*.c]
 ```
 
 ## Steps
@@ -36,26 +40,41 @@ graph TD
    extracted to `output/factory.bin` (an ESP32 app image whose header is at
    offset 0). The 7 segments were parsed (load address + size).
 
-4. **Correct Binary Ninja load** — the app image is opened with the
-   **`ESPFirmware`** BinaryView type (community plugin `bnesp32`), which
-   auto-detects the chip, creates segments at their real addresses
-   (`0x3F400020` DROM, `0x40080000` IRAM, `0x400D0020` IROM, `0x3FFBDB60`
-   DRAM), and loads ~2,000 ESP32 ROM symbols. Decompilation uses the
-   third-party **Xtensa** architecture plugin (`binja-xtensa`), since Binary
-   Ninja Personal has no built-in Xtensa support.
+4. **Xtensa disassembly (Espressif objdump — primary)** — no Ghidra
+   required. The ESP-IDF toolchain ships `xtensa-esp32-elf-objdump`
+   (`~/.espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/`, or on `PATH`
+   after `source $IDF_PATH/export.sh`). Slice the code segments out of
+   `output/factory.bin` (the 7-segment table is in `output/layout.json`),
+   then disassemble each at its real load address:
 
-5. **Xtensa decompilation (Ghidra / PyGhidra)** — `analysis/ghidra_decompile.py`
-   loads the app image with the correct ESP32 memory map, runs auto-analysis
-   (81,667 functions), decompiles the entry-point call tree, and exports
-   `output/decompiled/*.c`, `output/ghidra_functions.json`, and
-   `output/string_xrefs.json`. Ghidra 12's SLEIGH Xtensa is far faster than
-   Binary Ninja's Python Xtensa plugin, so it is the primary decompilation
-   engine; Binary Ninja provides the ROM symbols.
+   ```bash
+   # IROM: vaddr 0x400D0020, file offset 0xB0020, size 0x18F0CC
+   python3 -c "d=open('output/factory.bin','rb').read(); \
+     open('/tmp/irom.bin','wb').write(d[0xB0020:0xB0020+0x18F0CC])"
+   xtensa-esp32-elf-objdump -D -b binary -m xtensa --adjust-vma=0x400D0020 \
+     /tmp/irom.bin > /tmp/irom.dis
+   ```
 
-6. **String + config recovery** — `analysis/extract_strings.py` extracts and
+   Xtensa gotchas (see `ai/decompile.md` for detail): functions open with
+   `entry`; `call8` shifts the register window (caller `a10`→callee `a2`);
+   linear decode drifts at embedded literal pools — re-anchor windows at a
+   function address with `--adjust-vma=<fn addr>`; `l32r` lines print the
+   loaded value in parens, so `grep '(0x3f4xxxxx)'` finds string/data
+   references (fixing the L32R xref gap Ghidra has).
+
+5. **String + config recovery** — `analysis/extract_strings.py` extracts and
    categorizes strings; `analysis/extract_hwconfig.py` locates the embedded
    JSON hardware-configuration documents and flattens every `GPIO.x` /
    `ADC.x` / `IOX.p.n` assignment into `output/pinmap.json`.
+
+6. **Optional GUI passes** — Binary Ninja's **`ESPFirmware`** view
+   (`bnesp32`) + the `binja-xtensa` arch plugin loads segments at real
+   addresses and adds ~2,000 ESP32 ROM symbols (decompilation uses the
+   third-party Xtensa plugin — BN Personal has no built-in Xtensa).
+   Ghidra 12 / PyGhidra (`analysis/ghidra_decompile.py`) provides C-level
+   decompilation (81,667 functions) but needs a Ghidra install and its
+   L32R xrefs are unreliable; use it only when C pseudocode is worth the
+   setup.
 
 ## Why the hardware config JSON is authoritative
 

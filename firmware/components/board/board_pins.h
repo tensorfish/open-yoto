@@ -31,7 +31,12 @@
 #define I2C_ADDR_IOX_1              0x21   /* PI4IOE5V6416 #1 (display CS, power ctrl)      */
 #define I2C_ADDR_FUEL_GAUGE         0x64   /* CW2215B battery fuel gauge                    */
 #define I2C_ADDR_CHARGER            0x6B   /* SGM41513 charger                              */
-#define I2C_ADDR_HP_DAC             0x09   /* ES8156 headphone DAC                          */
+#ifdef CONFIG_BOARD_REV_04
+#define I2C_ADDR_HP_DAC             0x08   /* ES8156 headphone DAC (rev #04 strap)           */
+#define PIN_DISPLAY_BACKLIGHT       GPIO_NUM_26   /* GC9306 TFT backlight (LEDC PWM)         */
+#else
+#define I2C_ADDR_HP_DAC             0x09   /* ES8156 headphone DAC (rev #05 strap)           */
+#endif
 #define I2C_ADDR_SPKR_AMP_L         0x34   /* aw881xx speaker amp (left)                    */
 #define I2C_ADDR_SPKR_AMP_R         0x37   /* aw881xx speaker amp (right)                   */
 #define I2C_ADDR_RTC                0x51   /* IT8563 RTC                                    */
@@ -97,6 +102,12 @@
 #define PIN_IOX_INT                 GPIO_NUM_34
 
 /* expander 0 = ports 0..1 */
+#ifdef CONFIG_BOARD_REV_04
+/* GC9306 TFT control pins (rev #04 only; #05 uses the HT16D35x LED matrix). */
+#define IOX_TFT_CS                  IOX_PIN(0, 0, 0)   /* IOX.0.0 */
+#define IOX_TFT_DC                  IOX_PIN(0, 0, 1)   /* IOX.0.1 */
+#define IOX_TFT_RESET               IOX_PIN(0, 0, 2)   /* IOX.0.2 */
+#endif
 #define IOX_BTN_ENC0_PUSH           IOX_PIN(0, 0, 5)   /* IOX.0.5 */
 #define IOX_BTN_ENC1_PUSH           IOX_PIN(0, 0, 4)   /* IOX.0.4 */
 #define IOX_BAT_ALERT               IOX_PIN(0, 0, 6)   /* IOX.0.6 */
