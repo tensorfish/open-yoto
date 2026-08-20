@@ -24,6 +24,7 @@
 #include "content.h"
 #include "audio.h"
 #include "admin.h"
+#include "stock_low_battery_rgba.h"
 
 static const char *TAG = "main";
 
@@ -40,14 +41,9 @@ static int s_volume = 70;
 /* ------------------------------------------------------------------ art -- */
 /* 16x16 one-bit bitmaps: 2 bytes per row (32 bytes total). Each byte holds 8
  * pixels; bit 7 (MSB) is the leftmost pixel of that byte. */
-static const uint8_t LOW_BATTERY_ART[32] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x04, 0x60, 0x0C, 0x70,
-    0x0C, 0x70, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0,
-    0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0,
-};
 
 /* "Not found" indicator — an X, shown when a scanned card has no content. */
+
 static const uint8_t NOT_FOUND_ART[32] = {
     0x80, 0x01, 0x40, 0x02, 0x20, 0x04, 0x10, 0x08,
     0x08, 0x10, 0x04, 0x20, 0x02, 0x40, 0x01, 0x80,
@@ -452,7 +448,7 @@ static void battery_periodic_check(void)
     {
         ESP_LOGW(TAG, "low battery (%.1f mV, %d%%)",
                  (double)battery_voltage(), battery_soc());
-        draw_bitmap(LOW_BATTERY_ART);
+        display_show_rgba(STOCK_LOW_BATTERY_RGBA);
     }
 }
 
@@ -480,7 +476,26 @@ void app_main(void)
     ESP_ERROR_CHECK(iox_init());
     ESP_ERROR_CHECK(battery_init());
     ESP_ERROR_CHECK(display_init());
-    ESP_ERROR_CHECK(cr95hf_init());
+
+    /* Boot-time battery check: render before the remaining peripheral init
+     * so a later driver (UART/PCNT/SDMMC/I2S) can't disturb the panel. */
+    if (battery_is_charging())
+    {
+        ESP_LOGI(TAG, "charging (SOC %d%%)", battery_soc());
+        draw_battery_status(battery_soc(), true);
+    }
+    else if (battery_is_low())
+    {
+        ESP_LOGW(TAG, "low battery");
+        display_show_rgba(STOCK_LOW_BATTERY_RGBA);
+    }
+
+    /* NFC reader is optional at boot: a missing/unresponsive CR95HF (no
+     * antenna, dead chip, bench rig) must not reboot-loop the device. */
+    if (cr95hf_init() != ESP_OK)
+    {
+        ESP_LOGW(TAG, "NFC reader unavailable; continuing");
+    }
     ESP_ERROR_CHECK(encoder_init());
     encoder_register_cb(encoder_cb);
     /* SD card is optional at boot: without it (or with a missing/failed
@@ -496,18 +511,6 @@ void app_main(void)
 
     ESP_LOGI(TAG, "boot complete (battery %d%%, %.1f mV)",
              battery_soc(), (double)battery_voltage());
-
-    /* Boot-time battery check: show charging + level, or the low-battery art. */
-    if (battery_is_charging())
-    {
-        ESP_LOGI(TAG, "charging (SOC %d%%)", battery_soc());
-        draw_battery_status(battery_soc(), true);
-    }
-    else if (battery_is_low())
-    {
-        ESP_LOGW(TAG, "low battery");
-        draw_bitmap(LOW_BATTERY_ART);
-    }
 
     uint8_t uid[10];
     char url[128];

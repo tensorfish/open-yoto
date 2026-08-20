@@ -46,37 +46,33 @@ image — a firmware typo for `ht16d35x_hal`).
 The log tag is `@DISP_GC9306` (the `@` is part of the extracted string; the
 overlay tag is likewise `@UI_OVERLAY`).
 
-### Bring-up implementation (`firmware/components/gc9306/`, verified on hardware)
+### Stock-matched GC9306 implementation (`firmware/components/gc9306/`)
 
-The driver replicates the stock factory image's GC9306 driver exactly
-(function roles recovered with the Espressif objdump — see
-[ai/decompile.md](../ai/decompile.md)):
+The replacement now follows the recovered stock transport rather than
+calibrating a panel-specific colour transform:
 
-- **Register init** — 21 command groups, 64 bytes, opening with the
-  GalaxyCore inter-register enable pair `0xFE 0xEF`, then vendor registers;
-  `COLMOD 0x06` = 18-bit RGB666. Init parameters are clocked at **DC low**
-  (inter-register mode), CS asserted per group — matching the stock driver's
-  byte stream (init function at `0x40108946`).
-- **Drawing** — CASET/RASET/RAMWR (`0x2A/0x2B/0x2C`) with parameter/pixel
-  data at **DC high**, CS held across the whole rect (stock `draw_rect` at
-  `0x4010879c`); 3 bytes/pixel RGB666, chunked (stock pixel writer
-  `0x401084d0`).
-- **Backlight** — GPIO26 via **LEDC PWM at 40 kHz** (stock frequency literal
-  `0x9C40` @ `0x400d4fd4`; brightness `duty = pct << 7` per the stock setter
-  `0x401090c8`). A plain GPIO high does **not** light it — the panel LED
-  rail is AC-coupled — and a lower PWM frequency is attenuated by the
-  coupling cap, leaving the display so dim that colours wash out (green
-  reads cyan, blue reads purple at 5 kHz; correct at 40 kHz full duty).
-- **Level convertor** — the IOX default `p0Data=0x30` drives IOX.0.3
-  (`levelconvertor`) **low**; the enable is **active-low**. Driving it high
-  (the #05-style default) silently blocks the display SPI/backlight domain.
-- **Colour transform (resolved)** — the GC9306 on this board renders the
-  18-bit stream as `displayed = (XNOR(R,G), G, G XOR B)` per 6-bit channel.
-  Recovered empirically: two 4-stripe tests (red/green/blue/white →
-  black/cyan/magenta/yellow, then the transformed sends →
-  blue/white/red/green) gave 8 data points that all fit the model. The
-  driver sends the inverse `(XNOR(Rd,Gd), Gd, Gd XOR Bd)`; a
-  red/green/blue/white stripe pattern verifies all channels.
+- **Electrical configuration** — SPI2 host 1, mode 0, 80 MHz,
+  `SPI_DEVICE_NO_DUMMY`, no hardware CS, queue depth 1; MOSI=GPIO22,
+  SCLK=GPIO23, CS/DC/reset=IOX.0.0/.1/.2.
+- **Controller state** — stock reset (high 50ms, low 50ms, high 120ms),
+  the 21 vendor groups through F2, then separate DC-low CS groups
+  `35 00`, `44 00 0A`, `21`, `11`, 120ms, and `29`. The explicit
+  later resume sequence is `11`, 120ms, then `53 00 29` under one CS group.
+- **Pixels** — stock queues one 1364-pixel transaction at a time and waits
+  before buffer reuse. CASET/RASET/RAMWR use DC-low commands and DC-high
+  payloads. Composed RGB bytes are transmitted unchanged as RGB666; no
+  XOR/inversion/LUT/alpha byte is sent.
+- **RGBA asset/layout** — the stock low-SOC battery_ui table selects ID 10
+  (powered, not charging, SOC≤10), resolving through the hardware icon table
+  to PNG `0x3F468D61`. `analysis/extract_stock_battery_icon.py` extracts its
+  exact 16×16 RGBA payload and checks its SHA-256. The stock compositor uses
+  `floor(rgb * alpha / 255)`, then nearest-neighbour scale 12 into inclusive
+  GRAM window `(24,27)..(215,218)`.
+- **Backlight/IOX** — stock drives IOX.0.3 low in `p0Data=0x30`; the physical
+  panel requires that state. Backlight is GPIO26 LEDC PWM at stock 40 kHz.
+
+The ID-10 asset is a segmented semi-transparent white low-SOC visual, not a
+traditional battery-outline PNG. Do not replace it with an unproven mask.
 
 ## Rendering model
 

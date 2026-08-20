@@ -231,15 +231,27 @@ these functions is implemented in `firmware/components/gc9306/gc9306.c`.
 | `0x40108380` | plain byte write, no pin change (data write with current DC state; checks the DC pin is configured) — *not* `gc9306_spi_init` |
 | `0x401083ec` | assert DC low (`dev[12]=0`) then write byte — **command writer** — *not* `gc9306_display_on` |
 | `0x40108454` | set DC high (`dev[12]=1`) then write 4 bytes — **window/data writer** |
-| `0x401084d0` | pixel writer: expand a 3-byte colour ×N then SPI-write `N*3` bytes (`addx2 a12, a5, a5`); confirms **3 bytes/pixel** |
-| `0x4010854c` | `gc9306_display_init` — module init: wires the pin struct (`dev[12]=dc, dev[16]=cs, dev[20]=reset`) and allocates 2× frame buffers via `calloc(0x2d0,0x808)` |
+| `0x401084d0` | pixel writer: prepares RGB triples and submits `count * 3` bytes |
+| `0x4010854c` | controller init: stock SPI2 device config (mode 0, clock `0x04c4b400` = 80MHz, CS=-1, flags `0x40` = no-dummy, queue 1) and two frame buffers |
 | `0x40108674` | display-off path: `0x28` (dispoff) + `0x10` (sleep in) with CS toggling |
-| `~0x4010871c` | display-on path: `0x11` (sleep out), delay 120 ms, `0x53`+`0x00`, `0x29` (display on) |
-| `0x4010879c` | `gc9306_draw_rect` — CASET/RASET/RAMWR with CS held across the rect, window data at DC high, pixel chunks of 1364 bytes (`0x554`) |
-| `0x401088e8` | `gc9306_upscale_draw_pixels` (large; 16×16 RGBA → panel) |
-| `0x40108946` | **register init sequence** — the 21-group `0xFE 0xEF` … `0xF2` command stream (replicated in `gc9306.c`) |
+| `0x40108741` | resume/power-on: `0x11`, 120ms, then one CS group `0x53 00 29` |
+| `0x4010879c` | `gc9306_draw_rect` — CASET/RASET/RAMWR, DC-high payload, manual CS across a rect |
+| `0x401088e8` | `gc9306_upscale_draw_pixels` (16×16 RGBA → panel) |
+| `0x40108946` | vendor init through F2; stock tail at `0x40108e0b..0x40108edb` additionally sends separate groups `35 00`, `44 00 0A`, `21`, `11`, waits 120ms, fills 240×240 from an unrecovered triple, then `29` |
+| `0x401090a9` | stock final scaler copies source RGB bytes `+0/+1/+2` unchanged into RGB666 staging; alpha is composed before this writer |
 | `0x401090c8` | backlight brightness: clamp 0–100, `duty = pct << 7`, LEDC |
 | `0x40109104` | backlight LEDC init (8-bit resolution path; string `GC9306_BACKLIGHT`) |
+
+### Stock low-SOC asset
+
+`battery_ui` at `0x400e7868` selects from six 20-byte entries at
+`0x3ffbf49c`. Powered, non-charging SOC≤10 selects ID 10, whose hardware
+icon-table pointer is PNG `0x3f468d61`: 16×16 RGBA (PNG SHA-256
+`92fd1b1902006e6c18112eac2d2d3224c4c9a98227bf43a0a0ab8bd0095f925b`;
+RGBA SHA-256 `169c10ad0c134122ebbda95423466d734a2e461575db29deefdb914038e43863`).
+`analysis/extract_stock_battery_icon.py` reproducibly extracts both files.
+The stock compositor calculates `floor(rgb * alpha / 255)`, then renders the
+frame nearest-neighbour at 12× into `(24,27)..(215,218)`.
 
 ### Nightlight / ambient LED (tags `NIGHT_LIGHT` @ `0x3f420668`, `LEDS` @ `0x3f411e14`)
 | Address | Likely role |

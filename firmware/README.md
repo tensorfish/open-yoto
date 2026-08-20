@@ -77,23 +77,21 @@ from `main/Kconfig.projbuild`), or directly:
 echo 'CONFIG_APP_TEST_MODE=y' >> sdkconfig && idf.py build
 ```
 
-Rev #04 bring-up notes (verified against a physical unit):
+Rev #04 bring-up notes (verified against a physical unit and stock app):
 
-- The GC9306 driver (`components/gc9306/`) replicates the stock factory
-  image's register init byte-for-byte (extracted from `output/factory.bin`,
-  see `docs/ai/decompile.md` for the objdump workflow) — 21 command groups
-  opening with the GalaxyCore inter-register enable `0xFE 0xEF`, COLMOD
-  `0x06` = 18-bit RGB666, 3 bytes/pixel.
-- The IOX must use the authoritative `hwconfig_04` defaults
-  (`p0Dir=0xB0 p1Dir=0xAF p0Data=0x30 p1Data=0xEF`): the **level convertor
-  (IOX.0.3) enable is active-low**. Driving it high — the #05-style default —
-  silently blocks the whole display SPI/backlight domain while everything
-  else (I²C, audio, logs) keeps working.
-- **Panel colour transform (resolved)**: the GC9306 on this board renders
-  the 18-bit stream as `displayed = (XNOR(R,G), G, G XOR B)` per 6-bit
-  channel (recovered from two 4-stripe tests, 8/8 data points). The driver
-  sends the inverse `(XNOR(Rd,Gd), Gd, Gd XOR Bd)` so requested colours
-  display correctly (verified: red/green/blue/white stripes).
+- The GC9306 driver (`components/gc9306/`) follows the stock electrical
+  setup: SPI2 host 1, mode 0, 80 MHz, `SPI_DEVICE_NO_DUMMY`, manual CS,
+  queue depth 1, stock reset, the full F2 tail, DC-low init groups, and
+  1364-pixel queued RGB666 transfers. Pixel RGB bytes are forwarded
+  unchanged — there is no channel transform.
+- The IOX uses the authoritative `hwconfig_04` values
+  (`p0Dir=0xB0 p1Dir=0xAF p0Data=0x30 p1Data=0xEF`); the stock drives
+  `levelconvertor` (IOX.0.3) low before display communication.
+- `analysis/extract_stock_battery_icon.py` recovers the exact low-SOC
+  battery_ui asset (table ID 10, PNG `0x3F468D61`) and generates the compiled
+  16×16 RGBA frame. The display alpha-premultiplies it and reproduces the
+  stock 12× window `(24,27)..(215,218)`. Its segmented white-on-black
+  appearance is the stock low-SOC visual, not a guessed outline.
 
 Back to the normal firmware:
 
@@ -127,16 +125,15 @@ firmware/
 **Implemented** (real bus + peripheral setup, compiles against ESP-IDF v5):
 
 - I2C master (SDA=21, SCL=25) + IO expander(s) with the factory direction/data
-  (rev #04: authoritative `hwconfig_04` values — note the active-low level
-  convertor on IOX.0.3, see the boot-test notes below).
+  (rev #04: authoritative `hwconfig_04` values; the stock drives
+  levelconvertor IOX.0.3 low before display traffic).
 - ADC1 (VBAT=GPIO39, light=GPIO36, IR-temp=GPIO35).
-- SPI (MOSI=22, MISO=26, SCLK=23) + HT16D35x device handle [rev #05].
-- **GC9306 TFT driver [rev #04]**: register init replicated from the stock
-  factory image (21 groups, `0xFE 0xEF` inter-register enable, COLMOD 0x06 =
-  18-bit RGB666), CASET/RASET/RAMWR drawing with DC-high data and CS held per
-  rect, LEDC backlight on GPIO26 (40 kHz — the rail is AC-coupled), and the
-  empirically-derived colour pre-transform (see boot-test notes). Verified:
-  red/green/blue/white render correctly.
+- **GC9306 TFT driver [rev #04]**: stock SPI2 mode 0/80MHz/no-dummy setup,
+  stock reset and complete initialization tail, queue-1 1364-pixel RGB666
+  transport, CASET/RASET/RAMWR framing, and 40 kHz GPIO26 backlight.
+  `gc9306_draw_rgba16()` matches the stock 16×16 alpha-composition and
+  12× `(24,27)..(215,218)` scaler. The exact stock low-SOC PNG is generated
+  by `analysis/extract_stock_battery_icon.py` and compiled into the firmware.
 - UART (CR95HF, TX=33, RX=32, 57600 8-N-1).
 - I2S standard TX (mclk=0, bclk=5, lrclk=18, dout=19, 44100 Hz 16-bit).
 

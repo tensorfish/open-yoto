@@ -25,11 +25,11 @@
 
 static const char *TAG = "gc9306";
 
-#define GC9306_SPI_CLK_HZ     40000000
+#define GC9306_SPI_CLK_HZ     80000000
 #define GC9306_SPI_MODE       0
 #define GC9306_PANEL_W        240
 #define GC9306_PANEL_H        320
-#define GC9306_CHUNK_PIXELS   341           /* 341 px x 3 bytes = 1023 B/tx  */
+#define GC9306_CHUNK_PIXELS   1364          /* stock chunk: 0x554 pixels */
 #define GC9306_BYTES_PER_PX   3             /* 18-bit RGB666                */
 
 /* Stock init table: command + parameter bytes (all clocked at DC=0). */
@@ -86,29 +86,32 @@ static esp_err_t gc9306_tx_dc(const uint8_t *data, size_t len, bool dc)
 }
 
 /*
- * One init group: CS asserted, command + parameters all at DC=0 (stock
- * inter-register behaviour), CS released.
+ * One stock controller group: CS asserted, every byte at DC=0, CS released.
+ * The GC9306's inter-register init parameters are deliberately DC-low.
  */
-static esp_err_t gc9306_init_step(const gc9306_init_step_t *step)
+static esp_err_t gc9306_stock_group(const uint8_t *data, size_t len)
 {
     esp_err_t err = iox_set_pin(IOX_TFT_CS, false);
     if (err != ESP_OK)
     {
         return err;
     }
-    err = gc9306_tx_dc(&step->cmd, 1, false);
-    if (err == ESP_OK && step->n > 0)
-    {
-        err = gc9306_tx_dc(step->data, step->n, false);
-    }
+
+    err = gc9306_tx_dc(data, len, false);
     (void)iox_set_pin(IOX_TFT_CS, true);
     return err;
 }
 
 static void gc9306_reset(void)
 {
+    /* Stock reset sequence (factory image @ 0x40108ede): high 50 ms,
+     * low 50 ms, high 120 ms. A shorter/different pulse can leave the
+     * panel in an arbitrary colour mode (observed: the transfer function
+     * changed every boot with the old 20/120 ms pulse). */
+    (void)iox_set_pin(IOX_TFT_RESET, true);
+    vTaskDelay(pdMS_TO_TICKS(50));
     (void)iox_set_pin(IOX_TFT_RESET, false);
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(50));
     (void)iox_set_pin(IOX_TFT_RESET, true);
     vTaskDelay(pdMS_TO_TICKS(120));
 }
@@ -133,12 +136,11 @@ esp_err_t gc9306_init(void)
     spi_device_interface_config_t dev = {
         .clock_speed_hz = GC9306_SPI_CLK_HZ,
         .mode = GC9306_SPI_MODE,
-        .spics_io_num = -1,           /* CS handled via IOX */
+        .spics_io_num = -1,           /* CS handled through IOX.0.0 */
         .queue_size = 1,
-        /* Write-only panel (MISO unwired on #04): half-duplex is required
-         * for 40 MHz over the GPIO matrix (full-duplex would need read
-         * dummy cycles that the driver rejects with ESP_ERR_NOT_SUPPORTED). */
-        .flags = SPI_DEVICE_HALFDUPLEX,
+        /* Stock config: mode=0, clock=80 MHz, flags=0x40
+         * (SPI_DEVICE_NO_DUMMY), manual CS, queue depth 1. */
+        .flags = SPI_DEVICE_NO_DUMMY,
     };
     err = spi_bus_add_device(SPI2_HOST, &dev, &s_spi);
     if (err != ESP_OK)
@@ -151,7 +153,10 @@ esp_err_t gc9306_init(void)
 
     for (size_t i = 0; i < GC9306_INIT_STEPS; i++)
     {
-        err = gc9306_init_step(&k_init[i]);
+        uint8_t group[1 + sizeof(k_init[i].data)] = { k_init[i].cmd };
+
+        memcpy(group + 1, k_init[i].data, k_init[i].n);
+        err = gc9306_stock_group(group, (size_t)k_init[i].n + 1);
         if (err != ESP_OK)
         {
             ESP_LOGE(TAG, "init step %u (0x%02x): %s",
@@ -160,25 +165,62 @@ esp_err_t gc9306_init(void)
         }
     }
 
-    ESP_LOGI(TAG, "GC9306 init done (SPI2 mosi=22 sclk=23, cs=IOX.0.0 dc=IOX.0.1 reset=IOX.0.2, 18-bit RGB666)");
+    /* Required stock tail after F2. Each row is a separate DC-low CS group
+     * (0x40108e0b-0x40108e85), not one combined transfer. */
+    static const uint8_t k_tail_35[] = { 0x35, 0x00 };
+    static const uint8_t k_tail_44[] = { 0x44, 0x00, 0x0A };
+    static const uint8_t k_tail_21[] = { 0x21 };
+    static const uint8_t k_tail_11[] = { 0x11 };
+    static const uint8_t k_display_on[] = { 0x29 };
+
+    err = gc9306_stock_group(k_tail_35, sizeof(k_tail_35));
+    if (err == ESP_OK)
+    {
+        err = gc9306_stock_group(k_tail_44, sizeof(k_tail_44));
+    }
+    if (err == ESP_OK)
+    {
+        err = gc9306_stock_group(k_tail_21, sizeof(k_tail_21));
+    }
+    if (err == ESP_OK)
+    {
+        err = gc9306_stock_group(k_tail_11, sizeof(k_tail_11));
+    }
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(120));
+
+    /* Stock performs a 240x240 RAMWR here using an unrecovered RGB triple
+     * at 0x3ffc7338. Do not invent that payload; the first caller supplies
+     * its complete frame, then we issue the stock DISPON command. */
+    err = gc9306_stock_group(k_display_on, sizeof(k_display_on));
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    ESP_LOGI(TAG, "GC9306 init done (stock SPI2 mode 0, 80 MHz, RGB666)");
     return ESP_OK;
 }
 
 /*
- * Stock display-on sequence: sleep out, delay, 0x53/0x00, display on.
+ * Stock resume/power-on sequence (0x40108741-0x40108797): sleep out in one
+ * CS group, 120 ms delay, then 53/00/29 in a single DC-low CS group.
  */
 esp_err_t gc9306_display_on(void)
 {
-    esp_err_t err;
+    static const uint8_t k_sleep_out[] = { 0x11 };
+    static const uint8_t k_power_on[] = { 0x53, 0x00, 0x29 };
+    esp_err_t err = gc9306_stock_group(k_sleep_out, sizeof(k_sleep_out));
 
-    err = gc9306_init_step(&(gc9306_init_step_t){ 0x11, { }, 0 });
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK)
+    {
+        return err;
+    }
     vTaskDelay(pdMS_TO_TICKS(120));
-
-    err = gc9306_init_step(&(gc9306_init_step_t){ 0x53, { 0x00 }, 1 });
-    if (err != ESP_OK) return err;
-
-    return gc9306_init_step(&(gc9306_init_step_t){ 0x29, { }, 0 });
+    return gc9306_stock_group(k_power_on, sizeof(k_power_on));
 }
 
 esp_err_t gc9306_fill_rect(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
@@ -231,45 +273,144 @@ esp_err_t gc9306_fill_rect(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
     {
         size_t total = (size_t)(x1 - x0 + 1) * (y1 - y0 + 1);
         size_t sent = 0;
+        uint8_t red = (uint8_t)((color >> 16) & 0xFF);
+        uint8_t green = (uint8_t)((color >> 8) & 0xFF);
+        uint8_t blue = (uint8_t)(color & 0xFF);
 
-        /* Panel colour pre-transform: this GC9306 renders the 18-bit stream
-         * as displayed = (XNOR(R,G), G, G XOR B) per 6-bit channel —
-         * recovered empirically from two 4-stripe tests (8 clean data
-         * points, all fit exactly). Sending the inverse
-         * (XNOR(Rd,Gd), Gd, Gd XOR Bd) makes the panel display the
-         * requested colour (Rd, Gd, Bd). */
-        uint8_t rd = (uint8_t)(((color >> 16) & 0xFF) >> 2);  /* top 6 bits */
-        uint8_t gd = (uint8_t)(((color >> 8) & 0xFF) >> 2);
-        uint8_t bd = (uint8_t)((color & 0xFF) >> 2);
-        uint8_t rs = (uint8_t)(~(rd ^ gd) & 0x3F);
-        uint8_t gs = gd;
-        uint8_t bs = (uint8_t)((gd ^ bd) & 0x3F);
-
+        /* Stock transport forwards the composed source RGB bytes unchanged.
+         * RGB666 consumes bits [7:2]; no permutation, inversion, XOR, LUT,
+         * alpha byte, warm-up colour transform, or diagnostic logging. */
         for (size_t i = 0; i < GC9306_CHUNK_PIXELS; i++)
         {
-            s_chunk[i * 3 + 0] = (uint8_t)(rs << 2);
-            s_chunk[i * 3 + 1] = (uint8_t)(gs << 2);
-            s_chunk[i * 3 + 2] = (uint8_t)(bs << 2);
+            s_chunk[i * 3 + 0] = red;
+            s_chunk[i * 3 + 1] = green;
+            s_chunk[i * 3 + 2] = blue;
         }
 
         while (sent < total)
         {
+            spi_transaction_t t = { 0 };
+            spi_transaction_t *completed;
             size_t n = total - sent;
+
             if (n > GC9306_CHUNK_PIXELS)
             {
                 n = GC9306_CHUNK_PIXELS;
             }
-            spi_transaction_t t;
-            memset(&t, 0, sizeof(t));
             t.length = (size_t)(n * GC9306_BYTES_PER_PX * 8);
             t.tx_buffer = s_chunk;
-            err = spi_device_polling_transmit(s_spi, &t);
+
+            /* Stock queues one 0x554-pixel transaction then waits before
+             * reusing the staging buffer (0x40109033-0x40109091). */
+            err = spi_device_queue_trans(s_spi, &t, portMAX_DELAY);
+            if (err != ESP_OK)
+            {
+                break;
+            }
+            err = spi_device_get_trans_result(s_spi, &completed, portMAX_DELAY);
             if (err != ESP_OK)
             {
                 break;
             }
             sent += n;
         }
+    }
+
+    (void)iox_set_pin(IOX_TFT_CS, true);
+    return err;
+}
+
+esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
+{
+    enum {
+        STOCK_SCALE = 12,
+        STOCK_X = 24,
+        STOCK_Y = 27,
+        STOCK_SIZE = 16 * STOCK_SCALE,
+    };
+    uint8_t b[4];
+    esp_err_t err;
+    size_t sent = 0;
+    const size_t total = STOCK_SIZE * STOCK_SIZE;
+
+    if (rgba == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = iox_set_pin(IOX_TFT_CS, false);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    b[0] = 0x2A;
+    err = gc9306_tx_dc(b, 1, false);
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = STOCK_X;
+        b[2] = 0x00;
+        b[3] = STOCK_X + STOCK_SIZE - 1;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2B;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = STOCK_Y;
+        b[2] = 0x00;
+        b[3] = STOCK_Y + STOCK_SIZE - 1;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2C;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        err = iox_set_pin(IOX_TFT_DC, true);
+    }
+
+    while (err == ESP_OK && sent < total)
+    {
+        spi_transaction_t t = { 0 };
+        spi_transaction_t *completed;
+        size_t n = total - sent;
+
+        if (n > GC9306_CHUNK_PIXELS)
+        {
+            n = GC9306_CHUNK_PIXELS;
+        }
+
+        for (size_t i = 0; i < n; i++)
+        {
+            size_t pixel = sent + i;
+            size_t sx = (pixel % STOCK_SIZE) / STOCK_SCALE;
+            size_t sy = (pixel / STOCK_SIZE) / STOCK_SCALE;
+            const uint8_t *src = &rgba[(sy * 16 + sx) * 4];
+            uint8_t alpha = src[3];
+
+            /* Stock compositor: floor(channel * alpha / 255), then the
+             * stock scaler forwards those three RGB bytes unchanged. */
+            s_chunk[i * 3 + 0] = (uint8_t)(((uint16_t)src[0] * alpha) / 255);
+            s_chunk[i * 3 + 1] = (uint8_t)(((uint16_t)src[1] * alpha) / 255);
+            s_chunk[i * 3 + 2] = (uint8_t)(((uint16_t)src[2] * alpha) / 255);
+        }
+
+        t.length = (size_t)(n * GC9306_BYTES_PER_PX * 8);
+        t.tx_buffer = s_chunk;
+        err = spi_device_queue_trans(s_spi, &t, portMAX_DELAY);
+        if (err == ESP_OK)
+        {
+            err = spi_device_get_trans_result(s_spi, &completed, portMAX_DELAY);
+        }
+        sent += n;
     }
 
     (void)iox_set_pin(IOX_TFT_CS, true);

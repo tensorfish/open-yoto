@@ -55,6 +55,7 @@ static const char *TAG = "battery";
 
 static adc_oneshot_unit_handle_t s_adc1_handle;
 static bool s_gauge_present = false;
+static bool s_charger_present = false;
 
 /* Read a single 8-bit register from the CW2215B over the shared I2C bus. */
 static esp_err_t cw2215b_read_reg(uint8_t reg, uint8_t *val)
@@ -207,10 +208,10 @@ esp_err_t battery_init(void)
                  (unsigned)I2C_ADDR_FUEL_GAUGE);
     }
 
-    /* ---- SGM41513 charger probe ---- */
-    bool charger = i2c_device_probe(I2C_ADDR_CHARGER);
+    s_charger_present = i2c_device_probe(I2C_ADDR_CHARGER);
     ESP_LOGI(TAG, "SGM41513 charger (0x%02x): %s",
-             (unsigned)I2C_ADDR_CHARGER, charger ? "found" : "NOT found");
+             (unsigned)I2C_ADDR_CHARGER,
+             s_charger_present ? "found" : "NOT found");
 
     /* ---- charger + battery-alert status via IO expander ---- */
     bool chg_stat = iox_get_pin(IOX_CHG_STAT);
@@ -261,6 +262,13 @@ bool battery_is_low(void)
 
 bool battery_is_charging(void)
 {
+    /* IOX_CHG_STAT floats on a card-less/uncharged bench. A real charging
+     * condition requires the SGM41513 to answer on I2C as well. */
+    if (!s_charger_present)
+    {
+        return false;
+    }
+
     bool level = iox_get_pin(IOX_CHG_STAT);
 
 #if BATTERY_CHG_STAT_ACTIVE_LOW
