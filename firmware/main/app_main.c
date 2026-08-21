@@ -25,7 +25,7 @@
 #include "audio.h"
 #include "admin.h"
 #include "stock_low_battery_rgba.h"
-
+#include "requested_factory_asset_rgba.h"
 static const char *TAG = "main";
 
 /* The NDEF URL written to the "magic" admin card. */
@@ -429,6 +429,13 @@ static void draw_battery_status(int soc, bool charging)
 /*
  * Check the battery and show the low-battery art when it is depleted.
  */
+#ifdef CONFIG_APP_DISPLAY_TEST_ICON
+static void show_display_test_image(void)
+{
+    display_show_rgba(REQUESTED_FACTORY_ASSET_RGBA);
+}
+#endif
+
 static void battery_periodic_check(void)
 {
     uint32_t now = xTaskGetTickCount();
@@ -448,7 +455,11 @@ static void battery_periodic_check(void)
     {
         ESP_LOGW(TAG, "low battery (%.1f mV, %d%%)",
                  (double)battery_voltage(), battery_soc());
+#ifdef CONFIG_APP_DISPLAY_TEST_ICON
+        show_display_test_image();
+#else
         display_show_rgba(STOCK_LOW_BATTERY_RGBA);
+#endif
     }
 }
 
@@ -479,6 +490,9 @@ void app_main(void)
 
     /* Boot-time battery check: render before the remaining peripheral init
      * so a later driver (UART/PCNT/SDMMC/I2S) can't disturb the panel. */
+#ifdef CONFIG_APP_DISPLAY_TEST_ICON
+    show_display_test_image();
+#else
     if (battery_is_charging())
     {
         ESP_LOGI(TAG, "charging (SOC %d%%)", battery_soc());
@@ -489,6 +503,7 @@ void app_main(void)
         ESP_LOGW(TAG, "low battery");
         display_show_rgba(STOCK_LOW_BATTERY_RGBA);
     }
+#endif
 
     /* NFC reader is optional at boot: a missing/unresponsive CR95HF (no
      * antenna, dead chip, bench rig) must not reboot-loop the device. */

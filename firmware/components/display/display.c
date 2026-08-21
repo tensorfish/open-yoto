@@ -135,6 +135,22 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
     }
 }
 
+void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
+                            uint32_t foreground, uint32_t background)
+{
+    if (mask == NULL)
+    {
+        return;
+    }
+
+    esp_err_t err = gc9306_draw_mask_full(mask, foreground, background);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "full raster failed: %s", esp_err_to_name(err));
+    }
+}
+
+
 #else /* CONFIG_BOARD_REV_04 */
 
 #include "ht16d35x.h"
@@ -183,5 +199,31 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
     }
     display_flush();
 }
+
+void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
+                            uint32_t foreground, uint32_t background)
+{
+    (void)foreground;
+    (void)background;
+
+    if (mask == NULL)
+    {
+        return;
+    }
+
+    display_clear();
+    for (int y = 0; y < 16; y++)
+    {
+        for (int x = 0; x < 16; x++)
+        {
+            size_t pixel = (size_t)(y * 20 + 10) * 240 + x * 15 + 7;
+            bool on = (mask[pixel / 8] & (uint8_t)(1U << (7 - (pixel % 8)))) != 0;
+
+            display_set_pixel(x, y, on);
+        }
+    }
+    display_flush();
+}
+
 
 #endif /* CONFIG_BOARD_REV_04 */

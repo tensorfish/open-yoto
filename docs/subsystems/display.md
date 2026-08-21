@@ -48,8 +48,8 @@ overlay tag is likewise `@UI_OVERLAY`).
 
 ### Stock-matched GC9306 implementation (`firmware/components/gc9306/`)
 
-The replacement now follows the recovered stock transport rather than
-calibrating a panel-specific colour transform:
+The replacement follows the recovered stock command/transaction protocol and
+applies only device-measured output corrections:
 
 - **Electrical configuration** — SPI2 host 1, mode 0, 80 MHz,
   `SPI_DEVICE_NO_DUMMY`, no hardware CS, queue depth 1; MOSI=GPIO22,
@@ -60,16 +60,30 @@ calibrating a panel-specific colour transform:
   later resume sequence is `11`, 120ms, then `53 00 29` under one CS group.
 - **Pixels** — stock queues one 1364-pixel transaction at a time and waits
   before buffer reuse. CASET/RASET/RAMWR use DC-low commands and DC-high
-  payloads. Composed RGB bytes are transmitted unchanged as RGB666; no
-  XOR/inversion/LUT/alpha byte is sent.
+  payloads. On this device, a known red RGB source rendered blue with the
+  recovered `MADCTL` mode, so `gc9306_store_rgb()` swaps R/B at the RGB666
+  output boundary; it does not alter source assets, alpha, or any other
+  channel. This is an empirical panel correction, not a claim about the
+  factory binary's scaler.
 - **RGBA asset/layout** — the stock low-SOC battery_ui table selects ID 10
   (powered, not charging, SOC≤10), resolving through the hardware icon table
   to PNG `0x3F468D61`. `analysis/extract_stock_battery_icon.py` extracts its
   exact 16×16 RGBA payload and checks its SHA-256. The stock compositor uses
   `floor(rgb * alpha / 255)`, then nearest-neighbour scale 12 into inclusive
-  GRAM window `(24,27)..(215,218)`.
+  GRAM window `(24,27)..(215,218)`; the replacement applies its measured
+  40px vertical physical-panel correction to the centered 192px test frame.
+
 - **Backlight/IOX** — stock drives IOX.0.3 low in `p0Data=0x30`; the physical
   panel requires that state. Backlight is GPIO26 LEDC PWM at stock 40 kHz.
+
+### Factory-art audit
+
+`assets/` contains 115 CRC-checked PNG streams extracted byte-for-byte from
+`output/factory.bin`, with flash offsets and SHA-256 hashes in
+`assets/manifest.json`. Every embedded PNG is 16×16: 67 RGBA, 30 RGB, and 18
+grayscale+alpha. `factory-069-0x06709D-16x16.png` is the current red
+low-battery-slash boot-test source; it is compiled as an RGBA frame only when
+`CONFIG_APP_DISPLAY_TEST_ICON` is enabled.
 
 The ID-10 asset is a segmented semi-transparent white low-SOC visual, not a
 traditional battery-outline PNG. Do not replace it with an unproven mask.

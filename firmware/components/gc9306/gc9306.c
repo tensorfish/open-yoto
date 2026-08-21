@@ -69,6 +69,19 @@ static spi_device_handle_t s_spi = NULL;
 static uint8_t s_chunk[GC9306_CHUNK_PIXELS * GC9306_BYTES_PER_PX];
 
 /*
+ * The panel running the recovered stock MADCTL mode presents the R/B channels
+ * reversed for direct 18-bit writes. Keep source colors in ordinary RGB888
+ * everywhere else and correct the byte order at this single output boundary.
+ */
+static inline void gc9306_store_rgb(size_t pixel, uint8_t red, uint8_t green,
+                                    uint8_t blue)
+{
+    s_chunk[pixel * 3 + 0] = blue;
+    s_chunk[pixel * 3 + 1] = green;
+    s_chunk[pixel * 3 + 2] = red;
+}
+
+/*
  * Raw byte transfer with the given D/CX level; CS must already be asserted.
  */
 static esp_err_t gc9306_tx_dc(const uint8_t *data, size_t len, bool dc)
@@ -277,14 +290,11 @@ esp_err_t gc9306_fill_rect(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
         uint8_t green = (uint8_t)((color >> 8) & 0xFF);
         uint8_t blue = (uint8_t)(color & 0xFF);
 
-        /* Stock transport forwards the composed source RGB bytes unchanged.
-         * RGB666 consumes bits [7:2]; no permutation, inversion, XOR, LUT,
-         * alpha byte, warm-up colour transform, or diagnostic logging. */
+        /* The transport is RGB666; gc9306_store_rgb applies this panel's
+         * observed R/B correction before each 3-byte write. */
         for (size_t i = 0; i < GC9306_CHUNK_PIXELS; i++)
         {
-            s_chunk[i * 3 + 0] = red;
-            s_chunk[i * 3 + 1] = green;
-            s_chunk[i * 3 + 2] = blue;
+            gc9306_store_rgb(i, red, green, blue);
         }
 
         while (sent < total)
@@ -325,7 +335,10 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
     enum {
         STOCK_SCALE = 12,
         STOCK_X = 24,
-        STOCK_Y = 27,
+        /* The physical panel remains bottom-biased after the first 20px
+         * adjustment; boot rendering calibrates its visual center 40px up. */
+        PANEL_Y_BIAS = -40,
+        STOCK_Y = (320 - 16 * STOCK_SCALE) / 2 + PANEL_Y_BIAS,
         STOCK_SIZE = 16 * STOCK_SCALE,
     };
     uint8_t b[4];
@@ -396,11 +409,217 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
             const uint8_t *src = &rgba[(sy * 16 + sx) * 4];
             uint8_t alpha = src[3];
 
-            /* Stock compositor: floor(channel * alpha / 255), then the
-             * stock scaler forwards those three RGB bytes unchanged. */
-            s_chunk[i * 3 + 0] = (uint8_t)(((uint16_t)src[0] * alpha) / 255);
-            s_chunk[i * 3 + 1] = (uint8_t)(((uint16_t)src[1] * alpha) / 255);
-            s_chunk[i * 3 + 2] = (uint8_t)(((uint16_t)src[2] * alpha) / 255);
+            /* Alpha-compose in source RGB, then correct channel order only
+             * while writing to this panel's RGB666 stream. */
+            gc9306_store_rgb(i,
+                              (uint8_t)(((uint16_t)src[0] * alpha) / 255),
+                              (uint8_t)(((uint16_t)src[1] * alpha) / 255),
+                              (uint8_t)(((uint16_t)src[2] * alpha) / 255));
+        }
+
+        t.length = (size_t)(n * GC9306_BYTES_PER_PX * 8);
+        t.tx_buffer = s_chunk;
+        err = spi_device_queue_trans(s_spi, &t, portMAX_DELAY);
+        if (err == ESP_OK)
+        {
+            err = spi_device_get_trans_result(s_spi, &completed, portMAX_DELAY);
+        }
+        sent += n;
+    }
+
+    (void)iox_set_pin(IOX_TFT_CS, true);
+    return err;
+}
+
+esp_err_t gc9306_draw_mask192(const uint8_t mask[192 * 192 / 8],
+                              uint32_t foreground, uint32_t background)
+{
+    enum {
+        STOCK_X = 24,
+        STOCK_Y = 27,
+        STOCK_SIZE = 192,
+    };
+    uint8_t b[4];
+    uint8_t fr = (uint8_t)((foreground >> 16) & 0xFF);
+    uint8_t fg = (uint8_t)((foreground >> 8) & 0xFF);
+    uint8_t fb = (uint8_t)(foreground & 0xFF);
+    uint8_t br = (uint8_t)((background >> 16) & 0xFF);
+    uint8_t bg = (uint8_t)((background >> 8) & 0xFF);
+    uint8_t bb = (uint8_t)(background & 0xFF);
+    esp_err_t err;
+    size_t sent = 0;
+    const size_t total = STOCK_SIZE * STOCK_SIZE;
+
+    if (mask == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = iox_set_pin(IOX_TFT_CS, false);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    b[0] = 0x2A;
+    err = gc9306_tx_dc(b, 1, false);
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = STOCK_X;
+        b[2] = 0x00;
+        b[3] = STOCK_X + STOCK_SIZE - 1;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2B;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = STOCK_Y;
+        b[2] = 0x00;
+        b[3] = STOCK_Y + STOCK_SIZE - 1;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2C;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        err = iox_set_pin(IOX_TFT_DC, true);
+    }
+
+    while (err == ESP_OK && sent < total)
+    {
+        spi_transaction_t t = { 0 };
+        spi_transaction_t *completed;
+        size_t n = total - sent;
+
+        if (n > GC9306_CHUNK_PIXELS)
+        {
+            n = GC9306_CHUNK_PIXELS;
+        }
+
+        for (size_t i = 0; i < n; i++)
+        {
+            size_t pixel = sent + i;
+            bool on = (mask[pixel / 8] & (uint8_t)(1U << (7 - (pixel % 8)))) != 0;
+
+            if (on)
+            {
+                gc9306_store_rgb(i, fr, fg, fb);
+            }
+            else
+            {
+                gc9306_store_rgb(i, br, bg, bb);
+            }
+        }
+
+        t.length = (size_t)(n * GC9306_BYTES_PER_PX * 8);
+        t.tx_buffer = s_chunk;
+        err = spi_device_queue_trans(s_spi, &t, portMAX_DELAY);
+        if (err == ESP_OK)
+        {
+            err = spi_device_get_trans_result(s_spi, &completed, portMAX_DELAY);
+        }
+        sent += n;
+    }
+
+    (void)iox_set_pin(IOX_TFT_CS, true);
+    return err;
+}
+
+esp_err_t gc9306_draw_mask_full(const uint8_t mask[240 * 320 / 8],
+                                uint32_t foreground, uint32_t background)
+{
+    enum {
+        WIDTH = 240,
+        HEIGHT = 320,
+    };
+    uint8_t b[4];
+    uint8_t fr = (uint8_t)((foreground >> 16) & 0xFF);
+    uint8_t fg = (uint8_t)((foreground >> 8) & 0xFF);
+    uint8_t fb = (uint8_t)(foreground & 0xFF);
+    uint8_t br = (uint8_t)((background >> 16) & 0xFF);
+    uint8_t bg = (uint8_t)((background >> 8) & 0xFF);
+    uint8_t bb = (uint8_t)(background & 0xFF);
+    esp_err_t err;
+    size_t sent = 0;
+    const size_t total = WIDTH * HEIGHT;
+
+    if (mask == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = iox_set_pin(IOX_TFT_CS, false);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    b[0] = 0x2A;
+    err = gc9306_tx_dc(b, 1, false);
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = 0x00;
+        b[2] = 0x00;
+        b[3] = WIDTH - 1;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2B;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = 0x00;
+        b[2] = 0x01;
+        b[3] = 0x3F;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2C;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        err = iox_set_pin(IOX_TFT_DC, true);
+    }
+
+    while (err == ESP_OK && sent < total)
+    {
+        spi_transaction_t t = { 0 };
+        spi_transaction_t *completed;
+        size_t n = total - sent;
+
+        if (n > GC9306_CHUNK_PIXELS)
+        {
+            n = GC9306_CHUNK_PIXELS;
+        }
+
+        for (size_t i = 0; i < n; i++)
+        {
+            size_t pixel = sent + i;
+            bool on = (mask[pixel / 8] & (uint8_t)(1U << (7 - (pixel % 8)))) != 0;
+
+            if (on)
+            {
+                gc9306_store_rgb(i, fr, fg, fb);
+            }
+            else
+            {
+                gc9306_store_rgb(i, br, bg, bb);
+            }
         }
 
         t.length = (size_t)(n * GC9306_BYTES_PER_PX * 8);

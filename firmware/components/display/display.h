@@ -42,8 +42,27 @@ void display_flush(void);
 /**
  * Render a 16x16 RGBA icon through the revision's physical display path.
  * The rev #04 GC9306 path alpha-premultiplies RGB, nearest-neighbour scales
- * 12x to the stock window (24,27)..(215,218), then transmits RGB666.
+ * 12× to its calibrated `(24,24)..(215,215)` test window, then transmits
+ * RGB666 with the device-specific channel-order correction.
  *
  * @param[in] rgba 1024-byte 16x16 RGBA frame in row-major order.
  */
 void display_show_rgba(const uint8_t rgba[16 * 16 * 4]);
+
+/**
+ * Render a packed 1-bit 192x192 raster at the stock GC9306 window. This is
+ * intended for native-resolution display tests; the #05 path downsamples it.
+ *
+ * @param[in] mask Packed MSB-first raster, 192*192/8 bytes.
+ * @param[in] foreground RGB888 colour for set bits.
+ * @param[in] background RGB888 colour for clear bits.
+ */
+void display_show_mask192(const uint8_t mask[192 * 192 / 8],
+                          uint32_t foreground, uint32_t background);
+
+/**
+ * Render a packed 1-bit full 240x320 physical raster without logical
+ * downscaling. The #04 path writes it directly to the panel.
+ */
+void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
+                            uint32_t foreground, uint32_t background);

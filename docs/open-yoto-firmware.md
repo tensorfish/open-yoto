@@ -130,8 +130,21 @@ flowchart LR
               "track_images": ["media/track1.img", "media/track2.img"]}]}
   ```
 
-- Images are **16×16, one-bit (32 raw bytes)** — pre-scaled in the browser, so
-  the device just displays the bytes. Audio is MP3, streamed from the SD card.
+- **rev #05 (HT16D35x)**: images are 16×16, one-bit (32 raw bytes),
+  pre-scaled by the browser; the device displays those bytes directly.
+- **rev #04 (GC9306)**: stock-compatible card art is **16×16 RGBA32** on
+  both display revisions. The factory pipeline rejects decoded PNGs of any
+  other size, alpha-composites the 1,024-byte frame, and nearest-neighbour
+  scales it 12× for the TFT. The replacement's calibrated test path places
+  that 192×192 frame at `(24,24)` after the device's observed 40px
+  vertical correction and applies its observed RGB666 R/B output swap.
+
+  A C PNG/JPEG renderer that retains original uploads and contain-fits them
+  directly to 240×320 is an **optional rev #04-only enhancement**, not a
+  reconstruction of the original behavior. It must calculate dimensions from
+  each source image, letterbox rather than stretch, and establish its own
+  physical-panel calibration; its former native-raster test used a 20px
+  upward correction and does not generalize to the 192px stock frame.
 
 ## Audio pipeline
 
@@ -153,8 +166,9 @@ at `192.168.4.1`) and a web server. The 4-digit access code appears on the
 PIN is entered; then it reveals two tabs:
 
 - **New** — select a folder of `.mp3` + images (the audio and its image share a
-  name, different extension). The browser resizes each image to the 16×16
-  bitmap (with previews) and uploads the folder as a playlist.
+  name, different extension). The browser continues to generate the 16×16
+  bitmap for rev #05. For rev #04 it must upload the original PNG/JPEG along
+  with metadata; C performs the best-fit decode/render path on-device.
 - **Browse** — each item shows its picture, track count, a play button (audio
   streams in the browser), and a delete button.
 - **Scan a card** in admin mode to pre-fill the URL field with that card's URL;
