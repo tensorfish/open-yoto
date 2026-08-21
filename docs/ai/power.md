@@ -135,15 +135,15 @@ Decompiled files: `output/decompiled/FUN_seg4__<addr>_<addr>.c`; manifest
 | Address | Size | Likely role | Evidence |
 |---|---|---|---|
 | `0x400e7d38` | 383 | **`cw2015_init`** | `__func__` string `cw2015_init` → literal `0x400d1c2c`; I2C writes addr `0x62` reg `10`/`8`, profile at regs `0x10+` |
-| `0x400e7ef0` | 113 | CW2215B multi-byte reg read | called by `0x400e8048` with reg `4` (VCELL) and `2` (SOC) |
+| `0x400e7ef0` | 113 | CW2215B multi-byte reg read | called by `0x400e8050` with reg `4` (SOC) and `2` (VCELL) |
 | `0x400e7f64` | 101 | **`_cw_get_battery_profile`** | `__func__` str `_cw_get_battery_profile` → `0x400d1c4c` |
-| `0x400e7fcc` | 118 | **`_cw2215b_sleep`** | `__func__` str `_cw2215b_sleep` → `0x400d1c58` |
-| `0x400e8048` | 166 | **`_cw2215b_get_voltage` + `_cw2215b_get_capacity_percentage`** (Ghidra merged two small fns) | refs both `__func__` strings (`0x400d1c68`,`0x400d1c70`); reads reg `4`→voltage (VCELL), reg `2`→SOC `= (val*5)>>4` % |
+| `0x400e7fcc` | 118 | **`_cw2215b_sleep`** | `__func__` → `0x400d1c58` |
+| `0x400e8050` | 166 | **`_cw2215b_get_capacity_percentage` + `_cw2215b_get_voltage`** | reads reg `4`→SOC percentage and reg `2`→VCELL `= (val*5)>>4` mV |
 | `0x400e80f0` | 146 | **`cw2215b_get_temperature`** | `__func__` → `0x400d1c7c`; log `read 0x%02x = %d Celsius` (strings.txt:1063) |
 | `0x400e8184` | 219 | **`cw2215b_get_current`** | `__func__` → `0x400d1c88`; logs `REGH`/`REGL` (strings.txt:1066) |
-| `0x400e82a8` | 212 | **`cw2215b_set_alert_level`** | `__func__` → `0x400d1c9c`; log `Battery SOC alert set to %d%%` (strings.txt:1047) |
+| `0x400e82a8` | 212 | **`cw2215b_set_alert_level`** | `__func__` → `0x400d1c9c` |
 | `0x400e8380` | 70 | **`cw2215b_clear_alert`** | `__func__` → `0x400d1cb4` |
-| `0x400e83c8` | 1048 | **`cw2215b_init`** (largest fuel-gauge fn; also calls/embeds `cw2215b_active`, `_cw2215b_write_profile`, `_cw2215b_config_start_ic`, `_cw2215b_get_state`) | `__func__` strings `0x400d1cc4/1d18/1d00/1cf0/1cd4`; I2C addr `0x64`; reads reg `0xab` (version), reg `0` (chip ID, must equal `0xA0`) |
+| `0x400e83c8` | 1048 | **`cw2215b_init`** (largest fuel-gauge fn; also calls/embeds `cw2215b_active`, `_cw2215b_write_profile`, `_cw2215b_config_start_ic`, `_cw2215b_get_state`) | `I2C addr 0x64`; reads reg `0xab` (version), reg `0` (chip ID, must equal `0xA0`) |
 | `0x400e87f0` | 206 | **`cw2215b_get_cycle_count`** | `__func__` → `0x400d1d3c`; log `Cycle count %u` (strings.txt:1100) |
 | `0x400e88c4` | 141 | **`cw2215b_get_state_of_health`** | `__func__` → `0x400d1d4c` |
 
@@ -231,7 +231,8 @@ Reconstructed from decompiled C + log strings (strings.txt:1056–1093):
    `_cw2215b_write_profile` (`battery profile has been written to CW2215B`).
 4. Clear `CW2215B_REG_SOC_ALERT` UPDATE flag; set alert level via `cw2215b_set_alert_level`.
 5. Set `restart + active`, poll `_cw2215b_get_state` for ready (`ready-state timeout. Requesting sleep`).
-6. Readback: voltage (VCELL `4`), SOC (`2`), temp, current (H/L), cycle count (H/L), SOH.
+6. Readback: SOC (`0x04`), VCELL (`0x02`, `raw * 5 / 16` mV), temperature,
+   current (H/L), cycle count (H/L), and SOH.
 
 ### 6.2 CW2015 init sequence (`0x400e7d38`)
 

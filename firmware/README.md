@@ -66,9 +66,10 @@ and, on boot, just:
   LED rail is AC-coupled, so a plain GPIO high passes nothing and a lower
   PWM frequency is attenuated, leaving the display dim enough that colours
   wash out) and draw a green/blue test pattern on the GC9306 TFT;
-- emits a repeating **1 kHz** beep on the headphone DAC (`audio_play_tone()`).
+- emits a repeating **1 kHz** beep over the shared I²S bus to the AW88194A
+  speaker amp and ES8156 headphone DAC.
 
-This proves power, I²C, SPI/display, and I²S/ES8156 audio are alive.
+This proves the rev #04 power/reset, I²C, display, and complete audio path.
 
 Enable it in `idf.py menuconfig` (top-level **"Build the boot test firmware"**,
 from `main/Kconfig.projbuild`), or directly:
@@ -84,9 +85,9 @@ Rev #04 bring-up notes (verified against a physical unit and stock app):
   queue depth 1, stock reset, the full F2 tail, DC-low init groups, and
   1364-pixel queued RGB666 transfers. Pixel RGB bytes are forwarded
   unchanged — there is no channel transform.
-- The IOX uses the authoritative `hwconfig_04` values
-  (`p0Dir=0xB0 p1Dir=0xAF p0Data=0x30 p1Data=0xEF`); the stock drives
-  `levelconvertor` (IOX.0.3) low before display communication.
+- The IOX first receives the exact `hwconfig_04` latch/direction bytes
+  (`p0Dir=0xB0 p1Dir=0xAF p0Data=0x30 p1Data=0xEF`). Stock `app_main` then
+  drives VINHOLD HIGH, PWREN LOW, and `levelconvertor` (IOX.0.3) HIGH.
 - `analysis/extract_stock_battery_icon.py` recovers the exact low-SOC
   battery_ui asset (table ID 10, PNG `0x3F468D61`) and generates the compiled
   16×16 RGBA frame. The display alpha-premultiplies it and reproduces the
@@ -113,7 +114,8 @@ firmware/
     ├── components/
     ├── board/board_pins.h    # THE pin map + I2C addresses (authoritative)
     ├── iox/                  # IO expander (buttons, display CS, power/amp ctrl)
-    ├── battery/              # CW2215B fuel gauge + SGM41513 charger + ADC
+    ├── battery/              # CW2215B fuel gauge + SGM41513 charger
+    ├── lis2dh12/             # stock 0x18 accelerometer startup
     ├── display/              # HT16D35x 16x16 LED matrix (SPI + IOX CS)   [rev #05]
     ├── gc9306/               # GC9306 TFT driver (stock init + 18-bit)    [rev #04]
     ├── nfc/                  # ST CR95HF over UART
@@ -124,26 +126,32 @@ firmware/
 
 **Implemented** (real bus + peripheral setup, compiles against ESP-IDF v5):
 
-- I2C master (SDA=21, SCL=25) + IO expander(s) with the factory direction/data
-  (rev #04: authoritative `hwconfig_04` values; the stock drives
-  levelconvertor IOX.0.3 low before display traffic).
-- ADC1 (VBAT=GPIO39, light=GPIO36, IR-temp=GPIO35).
+- I2C master (SDA=21, SCL=25) + IO expander(s) with exact stock latch and
+  direction bytes, followed by the recovered run-state transitions (rev #04:
+  VINHOLD HIGH, active-low PWREN LOW, levelconvertor IOX.0.3 HIGH).
 - **GC9306 TFT driver [rev #04]**: stock SPI2 mode 0/80MHz/no-dummy setup,
   stock reset and complete initialization tail, queue-1 1364-pixel RGB666
   transport, CASET/RASET/RAMWR framing, and 40 kHz GPIO26 backlight.
-  `gc9306_draw_rgba16()` matches the stock 16×16 alpha-composition and
-  12× `(24,27)..(215,218)` scaler. The exact stock low-SOC PNG is generated
+  `gc9306_draw_rgba16()` alpha-composites and 12× scales into the calibrated
+  `(24,24)..(215,215)` test window; it corrects the device-observed R/B
+  RGB666 swap at the panel boundary. The exact stock low-SOC PNG is generated
   by `analysis/extract_stock_battery_icon.py` and compiled into the firmware.
+- Stock-matched I2S TX (APLL, mclk=0, bclk=5, lrclk=18, dout=19,
+  44100 Hz, 16-bit mono-left) with bounded PCM volume gain.
+- **AW88194A speaker amp [rev #04]**: factory reset timing, five ID retries,
+  exact 35-entry register table, recovered SmartK firmware and mono config,
+  VCALB, DSP/I²S/PLL validation, interrupts, start, and hard-unmute. The
+  optional repeating 1kHz, ±16,000 PCM boot tone exercises the physical path
+  while preserving responsive volume control.
 - UART (CR95HF, TX=33, RX=32, 57600 8-N-1).
-- I2S standard TX (mclk=0, bclk=5, lrclk=18, dout=19, 44100 Hz 16-bit).
 
 **TODO** (register-level detail, marked in the `.c` files with datasheet refs):
 
 - CW2215B fuel-gauge register reads (VCELL/SOC).
 - HT16D35x frame format + 6-bit-gray fan-out [rev #05].
 - CR95HF command sequence (Idn/ProtocolSelect/SendRecv + ISO14443-3A activation).
-- ES8156 + aw881xx codec register init (the aw881xx init was not cracked by
-  Adafruit either — speaker path is at-risk; headphone via ES8156 is the known-good path).
+- AW88194A runtime headphone insertion/removal routing and per-path volume
+  curves; cold-start SmartK data and speaker activation are implemented.
 - The NFC → `mapping.json` → play/render main loop, and the hidden upload mode.
 
 ## Hardware revision caveat

@@ -1,31 +1,21 @@
 /*
- * battery.c — CW2215B fuel gauge + SGM41513 charger + ADC monitoring.
+ * battery.c — CW2215B fuel gauge + SGM41513 charger monitoring.
  *
- * The shared I2C bus is installed by iox_init() (called first from app_main),
- * so this component only reads its own devices on that bus. Battery voltage
- * is sampled on ADC1 channel 3 (VBAT sense) through the oneshot driver, and
- * the CW2215B fuel gauge is read over I2C for a more accurate VCELL / SOC.
+ * The rev #04/#05 stock configurations use the CW2215B on I2C and define no
+ * ADC battery pin. GPIO39 belongs to encoder 0 on rev #04, so sampling the
+ * unrelated ADC1 channel there would disturb a real board input.
  */
 #include "battery.h"
 #include "board_pins.h"
 #include "iox.h"
 
 #include "driver/i2c.h"
-#include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "battery";
 
-/* ---- ADC1 (VBAT / light / IR-temp) ---- */
-/* 12-bit @ 12 dB attenuation. The ADC full-scale reference is ~3.3 V, but the
- * ESP32 SAR ADC saturates near ~3.1 V; treat the result as an approximate pin
- * voltage until the external divider is characterized. */
-#define BATTERY_ADC_ATTEN       ADC_ATTEN_DB_12
-#define BATTERY_ADC_BITWIDTH    ADC_BITWIDTH_12
-#define BATTERY_ADC_MAX_RAW     4095
-#define BATTERY_ADC_REF_MV      3300
 
 #define BATTERY_I2C_TIMEOUT_MS  100
 
@@ -53,8 +43,8 @@ static const char *TAG = "battery";
  * polarity against the schematic. */
 #define BATTERY_CHG_STAT_ACTIVE_LOW 1
 
-static adc_oneshot_unit_handle_t s_adc1_handle;
 static bool s_gauge_present = false;
+static bool s_gauge_data_valid = false;
 static bool s_charger_present = false;
 
 /* Read a single 8-bit register from the CW2215B over the shared I2C bus. */
@@ -119,15 +109,6 @@ static bool cw2215b_read_soc(int *soc)
     return true;
 }
 
-static int adc_read_mv(adc_channel_t channel)
-{
-    int raw = 0;
-    if (adc_oneshot_read(s_adc1_handle, channel, &raw) != ESP_OK)
-    {
-        return -1;
-    }
-    return (raw * BATTERY_ADC_REF_MV) / BATTERY_ADC_MAX_RAW;
-}
 
 /* Probe a device by writing its register pointer (device ACKs the address). */
 static bool i2c_device_probe(uint8_t addr)
@@ -140,52 +121,20 @@ static bool i2c_device_probe(uint8_t addr)
 
 esp_err_t battery_init(void)
 {
-    esp_err_t err;
-
-    /* ---- ADC1 oneshot: VBAT + light + IR-temp ---- */
-    adc_oneshot_unit_init_cfg_t unit_cfg = {
-        .unit_id = ADC_UNIT_1,
-    };
-    err = adc_oneshot_new_unit(&unit_cfg, &s_adc1_handle);
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "adc_oneshot_new_unit failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten = BATTERY_ADC_ATTEN,
-        .bitwidth = BATTERY_ADC_BITWIDTH,
-    };
-    err = adc_oneshot_config_channel(s_adc1_handle, ADC_CH_BAT, &chan_cfg);
-    if (err != ESP_OK) return err;
-    err = adc_oneshot_config_channel(s_adc1_handle, ADC_CH_LIGHT, &chan_cfg);
-    if (err != ESP_OK) return err;
-    err = adc_oneshot_config_channel(s_adc1_handle, ADC_CH_IR_TEMP, &chan_cfg);
-    if (err != ESP_OK) return err;
-
-    int vbat_mv = adc_read_mv(ADC_CH_BAT);
-    if (vbat_mv >= 0)
-    {
-        ESP_LOGI(TAG, "VBAT ADC (ch%d, GPIO%d) = %d mV",
-                 ADC_CH_BAT, (int)PIN_ADC_BAT_VBAT, vbat_mv);
-        /* TODO: true battery voltage = this reading * VBAT divider ratio; the
-         * ADC sees the divided sense node, ratio not yet recovered. */
-    }
-    else
-    {
-        ESP_LOGW(TAG, "VBAT ADC read failed");
-    }
-
-    /* ---- CW2215B fuel gauge over I2C: chip ID + VCELL + SOC ---- */
+    /* CW2215B fuel gauge over I2C: chip ID + VCELL + SOC. */
     s_gauge_present = cw2215b_detect();
     if (s_gauge_present)
     {
         int vcell_mv = 0;
         int soc = 0;
+        bool vcell_ok;
+        bool soc_ok;
+
         ESP_LOGI(TAG, "CW2215B fuel gauge (0x%02x): chip id 0x%02x OK",
                  (unsigned)I2C_ADDR_FUEL_GAUGE, (unsigned)CW2215B_CHIP_ID);
-        if (cw2215b_read_vcell_mv(&vcell_mv))
+        vcell_ok = cw2215b_read_vcell_mv(&vcell_mv);
+        soc_ok = cw2215b_read_soc(&soc);
+        if (vcell_ok)
         {
             ESP_LOGI(TAG, "CW2215B VCELL = %d mV", vcell_mv);
         }
@@ -193,13 +142,19 @@ esp_err_t battery_init(void)
         {
             ESP_LOGW(TAG, "CW2215B VCELL read failed");
         }
-        if (cw2215b_read_soc(&soc))
+        if (soc_ok)
         {
             ESP_LOGI(TAG, "CW2215B SOC = %d %%", soc);
         }
         else
         {
             ESP_LOGW(TAG, "CW2215B SOC read failed");
+        }
+
+        s_gauge_data_valid = vcell_ok && vcell_mv > 0 && soc_ok;
+        if (!s_gauge_data_valid)
+        {
+            ESP_LOGW(TAG, "CW2215B data inactive; voltage and SOC unavailable");
         }
     }
     else
@@ -214,11 +169,16 @@ esp_err_t battery_init(void)
              s_charger_present ? "found" : "NOT found");
 
     /* ---- charger + battery-alert status via IO expander ---- */
+    bool plug_stat = iox_get_pin(IOX_PLUG_STAT);
     bool chg_stat = iox_get_pin(IOX_CHG_STAT);
     bool bat_alert = iox_get_pin(IOX_BAT_ALERT);
-    /* TODO: confirm active-level polarity for both pins from the schematic. */
-    ESP_LOGI(TAG, "charger status (IOX_CHG_STAT) = %s", chg_stat ? "HIGH" : "LOW");
-    ESP_LOGI(TAG, "battery alert (IOX_BAT_ALERT) = %s", bat_alert ? "HIGH" : "LOW");
+    /* Levels are logged raw until their schematic polarity is verified. */
+    ESP_LOGI(TAG, "USB plug status (IOX_PLUG_STAT) = %s",
+             plug_stat ? "HIGH" : "LOW");
+    ESP_LOGI(TAG, "charger status (IOX_CHG_STAT) = %s",
+             chg_stat ? "HIGH" : "LOW");
+    ESP_LOGI(TAG, "battery alert (IOX_BAT_ALERT) = %s",
+             bat_alert ? "HIGH" : "LOW");
 
     return ESP_OK;
 }
@@ -226,24 +186,20 @@ esp_err_t battery_init(void)
 float battery_voltage(void)
 {
     int mv = 0;
-    if (s_gauge_present && cw2215b_read_vcell_mv(&mv))
+
+    if (s_gauge_present && s_gauge_data_valid && cw2215b_read_vcell_mv(&mv))
     {
         return (float)mv;
     }
 
-    /* Fall back to the ADC1 VBAT sense channel (undivided). */
-    if (s_adc1_handle == NULL)
-    {
-        return 0.0f;
-    }
-    int adc_mv = adc_read_mv(ADC_CH_BAT);
-    return (adc_mv >= 0) ? (float)adc_mv : 0.0f;
+    return 0.0f;
 }
 
 int battery_soc(void)
 {
     int soc = 0;
-    if (s_gauge_present && cw2215b_read_soc(&soc))
+
+    if (s_gauge_present && s_gauge_data_valid && cw2215b_read_soc(&soc))
     {
         return soc;
     }
@@ -262,13 +218,11 @@ bool battery_is_low(void)
 
 bool battery_is_charging(void)
 {
-    /* IOX_CHG_STAT floats on a card-less/uncharged bench. A real charging
-     * condition requires the SGM41513 to answer on I2C as well. */
-    if (!s_charger_present)
-    {
-        return false;
-    }
-
+    /*
+     * The SGM41513 I2C peripheral is absent on this unit, but USB connected
+     * and the charge-status line both read low. SGM's CHG output is open-drain
+     * active-low, so this hardware status is the authoritative charging signal.
+     */
     bool level = iox_get_pin(IOX_CHG_STAT);
 
 #if BATTERY_CHG_STAT_ACTIVE_LOW

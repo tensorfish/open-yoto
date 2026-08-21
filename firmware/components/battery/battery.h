@@ -1,10 +1,9 @@
 /*
- * battery.h — CW2215B fuel gauge + SGM41513 charger + ADC monitoring.
+ * battery.h — CW2215B fuel gauge + SGM41513 charger monitoring.
  *
- * Reads the battery voltage and state of charge from the CW2215B fuel gauge
- * over the shared I2C bus (installed by iox_init), falling back to the ADC1
- * VBAT sense channel when the gauge is absent or unreadable. Also surfaces
- * charger / battery-alert status from the IO expander.
+ * Reads battery voltage and state of charge from the CW2215B over the shared
+ * I2C bus installed by iox_init(). Rev #04/#05 have no ADC battery pin.
+ * Charger and battery-alert status come from the IO expander.
  */
 #pragma once
 
@@ -13,16 +12,14 @@
 #include "esp_err.h"
 
 /**
- * Initialize ADC1 (VBAT / light / IR-temp channels), read the CW2215B fuel
- * gauge chip ID, VCELL, and SOC, probe the SGM41513 charger, and read the
- * charger + battery-alert status from the IO expander. Logs each peripheral's
- * state.
+ * Read the CW2215B chip ID, VCELL, and SOC, probe the SGM41513 charger, and
+ * read charger + battery-alert status from the IO expander. Logs each state.
  */
 esp_err_t battery_init(void);
 
 /**
- * Battery voltage in millivolts. Prefers the CW2215B VCELL register; falls
- * back to the ADC1 VBAT sense channel if the gauge is absent or fails.
+ * Battery voltage in millivolts from the CW2215B VCELL register. Returns 0
+ * when the gauge is absent or its data is invalid.
  */
 float battery_voltage(void);
 

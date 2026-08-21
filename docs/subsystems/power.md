@@ -25,6 +25,20 @@ capacity percentage (`_cw2215b_get_capacity_percentage`,
 
 ## Power-control path
 
+The clean factory app confirms the #04 single-ET6416 run state:
+
+```text
+ET6416 @ 0x20
+VINHOLD        IOX.1.6 = HIGH
+PWREN          IOX.1.4 = LOW
+levelconvertor IOX.0.3 = HIGH
+PACTRL         IOX.0.6 = LOW, then LOW/HIGH during amp reset
+```
+
+The IOX latch defaults precede these explicit `app_main` transitions. They
+must not be treated as the final pin state. These rails precede speaker
+initialization; do not apply #05's second-expander pins to this board.
+
 2-IOX boards:
 
 ```text

@@ -40,9 +40,9 @@ battery read).
 
 ### IOX factory direction/data (authoritative, from `output/hwconfig_*.json`)
 
-Each config carries the stock firmware's IOX port defaults — **use these
-exactly** when porting a revision; inferred values are wrong. Notably for
-**#04** (single IOX, `ET6416`):
+Each config carries the IOX latch defaults consumed by the stock firmware.
+Those bytes are only the first stage; `app_main` applies the run-state
+transitions after the expander is configured. For **#04** (single `ET6416`):
 
 ```json
 "iox": { "type": "ET6416",
@@ -50,13 +50,24 @@ exactly** when porting a revision; inferred values are wrong. Notably for
          "p0Data": "0x30", "p1Data": "0xEF" }
 ```
 
-- **`levelconvertor` (IOX.0.3) is active-low**: `p0Data` bit 3 = 0 enables
-  the display level shifter. Driving it high silently blocks the display
-  SPI/backlight domain while everything else (I²C, audio, logs) keeps
-  working — the classic "perfect logs, dead display" failure.
-- `pwren` (IOX.1.4) is an output driven LOW; `vinhold` (IOX.1.6) an output
-  driven HIGH; `pactrl` (IOX.0.6) an output driven LOW.
-- TFT `cs`/`dc`/`reset` (IOX.0.0–0.2) default LOW.
+Stock `app_main` at `0x400daa89..0x400daaed` then drives:
+
+```text
+VINHOLD       IOX.1.6 = HIGH
+PWREN         IOX.1.4 = LOW
+levelconvertor IOX.0.3 = HIGH
+```
+
+`PACTRL` remains LOW until `aw881xx_hw_reset` at `0x400deea0`, which toggles it
+LOW for 2 ms and then HIGH for 2 ms. The HIGH level-convertor transition is
+required before downstream peripherals are initialized; treating the initial
+`p0Data` bit 3 as the running state leaves the AW88194 and CR95HF inaccessible.
+
+The full clean flash dump (`~/Downloads/yoto_firmware_clean.bin`) has its
+factory app at `0x40000`; that app is byte-identical to `output/factory.bin`
+(SHA-256 `e93726a5ca62fecdf1879580e7209816e756af383efc1a3f0b8530bbf7867fdd`).
+Its #04 configuration and the transitions above are the board-init source of
+truth: initialize one ET6416 at `0x20`, not the two-expander #05 topology.
 
 ## Pin-mapping notation
 

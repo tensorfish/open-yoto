@@ -1,10 +1,11 @@
 /*
- * audio.c — Yoto Player MP3 player (I2S std TX -> ES8156 headphone DAC).
+ * audio.c — Yoto Player MP3 player (I2S std TX -> AW88194A speaker amp
+ * and ES8156 headphone DAC).
  *
- * audio_init() installs the I2S standard-mode master TX channel at 44100 Hz,
- * 16-bit, stereo on I2S_NUM_0 and brings up the ES8156 headphone DAC. A
- * persistent FreeRTOS task then decodes MP3 files (Helix decoder) into
- * interleaved int16 PCM and writes it to the I2S TX DMA.
+ * audio_init() installs the stock-matched I2S master TX path at 44100 Hz,
+ * 16-bit mono-left on I2S_NUM_0, then brings up both audio sinks. A persistent
+ * FreeRTOS task decodes MP3 files, downmixes stereo to mono, and writes int16
+ * PCM to the I2S TX DMA.
  *
  * Playback control (play/stop/pause/resume) is shared state checked by the
  * decode task. A task notification carries the stop/play requests so the task
@@ -12,6 +13,7 @@
  */
 #include "audio.h"
 
+#include "aw88194.h"
 #include "board_pins.h"
 #include "codec_es8156.h"
 
@@ -20,9 +22,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mp3dec.h"
-
-#include <string.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 static const char *TAG = "audio";
 
@@ -49,6 +51,11 @@ static const char *TAG = "audio";
 /* Decode task priority. Below the encoder (5) but above idle (0). */
 #define AUDIO_DECODE_PRIORITY   4
 
+/* The boot speaker test runs independently so encoder events remain live. */
+#define AUDIO_TONE_STACK_BYTES      3072
+#define AUDIO_TONE_PRIORITY         4
+#define AUDIO_TONE_AMPLITUDE       16000
+
 /* Path handed from audio_play() to the decode task. */
 #define AUDIO_PATH_MAX          128
 
@@ -58,6 +65,9 @@ static i2s_chan_handle_t s_tx_chan = NULL;
 /* Decode task handle, created in audio_init(). */
 static TaskHandle_t s_decode_task = NULL;
 
+/* Optional tone task used by the speaker smoke test. */
+static TaskHandle_t s_tone_task = NULL;
+
 /* Shared playback state. s_stop_req and s_paused are written from the calling
  * thread and read (polled) by the decode task; s_playing is written by the
  * decode task and read by audio_is_playing(). Volatile makes those cross-task
@@ -66,13 +76,19 @@ static volatile bool s_playing = false;
 static volatile bool s_stop_req = false;
 static volatile bool s_paused = false;
 
+/* Volume is applied as PCM gain so it affects both the ES8156 and the
+ * shared-I2S AW881xx speaker path. The fixed ES8156 hardware gain remains its
+ * safe initialization default. */
+static volatile int s_volume = 70;
+static int16_t s_scaled_pcm[AUDIO_PCM_BUF_SAMPLES];
+
 /* File path for the current playback request, installed before the PLAY
  * notification is issued to the decode task. */
 static char s_path[AUDIO_PATH_MAX];
 
 /**
- * Configure the I2S std TX channel: master, 44100 Hz, 16-bit, Philips/I2S,
- * stereo, on the board I2S pins.
+ * Configure the I2S std TX channel exactly as the stock playback pipeline
+ * settles it: master, APLL 44100 Hz, 16-bit Philips/I2S, mono-left.
  *
  * return ESP_OK on success, otherwise the first I2S driver error.
  */
@@ -82,6 +98,18 @@ static esp_err_t audio_i2s_init(void)
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT,
                                                             I2S_ROLE_MASTER);
+    i2s_std_clk_config_t clk_cfg =
+        I2S_STD_CLK_DEFAULT_CONFIG(I2S_SAMPLE_RATE_HZ);
+    i2s_std_slot_config_t slot_cfg =
+        I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                            I2S_SLOT_MODE_MONO);
+
+    /* Stock i2s_stream config @ 0x401d8d16 uses APLL, then
+     * i2s_set_clk(44100, 16, 1) @ 0x401d8d82 switches to mono-left. On ESP32
+     * legacy I2S that transition also inverts WS polarity. */
+    clk_cfg.clk_src = I2S_CLK_SRC_APLL;
+    slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    slot_cfg.ws_pol = true;
     err = i2s_new_channel(&chan_cfg, &s_tx_chan, NULL);
     if (err != ESP_OK)
     {
@@ -89,11 +117,10 @@ static esp_err_t audio_i2s_init(void)
         return err;
     }
 
-    /* MCLK = 256 * fs (the ES8156 expects 256 fs), 16-bit stereo Philips. */
+    /* MCLK = 256 * fs, 16-bit mono-left Philips. */
     i2s_std_config_t std_cfg = {
-        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(I2S_SAMPLE_RATE_HZ),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                        I2S_SLOT_MODE_STEREO),
+        .clk_cfg  = clk_cfg,
+        .slot_cfg = slot_cfg,
         .gpio_cfg = {
             .mclk = PIN_I2S_MCLK,
             .bclk = PIN_I2S_BCLK,
@@ -123,7 +150,9 @@ static esp_err_t audio_i2s_init(void)
         return err;
     }
 
-    ESP_LOGI(TAG, "I2S TX enabled (mclk=%d bclk=%d lrclk=%d dout=%d, %d Hz)",
+    ESP_LOGI(TAG,
+             "I2S TX enabled (APLL, mono-left, mclk=%d bclk=%d lrclk=%d "
+             "dout=%d, %d Hz)",
              PIN_I2S_MCLK, PIN_I2S_BCLK, PIN_I2S_LRCLK, PIN_I2S_DOUT,
              I2S_SAMPLE_RATE_HZ);
     return ESP_OK;
@@ -208,47 +237,80 @@ static int audio_fill(FILE *fp, unsigned char *buf,
 }
 
 /**
- * Write a block of interleaved 16-bit PCM to the I2S TX DMA, retrying while
- * the DMA is full and honoring pause/stop in between attempts.
+ * Write mono 16-bit PCM to I2S, honoring pause/stop between writes.
  *
- * pcm    PCM samples (interleaved stereo).
- * frames number of 16-bit samples in pcm.
+ * @param[in] pcm Mono 16-bit PCM samples.
+ * @param[in] samples Number of samples in pcm.
  *
- * return true if the block was fully written, false if playback stopped while
- *        waiting.
+ * PCM is scaled in bounded chunks using the current volume. This makes volume
+ * affect every device sharing I2S, including the speaker amp.
+ *
+ * @return True if all samples were written; false if playback stopped.
  */
-static bool audio_write_pcm(const int16_t *pcm, size_t frames)
+static bool audio_write_pcm(const int16_t *pcm, size_t samples)
 {
     size_t offset = 0;
 
-    while (offset < frames)
+    while (offset < samples)
     {
-        size_t written = 0;
-        esp_err_t err;
+        const int16_t *output;
+        size_t chunk_samples = samples - offset;
+        size_t chunk_offset = 0;
+        int volume = s_volume;
 
-        if (s_stop_req)
+        if (chunk_samples > AUDIO_PCM_BUF_SAMPLES)
         {
-            return false;
+            chunk_samples = AUDIO_PCM_BUF_SAMPLES;
         }
-        while (s_paused && !s_stop_req)
+        if (volume < 0)
         {
-            vTaskDelay(pdMS_TO_TICKS(10));
+            volume = 0;
         }
-        if (s_stop_req)
+        else if (volume > 100)
         {
-            return false;
+            volume = 100;
         }
 
-        err = i2s_channel_write(s_tx_chan, pcm + offset,
-                                (frames - offset) * sizeof(int16_t),
-                                &written,
-                                pdMS_TO_TICKS(AUDIO_I2S_WRITE_TICK_MS));
-        if (err != ESP_OK && err != ESP_ERR_TIMEOUT)
+        output = pcm + offset;
+        if (volume < 100)
         {
-            ESP_LOGE(TAG, "i2s_channel_write failed: %s", esp_err_to_name(err));
-            return false;
+            for (size_t i = 0; i < chunk_samples; i++)
+            {
+                s_scaled_pcm[i] = (int16_t)(((int32_t)output[i] * volume) / 100);
+            }
+            output = s_scaled_pcm;
         }
-        offset += written / sizeof(int16_t);
+
+        while (chunk_offset < chunk_samples)
+        {
+            size_t written = 0;
+            esp_err_t err;
+
+            if (s_stop_req)
+            {
+                return false;
+            }
+            while (s_paused && !s_stop_req)
+            {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (s_stop_req)
+            {
+                return false;
+            }
+
+            err = i2s_channel_write(s_tx_chan, output + chunk_offset,
+                                    (chunk_samples - chunk_offset) * sizeof(int16_t),
+                                    &written,
+                                    pdMS_TO_TICKS(AUDIO_I2S_WRITE_TICK_MS));
+            if (err != ESP_OK && err != ESP_ERR_TIMEOUT)
+            {
+                ESP_LOGE(TAG, "i2s_channel_write failed: %s", esp_err_to_name(err));
+                return false;
+            }
+            chunk_offset += written / sizeof(int16_t);
+        }
+        offset += chunk_samples;
     }
     return true;
 }
@@ -274,10 +336,13 @@ static void audio_decode_task(void *arg)
 
     for (;;)
     {
-        /* Block until a play/stop request; the notification value is only a
-         * wake-up, the state flags (s_stop_req, s_paused) drive behavior. */
-        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t notify = 0;
 
+        xTaskNotifyWait(0, UINT32_MAX, &notify, portMAX_DELAY);
+        if ((notify & AUDIO_NOTIFY_PLAY) == 0)
+        {
+            continue;
+        }
         if (decoder == NULL)
         {
             ESP_LOGE(TAG, "decoder unavailable; ignoring play request");
@@ -348,6 +413,20 @@ static void audio_decode_task(void *arg)
                     {
                         out_samples = AUDIO_PCM_BUF_SAMPLES;
                     }
+                    /* The factory pipeline calls i2s_set_clk(..., channels=1)
+                     * and resamples decoded stereo to that mono sink. */
+                    if (info.nChans == 2)
+                    {
+                        size_t frames = out_samples / 2;
+
+                        for (size_t i = 0; i < frames; i++)
+                        {
+                            int32_t mixed = (int32_t)pcm[i * 2]
+                                          + (int32_t)pcm[i * 2 + 1];
+                            pcm[i] = (int16_t)(mixed / 2);
+                        }
+                        out_samples = frames;
+                    }
                     if (!audio_write_pcm(pcm, out_samples))
                     {
                         break;
@@ -388,6 +467,7 @@ static void audio_decode_task(void *arg)
 esp_err_t audio_init(void)
 {
     esp_err_t err;
+    esp_err_t speaker_err;
 
     if (s_tx_chan != NULL)
     {
@@ -395,10 +475,13 @@ esp_err_t audio_init(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    err = audio_i2s_init();
-    if (err != ESP_OK)
+    /* Factory order: reset/identify the AW while BCLK/LRCLK are stopped.
+     * SmartPA cold start is deferred until the I2S channel is active. */
+    speaker_err = aw88194_init();
+    if (speaker_err != ESP_OK)
     {
-        return err;
+        ESP_LOGW(TAG, "AW88194 identification failed: %s",
+                 esp_err_to_name(speaker_err));
     }
 
     err = codec_es8156_init();
@@ -408,6 +491,22 @@ esp_err_t audio_init(void)
         return err;
     }
 
+    err = audio_i2s_init();
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    if (speaker_err == ESP_OK)
+    {
+        speaker_err = aw88194_start();
+        if (speaker_err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "AW88194 SmartPA start failed: %s",
+                     esp_err_to_name(speaker_err));
+        }
+    }
+
     if (xTaskCreate(audio_decode_task, "audio_dec", AUDIO_DECODE_STACK_BYTES,
                     NULL, AUDIO_DECODE_PRIORITY, &s_decode_task) != pdPASS)
     {
@@ -415,7 +514,15 @@ esp_err_t audio_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "audio ready (44100 Hz, 16-bit stereo, I2S %d)", I2S_PORT);
+    if (speaker_err == ESP_OK)
+    {
+        ESP_LOGI(TAG, "audio ready (speaker + headphone, APLL 44100 Hz, 16-bit mono-left, I2S %d)",
+                 I2S_PORT);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "audio ready in headphone-only mode; speaker unavailable");
+    }
     return ESP_OK;
 }
 
@@ -499,7 +606,17 @@ esp_err_t audio_resume(void)
 
 esp_err_t audio_set_volume(int vol)
 {
-    return codec_es8156_set_volume(vol);
+    if (vol < 0)
+    {
+        vol = 0;
+    }
+    else if (vol > 100)
+    {
+        vol = 100;
+    }
+
+    s_volume = vol;
+    return ESP_OK;
 }
 
 bool audio_is_playing(void)
@@ -524,6 +641,7 @@ esp_err_t audio_play_tone(int freq_hz)
     int16_t *buf;
     int total;
     int i;
+    bool wrote_cycle = false;
 
     if (s_tx_chan == NULL)
     {
@@ -540,7 +658,7 @@ esp_err_t audio_play_tone(int freq_hz)
     }
 
     total = on_frames + off_frames;
-    buf = calloc((size_t)total, 2 * sizeof(int16_t));
+    buf = calloc((size_t)total, sizeof(int16_t));
     if (buf == NULL)
     {
         return ESP_ERR_NO_MEM;
@@ -548,10 +666,10 @@ esp_err_t audio_play_tone(int freq_hz)
 
     for (i = 0; i < on_frames; i++)
     {
-        int16_t v = ((i % period) < half) ? (int16_t)6000 : (int16_t)-6000;
+        int16_t v = ((i % period) < half) ? AUDIO_TONE_AMPLITUDE
+                                            : -AUDIO_TONE_AMPLITUDE;
 
-        buf[i * 2] = v;
-        buf[i * 2 + 1] = v;
+        buf[i] = v;
     }
 
     s_playing = true;
@@ -564,9 +682,45 @@ esp_err_t audio_play_tone(int freq_hz)
         {
             break;
         }
+        if (!wrote_cycle)
+        {
+            ESP_LOGI(TAG, "tone DMA active: %d mono samples per cycle", total);
+            wrote_cycle = true;
+        }
     }
 
     free(buf);
     s_playing = false;
+    return ESP_OK;
+}
+
+static void audio_tone_task(void *arg)
+{
+    int freq_hz = (int)(intptr_t)arg;
+
+    (void)audio_play_tone(freq_hz);
+    s_tone_task = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t audio_start_tone(int freq_hz)
+{
+    if (s_tx_chan == NULL || freq_hz < 50 || freq_hz > 8000)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_tone_task != NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xTaskCreate(audio_tone_task, "audio_tone", AUDIO_TONE_STACK_BYTES,
+                    (void *)(intptr_t)freq_hz, AUDIO_TONE_PRIORITY,
+                    &s_tone_task) != pdPASS)
+    {
+        s_tone_task = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "tone started: %d Hz, PCM amplitude %d",
+             freq_hz, AUDIO_TONE_AMPLITUDE);
     return ESP_OK;
 }

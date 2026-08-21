@@ -18,6 +18,7 @@
 #include "board_pins.h"
 #include "iox.h"
 #include "battery.h"
+#include "lis2dh12.h"
 #include "display.h"
 #include "cr95hf.h"
 #include "encoder.h"
@@ -36,7 +37,11 @@ static const char *TAG = "main";
 #define VOLUME_MIN 0
 #define VOLUME_MAX 100
 
+#ifdef CONFIG_APP_SPEAKER_TEST_TONE
+static int s_volume = 100;
+#else
 static int s_volume = 70;
+#endif
 
 /* ------------------------------------------------------------------ art -- */
 /* 16x16 one-bit bitmaps: 2 bytes per row (32 bytes total). Each byte holds 8
@@ -287,7 +292,7 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
     {
         if (encoder_id == ENCODER_ID_0)
         {
-            s_volume += delta * VOLUME_DELTA_PER_DETENT;
+            s_volume -= delta * VOLUME_DELTA_PER_DETENT;
             if (s_volume < VOLUME_MIN)
             {
                 s_volume = VOLUME_MIN;
@@ -486,6 +491,10 @@ void app_main(void)
     /* I2C bus + IO expanders first. */
     ESP_ERROR_CHECK(iox_init());
     ESP_ERROR_CHECK(battery_init());
+    if (lis2dh12_init() != ESP_OK)
+    {
+        ESP_LOGW(TAG, "accelerometer unavailable; continuing");
+    }
     ESP_ERROR_CHECK(display_init());
 
     /* Boot-time battery check: render before the remaining peripheral init
@@ -505,6 +514,21 @@ void app_main(void)
     }
 #endif
 
+    /* Audio is another recoverable peripheral. A missing amplifier/codec
+     * must remain visible in logs without turning one hardware fault into a
+     * watchdog-like reboot loop. Playback calls report invalid state later. */
+    if (audio_init() != ESP_OK)
+    {
+        ESP_LOGW(TAG, "audio unavailable; continuing without playback");
+    }
+    audio_set_volume(s_volume);
+
+#ifdef CONFIG_APP_SPEAKER_TEST_TONE
+    if (audio_start_tone(1000) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "speaker test tone failed to start");
+    }
+#endif
     /* NFC reader is optional at boot: a missing/unresponsive CR95HF (no
      * antenna, dead chip, bench rig) must not reboot-loop the device. */
     if (cr95hf_init() != ESP_OK)
@@ -520,8 +544,6 @@ void app_main(void)
     {
         ESP_LOGW(TAG, "content unavailable (no SD card?); continuing");
     }
-    ESP_ERROR_CHECK(audio_init());
-    audio_set_volume(s_volume);
     admin_set_code_callback(show_admin_code);
 
     ESP_LOGI(TAG, "boot complete (battery %d%%, %.1f mV)",

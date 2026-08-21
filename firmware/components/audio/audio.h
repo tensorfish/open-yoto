@@ -1,10 +1,11 @@
 /*
- * audio.h — Yoto Player MP3 player (I2S std TX -> ES8156 headphone DAC).
+ * audio.h — Yoto Player MP3 player (I2S std TX -> AW88194A speaker amp
+ * and ES8156 headphone DAC).
  *
- * Brings up the I2S master TX channel (44100 Hz, 16-bit, stereo) on I2S_NUM_0
- * and the ES8156 headphone DAC, then streams MP3 files from the FatFS VFS.
- * Playback is decoded with the vendored Helix MP3 decoder (libhelix-mp3) in a
- * dedicated FreeRTOS task and written to the I2S DMA as interleaved int16 PCM.
+ * Brings up the stock-matched I2S master TX path (APLL 44100 Hz, 16-bit
+ * mono-left), both audio sinks, and streams MP3 files from FatFS. Playback is
+ * decoded with Helix, downmixed to mono, and written to I2S DMA by a dedicated
+ * FreeRTOS task.
  */
 #pragma once
 
@@ -13,21 +14,22 @@
 #include "esp_err.h"
 
 /**
- * Initialize the audio path: install the I2S std TX channel (44100 Hz, 16-bit
- * stereo, master) on I2S_NUM_0 and bring up the ES8156 headphone DAC. Must be
+ * Initialize the audio path: reset/identify the speaker amp while clocks are
+ * stopped, initialize the ES8156 DAC, install the stock APLL/mono-left I2S TX
+ * channel, then load/start the AW88194A SmartPA. Must be
  * called after iox_init() so the I2C bus is available.
  *
- * return ESP_OK on success, otherwise the first I2S or codec error.
+ * Speaker failure is logged but leaves the ES8156 headphone path operational.
+ * return ESP_OK when that usable audio path is ready, otherwise the first I2S
+ * or codec error.
  */
 esp_err_t audio_init(void);
 
 /**
- * Begin playing an MP3 file. The file is opened with fopen()/fread() on the
- * VFS (path may be absolute, e.g. "/sdcard/media/a.mp3", or relative to the
- * current working directory), the ID3v2 tag is skipped, and frames are
- * decoded (MP3FindSyncWord/MP3Decode) into interleaved 16-bit PCM pushed to
- * the I2S TX DMA. Decoding runs in a dedicated FreeRTOS task, so this call
- * returns once playback has been started.
+ * Begin playing an MP3 file from the VFS. The file is decoded with Helix,
+ * stereo frames are downmixed to mono, and PCM is pushed to I2S DMA. Decoding
+ * runs in a dedicated FreeRTOS task, so this call returns after playback has
+ * started.
  *
  * If another file is already playing it is stopped first.
  *
@@ -65,9 +67,9 @@ esp_err_t audio_resume(void);
 /**
  * Set the playback volume.
  *
- * vol 0..100 percent; clamped to that range and applied to the ES8156 DAC.
- *
- * return ESP_OK on success, otherwise the codec I2C error.
+ * @param[in] vol 0..100 percent; clamped and applied as bounded PCM gain
+ *                 before I2S transmission, affecting speaker and headphone.
+ * @return ESP_OK.
  */
 esp_err_t audio_set_volume(int vol);
 
@@ -91,3 +93,13 @@ bool audio_is_paused(void);
  * @return ESP_OK once stopped, or an esp_err_t on invalid state/argument.
  */
 esp_err_t audio_play_tone(int freq_hz);
+
+/**
+ * Start the repeating square-wave tone in a dedicated task. Unlike
+ * audio_play_tone(), this returns immediately so encoder volume events remain
+ * responsive. Stop it with audio_stop().
+ *
+ * @param[in] freq_hz Tone frequency (50..8000).
+ * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE, or ESP_ERR_NO_MEM.
+ */
+esp_err_t audio_start_tone(int freq_hz);

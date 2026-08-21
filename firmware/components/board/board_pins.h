@@ -18,7 +18,6 @@
 #include "driver/uart.h"
 #include "driver/sdmmc_host.h"
 #include "driver/spi_master.h"
-#include "esp_adc/adc_oneshot.h"
 
 /* ------------------------------------------------------------------ I2C -- */
 #define PIN_I2C_SDA                 GPIO_NUM_21
@@ -31,14 +30,16 @@
 #define I2C_ADDR_IOX_1              0x21   /* PI4IOE5V6416 #1 (display CS, power ctrl)      */
 #define I2C_ADDR_FUEL_GAUGE         0x64   /* CW2215B battery fuel gauge                    */
 #define I2C_ADDR_CHARGER            0x6B   /* SGM41513 charger                              */
+#define I2C_ADDR_ACCELEROMETER      0x18   /* LIS2DH12 accelerometer */
+#define I2C_ADDR_SPKR_AMP_L         0x34   /* aw881xx speaker amp (left) */
 #ifdef CONFIG_BOARD_REV_04
-#define I2C_ADDR_HP_DAC             0x08   /* ES8156 headphone DAC (rev #04 strap)           */
-#define PIN_DISPLAY_BACKLIGHT       GPIO_NUM_26   /* GC9306 TFT backlight (LEDC PWM)         */
+#define I2C_ADDR_HP_DAC             0x08   /* ES8156 headphone DAC */
+#define I2C_ADDR_SPKR_AMP_R         0x34   /* rev #04 mono-mix, same amp */
+#define PIN_DISPLAY_BACKLIGHT       GPIO_NUM_26
 #else
-#define I2C_ADDR_HP_DAC             0x09   /* ES8156 headphone DAC (rev #05 strap)           */
+#define I2C_ADDR_HP_DAC             0x09   /* ES8156 headphone DAC */
+#define I2C_ADDR_SPKR_AMP_R         0x37   /* rev #05 right amp */
 #endif
-#define I2C_ADDR_SPKR_AMP_L         0x34   /* aw881xx speaker amp (left)                    */
-#define I2C_ADDR_SPKR_AMP_R         0x37   /* aw881xx speaker amp (right)                   */
 #define I2C_ADDR_RTC                0x51   /* IT8563 RTC                                    */
 
 /* ------------------------------------------------------------------ SPI -- */
@@ -79,14 +80,6 @@
 #define I2S_PORT                    I2S_NUM_0
 #define I2S_SAMPLE_RATE_HZ          44100
 
-/* ------------------------------------------------------------------ ADC -- */
-/* Battery VBAT (ADC1 CH3) + light sensor (ADC1 CH0) + IR temp (ADC1 CH7).     */
-#define PIN_ADC_BAT_VBAT            GPIO_NUM_39   /* ADC1 channel 3 */
-#define PIN_ADC_LIGHT               GPIO_NUM_36   /* ADC1 channel 0 */
-#define PIN_ADC_IR_TEMP             GPIO_NUM_35   /* ADC1 channel 7 */
-#define ADC_CH_BAT                  ADC_CHANNEL_3
-#define ADC_CH_LIGHT                ADC_CHANNEL_0
-#define ADC_CH_IR_TEMP              ADC_CHANNEL_7
 
 /* -------------------------------------------------------------- buttons --- */
 /* Rotary encoders (quadrature on ESP32 GPIO) + push buttons (via IO expander) */
@@ -135,6 +128,7 @@
 #endif
 #define IOX_BTN_POWER               IOX_PIN(0, 1, 3)   /* IOX.1.3 */
 #define IOX_AUDIO_HPDETECT          IOX_PIN(0, 1, 1)   /* IOX.1.1 */
+#define IOX_ACCEL_TILTIND           IOX_PIN(0, 1, 2)   /* IOX.1.2 */
 
 /* expander 1 = ports 2..3 */
 #define IOX_DISP_CSN0               IOX_PIN(1, 0, 0)   /* IOX.2.0 */
@@ -142,10 +136,14 @@
 #define IOX_DISP_CSN2               IOX_PIN(1, 0, 2)   /* IOX.2.2 */
 #define IOX_DISP_CSN3               IOX_PIN(1, 0, 3)   /* IOX.2.3 */
 #ifdef CONFIG_BOARD_REV_04
+#define IOX_POWER_LEVELCONVERTOR     IOX_PIN(0, 0, 3)   /* IOX.0.3 */
 #define IOX_AUDIO_PACTRL            IOX_PIN(0, 0, 6)   /* IOX.0.6 */
+#define IOX_POWER_PWREN             IOX_PIN(0, 1, 4)   /* IOX.1.4 */
+#define IOX_POWER_VINHOLD           IOX_PIN(0, 1, 6)   /* IOX.1.6 */
 #else
+#define IOX_POWER_LEVELCONVERTOR     IOX_PIN(1, 1, 0)   /* IOX.3.0 */
 #define IOX_AUDIO_PACTRL            IOX_PIN(1, 0, 4)   /* IOX.2.4 */
-#endif
 #define IOX_POWER_PWREN             IOX_PIN(1, 0, 5)   /* IOX.2.5 */
 #define IOX_POWER_VINHOLD           IOX_PIN(1, 1, 1)   /* IOX.3.1 */
 #define IOX_POWER_VOUTEN            IOX_PIN(1, 1, 3)   /* IOX.3.3 */
+#endif

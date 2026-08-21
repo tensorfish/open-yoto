@@ -256,11 +256,21 @@ source (yoto_file_reader / http_stream / hls_playlist)
 - MIME→decoder: `audio/mp4`/`audio/aacp`/`audio/x-aac` → AAC (8268/8269/8267); `audio/wav` (8271); `audio/opus` (8272); `video/MP2T` → TS (8270).
 
 ### aw881xx "smart PA" DSP flow
-1. `aw881xx_init` (541) → `read_chipid` (539, logs `chipid=0x%x` 537).
-2. `aw881xx_load_fw_cfg`/`aw881xx_load_dsp_cfg`/`aw881xx_dsp_container_update` (603/598/561) upload firmware + DSP config; `aw881xx_cold_start` (637) on boot.
-3. `aw881xx_start` (578) with I2S signal check (`get_iis_status` 567, `syspll_check` 575, mode1/2 PLL checks 569/571) before `dsp_enable` (589).
-4. `aw881xx_set_mode` (608) SPK_MODE/OFF_MODE (605/606); `set_volume` (623) writes `AW881 vol`; `__aw881xx_hw_params` (612) applies sample rate/bit width.
-5. Mono-mix path: `failed to create mono mix aw881xx driver instance` (503) / `left and/or right channel …` (504).
+1. `aw881xx_init` retries `read_chipid` five times at the configured 7-bit
+   address (`0x34` on #04), reading register `0x00` and requiring `0x1806`
+   (AW88194A). The factory I²C helpers use an 8-bit register index and
+   big-endian 16-bit values.
+2. `aw881xx_load_fw_cfg`/`aw881xx_load_dsp_cfg`/`aw881xx_dsp_container_update`
+   upload firmware + SmartK DSP configuration; `aw881xx_cold_start` runs at
+   boot.
+3. `aw881xx_start` checks I²S (`get_iis_status`) and PLL
+   (`syspll_check`, mode1/2 checks) before `dsp_enable`.
+4. `aw881xx_set_mode` selects SPK_MODE/OFF_MODE; `aw881xx_set_volume` writes
+   the factory speaker curve; `__aw881xx_hw_params` applies sample rate/width.
+5. The replacement embeds the exact factory register table, firmware, and
+   rev04 mono/channel-2 configuration and follows the recovered cold-start
+   ordering. Blob provenance: register table `ec5b11e9…`, firmware
+   `240b3033…`, configuration `11a748ad…` (SHA-256).
 
 ### Headphone routing
 - `hpdetect` (IOX.1.1) senses jack insertion: `Headphones inserted: muting amps` (3339) / `Headphones removed: switching amps on` (3338); events `EVT_HEADPHONES_IN/OUT` (3373/3375).

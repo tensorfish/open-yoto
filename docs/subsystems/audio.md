@@ -70,6 +70,26 @@ paths. A mono-mix mode exists for the aw881xx
 Combined (ES8388) configs validate that both speaker addresses match
 (`Combined audio config issue: both I2C spkr chip addresses must be set the same!`).
 
+### Factory-matched speaker bring-up
+
+The clean #04 factory app starts one AW88194A at 7-bit `0x34`: deterministic
+`pactrl` LOW/HIGH reset, five chip-ID attempts for `0x1806`, register-table
+load, firmware/SmartK DSP configuration, VCALB, I²S/PLL checks, speaker mode,
+interrupt setup, and outer hard-unmute. The 35-entry register table starts at
+DRAM `0x3ffbee7a`; its final `SYSCTRL=0x6440` and `PWMCTRL=0x300e` writes are
+part of the table. Register values use an 8-bit I²C index plus big-endian
+16-bit data. The DSP firmware is `0x7f4` bytes at `0x3ffbdf4d`; the rev #04
+mono/channel-2 SmartK configuration is `0x39c` bytes at `0x3ffbeade`. Both
+payloads are adjacent-byte-swapped and sent in 128-byte chunks through windows
+`0x8c00` (firmware) and `0x8600` (configuration).
+
+After SmartPA startup, the factory pipeline sets AW88194 volume register
+`0x0f=0x0000` (100%) and settles I²S to APLL 44.1 kHz, 16-bit mono-left with
+the ESP32 legacy mono WS polarity. The replacement reproduces those settings,
+downmixes stereo MP3 frames before DMA, and validates I²S lock, power/mute,
+volume, format, and DSP status. The repeating 1kHz boot tone and physical
+speaker output are verified on rev #04 hardware.
+
 ## Decoders & stream types
 
 - **Decoders**: MP3 (`pvmp3`), MP4/AAC (`DEC_AAC`), WAV (`DEC_WAV`),

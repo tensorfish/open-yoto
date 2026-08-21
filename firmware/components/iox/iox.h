@@ -24,3 +24,6 @@ bool iox_get_pin(uint8_t pin);
 
 /** Read a whole 8-bit port of an expander (0..1). */
 esp_err_t iox_read_port(uint8_t expander, uint8_t port, uint8_t *value);
+
+/** Read an output latch for diagnostics (expander and port are 0..1). */
+esp_err_t iox_read_output_port(uint8_t expander, uint8_t port, uint8_t *value);

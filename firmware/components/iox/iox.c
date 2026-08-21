@@ -45,12 +45,10 @@ static esp_err_t iox_read_reg(uint8_t exp, uint8_t reg, uint8_t *val)
  * (hwconfig_05: p0Dir=0xFE p1Dir=0xFF p2Dir=0x00 p3Dir=0xD4,
  *                p0Data=0xFF p1Data=0xFF p2Data=0x5F p3Data=0xDF). */
 #ifdef CONFIG_BOARD_REV_04
-/* Rev #04 (single IOX, ET6416): authoritative defaults from hwconfig_04 —
- * p0Dir=0xB0 p1Dir=0xAF p0Data=0x30 p1Data=0xEF. Note the level convertor
- * (IOX.0.3) and TFT cs/dc/reset (IOX.0.0-0.2) default LOW, pwren (IOX.1.4)
- * is an output driven LOW, and pactrl (IOX.0.6) is an output driven LOW.
- * The level-convertor enable is active-low: driving it high (the #05-style
- * 0xFF default) blocks the display SPI/backlight domain. */
+/* Rev #04 (single IOX, ET6416): exact configuration bytes consumed by
+ * stock function 0x4010cb28. These are safe latch defaults, not the final
+ * running state: stock app_main subsequently drives VINHOLD HIGH, PWREN LOW,
+ * and the level convertor HIGH before peripheral initialization. */
 static const uint8_t IOX0_DIR[2] = { 0xB0, 0xAF };
 static const uint8_t IOX0_OUT[2] = { 0x30, 0xEF };
 #else
@@ -59,6 +57,12 @@ static const uint8_t IOX0_OUT[2] = { 0xFF, 0xFF };
 #endif
 static const uint8_t IOX1_DIR[2] = { 0x00, 0xD4 };
 static const uint8_t IOX1_OUT[2] = { 0x5F, 0xDF };
+
+#ifdef CONFIG_BOARD_REV_04
+#define IOX_COUNT 1
+#else
+#define IOX_COUNT 2
+#endif
 
 esp_err_t iox_init(void)
 {
@@ -77,8 +81,8 @@ esp_err_t iox_init(void)
     err = i2c_driver_install(I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
     if (err != ESP_OK) return err;
 
-    /* probe both expanders */
-    for (int exp = 0; exp < 2; exp++) {
+    /* Rev #04 has one ET6416; newer boards have two PI4IOE5V6416 parts. */
+    for (int exp = 0; exp < IOX_COUNT; exp++) {
         uint8_t probe = 0;
         err = i2c_master_write_read_device(I2C_PORT, IOX_ADDRS[exp], &(uint8_t){0x00},
                                            1, &probe, 1, pdMS_TO_TICKS(IOX_TIMEOUT_MS));
@@ -88,18 +92,35 @@ esp_err_t iox_init(void)
         }
     }
 
-    /* apply factory direction + output defaults */
+    /* Factory ET6416 init @ 0x4010cb28 writes both output latches before
+     * changing directions, avoiding reset/power glitches on newly-enabled
+     * outputs. Every write is required. */
     static const uint8_t *const dirs[2] = { IOX0_DIR, IOX1_DIR };
     static const uint8_t *const outs[2] = { IOX0_OUT, IOX1_OUT };
-    for (int exp = 0; exp < 2; exp++) {
+    for (int exp = 0; exp < IOX_COUNT; exp++) {
         for (int port = 0; port < 2; port++) {
-            iox_write_reg(exp, IOX_REG_CONFIG_0 + port, dirs[exp][port]);
-            iox_write_reg(exp, IOX_REG_OUTPUT_0 + port, outs[exp][port]);
+            err = iox_write_reg(exp, IOX_REG_OUTPUT_0 + port, outs[exp][port]);
+            if (err != ESP_OK) return err;
+        }
+        for (int port = 0; port < 2; port++) {
+            err = iox_write_reg(exp, IOX_REG_CONFIG_0 + port, dirs[exp][port]);
+            if (err != ESP_OK) return err;
         }
     }
 
-    ESP_LOGI(TAG, "2x PI4IOE5V6416 initialized (SDA=%d SCL=%d)",
-             PIN_I2C_SDA, PIN_I2C_SCL);
+    /* Exact stock run-state transitions from app_main @ 0x400daa89 and
+     * 0x400daad1: hold VIN, retain active-low PWREN, then enable the board
+     * level convertor. Without the final HIGH transition, the display-side
+     * IOX still works but downstream SD/NFC/audio devices remain isolated. */
+    err = iox_set_pin(IOX_POWER_VINHOLD, true);
+    if (err != ESP_OK) return err;
+    err = iox_set_pin(IOX_POWER_PWREN, false);
+    if (err != ESP_OK) return err;
+    err = iox_set_pin(IOX_POWER_LEVELCONVERTOR, true);
+    if (err != ESP_OK) return err;
+
+    ESP_LOGI(TAG, "%dx IO expander initialized (SDA=%d SCL=%d)",
+             IOX_COUNT, PIN_I2C_SDA, PIN_I2C_SCL);
     return ESP_OK;
 }
 
@@ -132,5 +153,12 @@ bool iox_get_pin(uint8_t pin)
 esp_err_t iox_read_port(uint8_t expander, uint8_t port, uint8_t *value)
 {
     uint8_t reg = (port == 0) ? IOX_REG_INPUT_0 : IOX_REG_INPUT_1;
+    return iox_read_reg(expander, reg, value);
+}
+
+esp_err_t iox_read_output_port(uint8_t expander, uint8_t port, uint8_t *value)
+{
+    uint8_t reg = (port == 0) ? IOX_REG_OUTPUT_0 : IOX_REG_OUTPUT_1;
+
     return iox_read_reg(expander, reg, value);
 }

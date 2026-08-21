@@ -149,14 +149,27 @@ flowchart LR
 ## Audio pipeline
 
 ```
-SD card → libhelix-mp3 (decode) → I2S → ES8156 headphone DAC
+SD card → libhelix-mp3 (decode) → I2S → ES8156 headphone DAC + AW881xx speakers
 ```
 
-- A background task reads + decodes the MP3 and pushes 16-bit stereo samples
-  (44.1 kHz) out the I²S port.
-- Play/stop/pause/volume are simple flags + volume writes to the DAC.
-- The speaker amp (`aw881xx`) is intentionally left off — its init sequence was
-  never cracked; the **headphone path (ES8156) is the working output**.
+- A background task decodes MP3, downmixes stereo to mono, and pushes 16-bit
+  mono-left PCM over the stock APLL 44.1 kHz I²S path. Bounded PCM gain makes
+  the left encoder affect both physical outputs.
+- Rev #04 uses one AW88194A at 7-bit `0x34`. The replacement reproduces the
+  factory path: ET6416 output-before-direction setup; `pactrl` LOW 2ms / HIGH
+  2ms reset; five chip-ID retries; the recovered 35-entry register table;
+  firmware and mono/channel-2 SmartK configuration uploads; VCALB; DSP/I²S/PLL
+  checks; interrupt setup; speaker start; and outer hard-unmute.
+- `CONFIG_APP_SPEAKER_TEST_TONE` starts a repeating 1kHz, ±16,000 PCM tone
+  at boot (default when the display-test build is enabled). Clockwise left-knob
+  rotation increases bounded PCM gain; the same gain affects speaker and
+  headphone output.
+- The exact stock ranges are firmware `0x3ffbdf4d..0x3ffbe740`, configuration
+  `0x3ffbeade..0x3ffbee79`, and register table
+  `0x3ffbee7a..0x3ffbef05`. Stock playback then selects APLL 44.1 kHz,
+  16-bit mono-left I²S with the ESP32 legacy WS polarity and sets AW88194
+  volume register `0x0f` to `0x0000` (100%). This complete path, including
+  physical speaker output, is verified on rev #04 hardware.
 
 ## Admin mode
 
@@ -179,14 +192,15 @@ Routes: `GET /` (the page), `GET /api/list`, `GET /api/last-card`,
 `POST /api/login`.
 
 ## Power & battery
-
-- Battery is read from a **CW2215B fuel gauge** (I²C), falling back to a raw
-  ADC reading if the gauge is absent.
+- Battery state comes from the CW2215B fuel gauge when its VCELL/SOC data is
+  nonzero and valid; an ACKing gauge that reports an all-zero frame is treated
+  as inactive and falls back to ADC voltage with unknown SOC. `IOX_CHG_STAT`
+  is active-low and controls charging state even when SGM41513 I²C does not
+  ACK; `IOX_PLUG_STAT` is logged separately for USB diagnostics.
 - **Low battery** = charge < 15% **or** voltage < 3.3 V — checked at boot and
   every ~30 s, showing the low-battery art (but not shutting down).
-- **Charging** = the charger STAT line is asserted — checked at boot and every
-  ~30 s. When charging, the display shows a lightning bolt and a battery bar
-  whose fill is the rough state of charge (0–100%).
+- When charging, the display shows a lightning bolt and a battery bar whose
+  fill is the rough state of charge (0–100%).
 - "Off" is a software standby (stops audio + blanks the display); true
   deep-sleep power-off needs the I/O-expander interrupt pin as a wake source
   and isn't implemented yet.
