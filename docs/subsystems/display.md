@@ -72,9 +72,38 @@ applies only device-measured output corrections:
   `floor(rgb * alpha / 255)`, then nearest-neighbour scale 12 into inclusive
   GRAM window `(24,27)..(215,218)`; the replacement applies its measured
   40px vertical physical-panel correction to the centered 192px test frame.
-
+- **Remote color images** — current OYIM v1 files carry a 16×16
+  little-endian RGB565 frame after an 8-byte header. The GC9306 expands it 12×
+  through the same color path as stock-sized icons; HT16D35x converts each
+  color directly to one luminance pixel. Older 64×64 OYIM files remain
+  readable through the row-streamed 3× compatibility path.
 - **Backlight/IOX** — stock drives IOX.0.3 low in `p0Data=0x30`; the physical
   panel requires that state. Backlight is GPIO26 LEDC PWM at stock 40 kHz.
+
+### Full-raster geometry and orientation
+
+The GC9306 controller accepts a 240×320 GRAM window, but this unit's verified
+visible content region is the upper 240×240 area. The stock 192×192 icon window
+`(24,27)..(215,218)` is the safe reference. Critical UI placed below roughly
+Y=218 can be partially clipped even though the controller accepts the write.
+
+The recovered `MADCTL=0x48` mode also presents full-raster RAMWR data mirrored
+horizontally on the physical panel. For native masks, convert visual X to GRAM
+X before packing:
+
+```c
+gram_x = 239 - visual_x;
+```
+
+This mirror correction is separate from the measured R/B byte swap at the
+RGB666 output boundary. Source assets remain in ordinary orientation and color;
+both RGB565 sizes reverse source X only while generating the RAMWR stream, and
+swap R/B only at the final RGB666 output boundary.
+
+The six-character admin code demonstrates the safe layout: native 5×7 glyphs
+at 9× scale, three per row, centered horizontally, with rows at Y=40 and
+Y=145. Their last set pixels are at Y=207, above the clipping boundary.
+
 
 ### Factory-art audit
 

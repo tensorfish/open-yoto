@@ -1,27 +1,25 @@
 /*
- * admin.c — Admin mode: SoftAP + HTTP web UI for offline content management.
+ * admin.c — Boot-time SoftAP, authenticated web UI, remote control, and SD
+ * file management.
  *
- * Lifecycle: admin_start() mounts the content store, brings up the Wi-Fi
- * stack and an open AP, pins a static address, starts esp_http_server, and
- * issues a random 4-digit access code. admin_stop() reverses that. The code is
- * exchanged at POST /api/login for a session cookie (yoto_session), which
- * gates POST /api/add and POST /api/delete; GET / and GET /api/list stay open
- * so the page and content list always render.
- *
- * Depends on the content component (content.h) for the SD card, media files
- * (/sdcard/media/) and mapping.json (/sdcard/mapping.json). Media received by
- * /api/add is written to /sdcard/media/<name> here and registered through
- * content_add(); mapping persistence is content's responsibility.
+ * admin_start() mounts content, starts the open `openyoto` AP and HTTP server,
+ * then generates a six-character alphanumeric access code. POST /api/login
+ * exchanges the code for an HttpOnly session cookie. All content, control, and
+ * filesystem APIs require that cookie.
  */
 #include "admin.h"
 #include "content.h"
 
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "esp_err.h"
@@ -29,6 +27,7 @@
 #include "esp_http_client.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_wifi.h"
@@ -38,6 +37,26 @@
 #include "freertos/FreeRTOS.h"
 
 static const char *TAG = "admin";
+
+static void admin_log_heap(const char *where)
+{
+    uint32_t free_internal = (uint32_t)heap_caps_get_free_size(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint32_t largest_internal = (uint32_t)heap_caps_get_largest_free_block(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+    ESP_LOGI(TAG, "heap %s: internal free=%lu largest=%lu",
+             where, (unsigned long)free_internal,
+             (unsigned long)largest_internal);
+}
+
+static esp_err_t admin_send_oom(httpd_req_t *req, const char *where)
+{
+    admin_log_heap(where);
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                        "out of memory");
+    return ESP_FAIL;
+}
 
 /* SoftAP parameters (open network, fixed channel). */
 #define ADMIN_SSID              "openyoto"
@@ -50,7 +69,6 @@ static const char *TAG = "admin";
 #define ADMIN_PATH_MAX          256
 #define ADMIN_NAME_MAX          96
 #define ADMIN_URL_MAX           512
-#define ADMIN_LIST_MAX          16384
 #define ADMIN_BODY_MAX          (4 * 1024 * 1024)
 #define ADMIN_MAX_TRACKS        32
 #define ADMIN_MAX_FILES         64
@@ -62,12 +80,15 @@ static bool             s_active;
 static bool             s_netif_ready;
 static bool             s_wifi_inited;
 static bool             s_wifi_started;
-static uint16_t         s_code;
-static char             s_code_str[8];
+static char             s_code_str[ADMIN_ACCESS_CODE_LEN + 1];
 static char             s_session_token[33];
 static httpd_handle_t   s_server;
 static esp_netif_t     *s_ap_netif;
 static admin_code_cb_t  s_code_cb;
+static admin_path_cb_t  s_play_sound_cb;
+static admin_path_cb_t  s_display_image_cb;
+static admin_action_cb_t s_stop_sound_cb;
+static admin_action_cb_t s_clear_display_cb;
 
 /* Most recently scanned non-admin card URL, captured for the web UI. Guarded
  * by s_last_card_lock (main loop writes it; the HTTP task reads it). */
@@ -271,6 +292,12 @@ static bool admin_ext_from_mime(const char *mime, char *ext, size_t ext_len)
         snprintf(ext, ext_len, ".wav");
         return true;
     }
+    if (strstr(mime, "audio/mp4") != NULL
+        || strstr(mime, "audio/m4a") != NULL)
+    {
+        snprintf(ext, ext_len, ".m4a");
+        return true;
+    }
     if (strstr(mime, "aac") != NULL)
     {
         snprintf(ext, ext_len, ".aac");
@@ -356,6 +383,12 @@ static esp_err_t admin_save_media(const uint8_t *data, size_t len,
     size_t written;
 
     snprintf(fname, sizeof(fname), "%08lx%s", (unsigned long)esp_random(), ext);
+    if (mkdir(ADMIN_MEDIA_DIR, 0755) != 0 && errno != EEXIST)
+    {
+        ESP_LOGE(TAG, "cannot create %s", ADMIN_MEDIA_DIR);
+        return ESP_FAIL;
+    }
+
     snprintf(path, sizeof(path), ADMIN_MEDIA_DIR "/%s", fname);
 
     fp = fopen(path, "wb");
@@ -748,8 +781,11 @@ static esp_err_t admin_parse_multipart(char *body, size_t len,
             admin_media_ext(media_ext, sizeof(media_ext), filename, mime,
                             is_image ? ".img" : ".mp3");
 
-            /* The player decodes MP3 only — reject any other audio container. */
-            if (!is_image && strcmp(media_ext, ".mp3") != 0)
+            /* Match the stock decoder set exposed by this replacement. */
+            if (!is_image
+                && strcasecmp(media_ext, ".mp3") != 0
+                && strcasecmp(media_ext, ".m4a") != 0
+                && strcasecmp(media_ext, ".aac") != 0)
             {
                 ESP_LOGE(TAG, "unsupported audio type %s", media_ext);
                 return ESP_ERR_INVALID_ARG;
@@ -990,10 +1026,12 @@ static esp_err_t admin_ingest_playlist(const admin_add_req_t *add)
 
 /* ----------------------------------------------------------------- auth -- */
 
-/** Return true when `pin` matches the active code (string compare). */
+/** Return true when `pin` matches the active six-character code. */
 static bool admin_pin_match(const char *pin)
 {
-    return (s_code != 0 && pin != NULL && strcmp(pin, s_code_str) == 0);
+    return s_code_str[0] != '\0' && pin != NULL
+        && strlen(pin) == ADMIN_ACCESS_CODE_LEN
+        && strcmp(pin, s_code_str) == 0;
 }
 
 /** Extract the raw PIN from a login body: JSON {"pin":"..."} or form pin=.... */
@@ -1102,6 +1140,211 @@ static bool admin_session_ok(httpd_req_t *req)
     return false;
 }
 
+static bool admin_require_session(httpd_req_t *req)
+{
+    if (admin_session_ok(req))
+    {
+        return true;
+    }
+    httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "unauthorized");
+    return false;
+}
+
+static int admin_hex_digit(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool admin_url_decode(char *value)
+{
+    char *src = value;
+    char *dst = value;
+
+    while (*src != '\0')
+    {
+        if (*src == '%' && src[1] != '\0' && src[2] != '\0')
+        {
+            int hi = admin_hex_digit(src[1]);
+            int lo = admin_hex_digit(src[2]);
+            if (hi < 0 || lo < 0)
+            {
+                return false;
+            }
+            *dst++ = (char)((hi << 4) | lo);
+            src += 3;
+        }
+        else
+        {
+            *dst++ = (*src == '+') ? ' ' : *src;
+            src++;
+        }
+    }
+    *dst = '\0';
+    return true;
+}
+
+static bool admin_path_segments_safe(const char *path)
+{
+    const char *p = path;
+
+    while (*p != '\0')
+    {
+        const char *segment;
+        size_t len;
+
+        while (*p == '/')
+        {
+            p++;
+        }
+        segment = p;
+        while (*p != '\0' && *p != '/')
+        {
+            unsigned char c = (unsigned char)*p;
+            if (c < 0x20 || c == '\\')
+            {
+                return false;
+            }
+            p++;
+        }
+        len = (size_t)(p - segment);
+        if ((len == 1 && segment[0] == '.')
+            || (len == 2 && segment[0] == '.' && segment[1] == '.'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** Validate and copy an explicit path rooted at /sdcard. */
+static bool admin_resolve_sd_path(const char *input, char *out, size_t out_len)
+{
+    size_t mount_len = strlen(CONTENT_MOUNT_POINT);
+    const char *relative;
+    int written;
+
+    if (input == NULL || out == NULL || out_len == 0
+        || strncmp(input, CONTENT_MOUNT_POINT, mount_len) != 0
+        || (input[mount_len] != '\0' && input[mount_len] != '/'))
+    {
+        return false;
+    }
+    relative = input + mount_len;
+    if (!admin_path_segments_safe(relative))
+    {
+        return false;
+    }
+    written = snprintf(out, out_len, "%s", input);
+    return written > 0 && (size_t)written < out_len;
+}
+
+static bool admin_query_path(httpd_req_t *req, const char *key,
+                             char *out, size_t out_len)
+{
+    char query[ADMIN_URL_MAX];
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK
+        || httpd_query_key_value(query, key, out, out_len) != ESP_OK)
+    {
+        return false;
+    }
+    return admin_url_decode(out);
+}
+
+static esp_err_t admin_send_fs_errno(httpd_req_t *req, const char *operation,
+                                     const char *path, int error_number)
+{
+    const char *status = "500 Internal Server Error";
+    const char *message = "filesystem operation failed";
+
+    ESP_LOGE(TAG, "%s %s failed: errno=%d (%s)", operation, path,
+             error_number, strerror(error_number));
+    if (error_number == ENOMEM || error_number == EMFILE
+        || error_number == ENFILE)
+    {
+        admin_log_heap(operation);
+    }
+
+    switch (error_number)
+    {
+        case EINVAL:
+        case ENAMETOOLONG:
+            status = "400 Bad Request";
+            message = "invalid path";
+            break;
+        case EACCES:
+        case EPERM:
+        case EROFS:
+            status = "403 Forbidden";
+            message = "SD card is read-only";
+            break;
+        case ENOENT:
+            status = "404 Not Found";
+            message = "parent directory not found";
+            break;
+        case EEXIST:
+            status = "409 Conflict";
+            message = "path already exists";
+            break;
+        case ENOSPC:
+            status = "507 Insufficient Storage";
+            message = "SD card is full";
+            break;
+        case ENOMEM:
+        case EMFILE:
+        case ENFILE:
+            message = "not enough memory or file handles";
+            break;
+        default:
+            break;
+    }
+
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, message, HTTPD_RESP_USE_STRLEN);
+}
+
+static cJSON *admin_read_json(httpd_req_t *req)
+{
+    char *body = NULL;
+    size_t body_len = 0;
+    cJSON *root;
+
+    if (admin_read_body(req, &body, &body_len) != ESP_OK)
+    {
+        return NULL;
+    }
+    root = cJSON_ParseWithLength(body, body_len);
+    free(body);
+    return root;
+}
+
+static bool admin_json_string(cJSON *root, const char *key,
+                              char *out, size_t out_len)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+
+    if (item == NULL || !cJSON_IsString(item) || item->valuestring == NULL
+        || item->valuestring[0] == '\0')
+    {
+        return false;
+    }
+    return snprintf(out, out_len, "%s", item->valuestring) > 0
+        && strlen(item->valuestring) < out_len;
+}
+
 /* ------------------------------------------------------------ handlers -- */
 
 static esp_err_t admin_root_handler(httpd_req_t *req)
@@ -1119,7 +1362,7 @@ static esp_err_t admin_login_handler(httpd_req_t *req)
     char *body = NULL;
     size_t body_len = 0;
     char pin[8] = { 0 };
-    char cookie[80];
+    char cookie[96];
     esp_err_t err;
 
     if (ct_len > 0 && ct_len < sizeof(ct))
@@ -1144,7 +1387,8 @@ static esp_err_t admin_login_handler(httpd_req_t *req)
 
     admin_new_token(s_session_token);
     snprintf(cookie, sizeof(cookie),
-             ADMIN_COOKIE_NAME "=%s; Path=/; HttpOnly", s_session_token);
+             ADMIN_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict",
+             s_session_token);
     httpd_resp_set_hdr(req, "Set-Cookie", cookie);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -1152,31 +1396,39 @@ static esp_err_t admin_login_handler(httpd_req_t *req)
 
 static esp_err_t admin_list_handler(httpd_req_t *req)
 {
-    char *json = malloc(ADMIN_LIST_MAX);
-    esp_err_t err;
-
-    if (json == NULL)
+    if (!admin_require_session(req))
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_FAIL;
     }
-    err = content_list(json, ADMIN_LIST_MAX);
+
+    char *json = NULL;
+    esp_err_t err = content_list_json(&json);
+
     if (err != ESP_OK)
     {
-        free(json);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "content list failed");
+        if (err == ESP_ERR_NO_MEM)
+        {
+            return admin_send_oom(req, "serializing card mappings");
+        }
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "content list failed");
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, json);
-    free(json);
-    return ESP_OK;
+    err = httpd_resp_sendstr(req, json);
+    cJSON_free(json);
+    return err;
 }
 
 /* Return the most recently scanned card URL (and whether it is already
  * mapped) so the web UI can pre-fill the add-content form. */
 static esp_err_t admin_last_card_handler(httpd_req_t *req)
 {
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+
     char url[ADMIN_URL_MAX];
     bool exists;
     cJSON *root;
@@ -1194,8 +1446,7 @@ static esp_err_t admin_last_card_handler(httpd_req_t *req)
     root = cJSON_CreateObject();
     if (root == NULL)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
-        return ESP_FAIL;
+        return admin_send_oom(req, "creating last-card response");
     }
 
     cJSON_AddStringToObject(root, "url", url);
@@ -1206,8 +1457,7 @@ static esp_err_t admin_last_card_handler(httpd_req_t *req)
     cJSON_Delete(root);
     if (json == NULL)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
-        return ESP_FAIL;
+        return admin_send_oom(req, "serializing last-card response");
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -1236,8 +1486,7 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
     add = calloc(1, sizeof(*add));
     if (add == NULL)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
-        return ESP_FAIL;
+        return admin_send_oom(req, "allocating add-content request");
     }
 
     ct_len = httpd_req_get_hdr_value_len(req, "Content-Type");
@@ -1314,8 +1563,7 @@ static esp_err_t admin_delete_handler(httpd_req_t *req)
 
         if (body == NULL)
         {
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
-            return ESP_FAIL;
+            return admin_send_oom(req, "allocating delete request");
         }
         {
             size_t got = 0;
@@ -1368,6 +1616,11 @@ static esp_err_t admin_delete_handler(httpd_req_t *req)
 
 static esp_err_t admin_media_handler(httpd_req_t *req)
 {
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+
     const char *uri = req->uri;
     const char *name;
     const char *ext;
@@ -1409,6 +1662,10 @@ static esp_err_t admin_media_handler(httpd_req_t *req)
         {
             ctype = "audio/aac";
         }
+        else if (strcasecmp(ext, ".m4a") == 0)
+        {
+            ctype = "audio/mp4";
+        }
         else if (strcasecmp(ext, ".img") == 0)
         {
             ctype = "application/octet-stream";
@@ -1438,90 +1695,533 @@ static esp_err_t admin_media_handler(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
-static esp_err_t admin_register_handlers(httpd_handle_t server)
+static const char *admin_content_type(const char *path)
 {
-    static const httpd_uri_t root_uri =
+    const char *ext = strrchr(path, '.');
+
+    if (ext == NULL)
     {
-        .uri = "/",
-        .method = HTTP_GET,
-        .handler = admin_root_handler,
-        .user_ctx = NULL,
-    };
-    static const httpd_uri_t media_uri =
+        return "application/octet-stream";
+    }
+    if (strcasecmp(ext, ".mp3") == 0)
     {
-        .uri = "/media/*",
-        .method = HTTP_GET,
-        .handler = admin_media_handler,
-        .user_ctx = NULL,
-    };
-    static const httpd_uri_t list_uri =
+        return "audio/mpeg";
+    }
+    if (strcasecmp(ext, ".m4a") == 0)
     {
-        .uri = "/api/list",
-        .method = HTTP_GET,
-        .handler = admin_list_handler,
-        .user_ctx = NULL,
-    };
-    static const httpd_uri_t last_card_uri =
+        return "audio/mp4";
+    }
+    if (strcasecmp(ext, ".aac") == 0)
     {
-        .uri = "/api/last-card",
-        .method = HTTP_GET,
-        .handler = admin_last_card_handler,
-        .user_ctx = NULL,
-    };
-    static const httpd_uri_t add_uri =
+        return "audio/aac";
+    }
+    if (strcasecmp(ext, ".png") == 0)
     {
-        .uri = "/api/add",
-        .method = HTTP_POST,
-        .handler = admin_add_handler,
-        .user_ctx = NULL,
-    };
-    static const httpd_uri_t delete_uri =
+        return "image/png";
+    }
+    if (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0)
     {
-        .uri = "/api/delete",
-        .method = HTTP_POST,
-        .handler = admin_delete_handler,
-        .user_ctx = NULL,
-    };
-    static const httpd_uri_t login_uri =
+        return "image/jpeg";
+    }
+    if (strcasecmp(ext, ".gif") == 0)
     {
-        .uri = "/api/login",
-        .method = HTTP_POST,
-        .handler = admin_login_handler,
-        .user_ctx = NULL,
-    };
+        return "image/gif";
+    }
+    return "application/octet-stream";
+}
+
+static esp_err_t admin_control_handler(httpd_req_t *req,
+                                       admin_path_cb_t callback)
+{
+    cJSON *root;
+    char logical[ADMIN_PATH_MAX];
+    char absolute[ADMIN_PATH_MAX];
+    struct stat st;
     esp_err_t err;
 
-    err = httpd_register_uri_handler(server, &root_uri);
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    if (callback == NULL)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "control unavailable");
+        return ESP_FAIL;
+    }
+    root = admin_read_json(req);
+    if (root == NULL
+        || !admin_json_string(root, "path", logical, sizeof(logical))
+        || !admin_resolve_sd_path(logical, absolute, sizeof(absolute)))
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
+        return ESP_FAIL;
+    }
+    cJSON_Delete(root);
+    if (stat(absolute, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "file not found");
+        return ESP_FAIL;
+    }
+    err = callback(absolute);
     if (err != ESP_OK)
     {
-        return err;
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            esp_err_to_name(err));
+        return ESP_FAIL;
     }
-    err = httpd_register_uri_handler(server, &media_uri);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t admin_play_handler(httpd_req_t *req)
+{
+    return admin_control_handler(req, s_play_sound_cb);
+}
+
+static esp_err_t admin_display_handler(httpd_req_t *req)
+{
+    return admin_control_handler(req, s_display_image_cb);
+}
+
+static esp_err_t admin_action_handler(httpd_req_t *req,
+                                      admin_action_cb_t callback)
+{
+    esp_err_t err;
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    if (callback == NULL)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "control unavailable");
+        return ESP_FAIL;
+    }
+    err = callback();
     if (err != ESP_OK)
     {
-        return err;
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            esp_err_to_name(err));
+        return ESP_FAIL;
     }
-    err = httpd_register_uri_handler(server, &list_uri);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t admin_stop_sound_handler(httpd_req_t *req)
+{
+    return admin_action_handler(req, s_stop_sound_cb);
+}
+
+static esp_err_t admin_clear_display_handler(httpd_req_t *req)
+{
+    return admin_action_handler(req, s_clear_display_cb);
+}
+
+static esp_err_t admin_fs_list_handler(httpd_req_t *req)
+{
+    char logical[ADMIN_PATH_MAX];
+    char absolute[ADMIN_PATH_MAX];
+    DIR *dir;
+    struct dirent *entry;
+    bool first = true;
+    esp_err_t err;
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    if (!admin_query_path(req, "path", logical, sizeof(logical)))
+    {
+        snprintf(logical, sizeof(logical), CONTENT_MOUNT_POINT "/media");
+    }
+    if (!admin_resolve_sd_path(logical, absolute, sizeof(absolute)))
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
+        return ESP_FAIL;
+    }
+    dir = opendir(absolute);
+    if (dir == NULL)
+    {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "directory not found");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    err = httpd_resp_send_chunk(req, "[", 1);
+    while (err == ESP_OK && (entry = readdir(dir)) != NULL)
+    {
+        char child_abs[ADMIN_PATH_MAX];
+        struct stat st;
+        cJSON *item;
+        char *json;
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+        {
+            continue;
+        }
+        if (snprintf(child_abs, sizeof(child_abs), "%s/%s",
+                     absolute, entry->d_name) >= (int)sizeof(child_abs)
+            || stat(child_abs, &st) != 0)
+        {
+            continue;
+        }
+
+        item = cJSON_CreateObject();
+        if (item == NULL)
+        {
+            err = ESP_ERR_NO_MEM;
+            break;
+        }
+        cJSON_AddStringToObject(item, "name", entry->d_name);
+        cJSON_AddStringToObject(item, "path", child_abs);
+        cJSON_AddStringToObject(item, "type",
+                               S_ISDIR(st.st_mode) ? "directory" : "file");
+        cJSON_AddNumberToObject(item, "size",
+                                S_ISDIR(st.st_mode) ? 0 : (double)st.st_size);
+        json = cJSON_PrintUnformatted(item);
+        cJSON_Delete(item);
+        if (json == NULL)
+        {
+            err = ESP_ERR_NO_MEM;
+            break;
+        }
+        if (!first)
+        {
+            err = httpd_resp_send_chunk(req, ",", 1);
+        }
+        if (err == ESP_OK)
+        {
+            err = httpd_resp_send_chunk(req, json, HTTPD_RESP_USE_STRLEN);
+        }
+        cJSON_free(json);
+        first = false;
+    }
+    closedir(dir);
     if (err != ESP_OK)
     {
+        if (err == ESP_ERR_NO_MEM)
+        {
+            admin_log_heap("streaming directory listing");
+        }
+        ESP_LOGE(TAG, "directory response failed for %s: %s",
+                 absolute, esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &last_card_uri);
-    if (err != ESP_OK)
+    err = httpd_resp_send_chunk(req, "]", 1);
+    if (err == ESP_OK)
     {
-        return err;
+        err = httpd_resp_send_chunk(req, NULL, 0);
     }
-    err = httpd_register_uri_handler(server, &add_uri);
-    if (err != ESP_OK)
+    return err;
+}
+
+static esp_err_t admin_fs_download_handler(httpd_req_t *req)
+{
+    char logical[ADMIN_PATH_MAX];
+    char absolute[ADMIN_PATH_MAX];
+    char disposition[ADMIN_PATH_MAX + 32];
+    const char *name;
+    FILE *fp;
+    uint8_t buffer[2048];
+    size_t count;
+    esp_err_t err;
+
+    if (!admin_require_session(req))
     {
-        return err;
+        return ESP_FAIL;
     }
-    err = httpd_register_uri_handler(server, &login_uri);
-    if (err != ESP_OK)
+    if (!admin_query_path(req, "path", logical, sizeof(logical))
+        || !admin_resolve_sd_path(logical, absolute, sizeof(absolute)))
     {
-        return err;
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
+        return ESP_FAIL;
     }
-    return httpd_register_uri_handler(server, &delete_uri);
+    fp = fopen(absolute, "rb");
+    if (fp == NULL)
+    {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "file not found");
+        return ESP_FAIL;
+    }
+    name = strrchr(absolute, '/');
+    name = name == NULL ? absolute : name + 1;
+    snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", name);
+    httpd_resp_set_type(req, admin_content_type(absolute));
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+    while ((count = fread(buffer, 1, sizeof(buffer), fp)) > 0)
+    {
+        err = httpd_resp_send_chunk(req, (const char *)buffer, (ssize_t)count);
+        if (err != ESP_OK)
+        {
+            fclose(fp);
+            return err;
+        }
+    }
+    fclose(fp);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+static esp_err_t admin_fs_create_handler(httpd_req_t *req)
+{
+    cJSON *root;
+    char logical[ADMIN_PATH_MAX];
+    char absolute[ADMIN_PATH_MAX];
+    int fd;
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    root = admin_read_json(req);
+    if (root == NULL
+        || !admin_json_string(root, "path", logical, sizeof(logical))
+        || !admin_resolve_sd_path(logical, absolute, sizeof(absolute))
+        || strcmp(absolute, CONTENT_MOUNT_POINT) == 0)
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
+        return ESP_FAIL;
+    }
+    cJSON_Delete(root);
+
+    fd = open(absolute, O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (fd < 0)
+    {
+        int error_number = errno;
+        return admin_send_fs_errno(req, "create file", absolute, error_number);
+    }
+    if (close(fd) != 0)
+    {
+        int error_number = errno;
+        unlink(absolute);
+        return admin_send_fs_errno(req, "close created file", absolute,
+                                   error_number);
+    }
+
+    ESP_LOGI(TAG, "created empty file %s", absolute);
+    httpd_resp_set_status(req, "201 Created");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t admin_fs_upload_handler(httpd_req_t *req)
+{
+    char logical[ADMIN_PATH_MAX];
+    char absolute[ADMIN_PATH_MAX];
+    FILE *fp;
+    uint8_t buffer[2048];
+    size_t remaining = req->content_len;
+    size_t written_total = 0;
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    if (remaining > ADMIN_BODY_MAX
+        || !admin_query_path(req, "path", logical, sizeof(logical))
+        || !admin_resolve_sd_path(logical, absolute, sizeof(absolute))
+        || strcmp(absolute, CONTENT_MOUNT_POINT) == 0)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid upload");
+        return ESP_FAIL;
+    }
+    fp = fopen(absolute, "wb");
+    if (fp == NULL)
+    {
+        int error_number = errno;
+        return admin_send_fs_errno(req, "open upload", absolute, error_number);
+    }
+    while (remaining > 0)
+    {
+        size_t wanted = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        int got = httpd_req_recv(req, (char *)buffer, wanted);
+
+        if (got <= 0 || fwrite(buffer, 1, (size_t)got, fp) != (size_t)got)
+        {
+            fclose(fp);
+            unlink(absolute);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                "upload failed");
+            return ESP_FAIL;
+        }
+        remaining -= (size_t)got;
+        written_total += (size_t)got;
+    }
+    if (fclose(fp) != 0)
+    {
+        unlink(absolute);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "upload failed");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "uploaded %s (%u bytes)", absolute, (unsigned)written_total);
+    httpd_resp_set_status(req, "201 Created");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t admin_fs_mkdir_handler(httpd_req_t *req)
+{
+    cJSON *root;
+    char logical[ADMIN_PATH_MAX];
+    char absolute[ADMIN_PATH_MAX];
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    root = admin_read_json(req);
+    if (root == NULL
+        || !admin_json_string(root, "path", logical, sizeof(logical))
+        || !admin_resolve_sd_path(logical, absolute, sizeof(absolute))
+        || strcmp(absolute, CONTENT_MOUNT_POINT) == 0)
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
+        return ESP_FAIL;
+    }
+    cJSON_Delete(root);
+    if (mkdir(absolute, 0755) != 0)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "mkdir failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_status(req, "201 Created");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t admin_fs_rename_handler(httpd_req_t *req)
+{
+    cJSON *root;
+    char from[ADMIN_PATH_MAX];
+    char to[ADMIN_PATH_MAX];
+    char from_abs[ADMIN_PATH_MAX];
+    char to_abs[ADMIN_PATH_MAX];
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    root = admin_read_json(req);
+    if (root == NULL
+        || !admin_json_string(root, "from", from, sizeof(from))
+        || !admin_json_string(root, "to", to, sizeof(to))
+        || !admin_resolve_sd_path(from, from_abs, sizeof(from_abs))
+        || !admin_resolve_sd_path(to, to_abs, sizeof(to_abs))
+        || strcmp(from_abs, CONTENT_MOUNT_POINT) == 0
+        || strcmp(to_abs, CONTENT_MOUNT_POINT) == 0)
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
+        return ESP_FAIL;
+    }
+    cJSON_Delete(root);
+    if (rename(from_abs, to_abs) != 0)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "rename failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t admin_fs_delete_handler(httpd_req_t *req)
+{
+    cJSON *root;
+    char logical[ADMIN_PATH_MAX];
+    char absolute[ADMIN_PATH_MAX];
+    struct stat st;
+    int rc;
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    root = admin_read_json(req);
+    if (root == NULL
+        || !admin_json_string(root, "path", logical, sizeof(logical))
+        || !admin_resolve_sd_path(logical, absolute, sizeof(absolute))
+        || strcmp(absolute, CONTENT_MOUNT_POINT) == 0)
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
+        return ESP_FAIL;
+    }
+    cJSON_Delete(root);
+    if (stat(absolute, &st) != 0)
+    {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "path not found");
+        return ESP_FAIL;
+    }
+    rc = S_ISDIR(st.st_mode) ? rmdir(absolute) : unlink(absolute);
+    if (rc != 0)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            S_ISDIR(st.st_mode)
+                                ? "directory must be empty" : "delete failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t admin_register_handlers(httpd_handle_t server)
+{
+    static const httpd_uri_t handlers[] =
+    {
+        { .uri = "/", .method = HTTP_GET,
+          .handler = admin_root_handler },
+        { .uri = "/media/*", .method = HTTP_GET,
+          .handler = admin_media_handler },
+        { .uri = "/api/login", .method = HTTP_POST,
+          .handler = admin_login_handler },
+        { .uri = "/api/list", .method = HTTP_GET,
+          .handler = admin_list_handler },
+        { .uri = "/api/last-card", .method = HTTP_GET,
+          .handler = admin_last_card_handler },
+        { .uri = "/api/add", .method = HTTP_POST,
+          .handler = admin_add_handler },
+        { .uri = "/api/delete", .method = HTTP_POST,
+          .handler = admin_delete_handler },
+        { .uri = "/api/control/play", .method = HTTP_POST,
+          .handler = admin_play_handler },
+        { .uri = "/api/control/display", .method = HTTP_POST,
+          .handler = admin_display_handler },
+        { .uri = "/api/control/stop", .method = HTTP_POST,
+          .handler = admin_stop_sound_handler },
+        { .uri = "/api/control/clear", .method = HTTP_POST,
+          .handler = admin_clear_display_handler },
+        { .uri = "/api/fs/list", .method = HTTP_GET,
+          .handler = admin_fs_list_handler },
+        { .uri = "/api/fs/file", .method = HTTP_GET,
+          .handler = admin_fs_download_handler },
+        { .uri = "/api/fs/upload", .method = HTTP_POST,
+          .handler = admin_fs_upload_handler },
+        { .uri = "/api/fs/create", .method = HTTP_POST,
+          .handler = admin_fs_create_handler },
+        { .uri = "/api/fs/mkdir", .method = HTTP_POST,
+          .handler = admin_fs_mkdir_handler },
+        { .uri = "/api/fs/rename", .method = HTTP_POST,
+          .handler = admin_fs_rename_handler },
+        { .uri = "/api/fs/delete", .method = HTTP_POST,
+          .handler = admin_fs_delete_handler },
+    };
+
+    for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); i++)
+    {
+        esp_err_t err = httpd_register_uri_handler(server, &handlers[i]);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+    }
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------ lifecycle -- */
@@ -1549,7 +2249,6 @@ static void admin_teardown(void)
         esp_netif_destroy_default_wifi(s_ap_netif);
         s_ap_netif = NULL;
     }
-    s_code = 0;
     s_code_str[0] = '\0';
     s_session_token[0] = '\0';
     portENTER_CRITICAL(&s_last_card_lock);
@@ -1559,19 +2258,24 @@ static void admin_teardown(void)
     s_active = false;
 }
 
-/** Generate a fresh 4-digit code, store it, and surface it via the callback. */
+/** Generate a fresh six-character alphanumeric access code. */
 static void admin_new_code(void)
 {
-    s_code = (uint16_t)(esp_random() % 10000);
-    snprintf(s_code_str, sizeof(s_code_str), "%04u", (unsigned)s_code);
+    static const char alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    for (size_t i = 0; i < ADMIN_ACCESS_CODE_LEN; i++)
+    {
+        s_code_str[i] = alphabet[esp_random() % (sizeof(alphabet) - 1)];
+    }
+    s_code_str[ADMIN_ACCESS_CODE_LEN] = '\0';
     ESP_LOGI(TAG, "admin access code: %s", s_code_str);
     if (s_code_cb != NULL)
     {
-        s_code_cb(s_code);
+        s_code_cb(s_code_str);
     }
 }
 
-esp_err_t admin_start(uint16_t *code_out)
+esp_err_t admin_start(char *code_out, size_t code_size)
 {
     esp_err_t err;
     esp_netif_ip_info_t ip_info;
@@ -1584,15 +2288,23 @@ esp_err_t admin_start(uint16_t *code_out)
         return ESP_ERR_INVALID_STATE;
     }
     s_session_token[0] = '\0';
+    if (code_out != NULL && code_size < ADMIN_ACCESS_CODE_LEN + 1)
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
 
-    /* The write path needs the SD card and mapping.json; content_init() is
-     * safe to call again if the application already mounted the store. */
+
+    /* File-management APIs require an operational SD mount. content_init() is
+     * idempotent when application startup mounted it already. */
     err = content_init();
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "content_init failed: %s", esp_err_to_name(err));
-        return err;
+        ESP_LOGW(TAG, "content_init failed; starting admin without SD: %s",
+                 esp_err_to_name(err));
     }
+    /* Render while heap is still unconstrained by the Wi-Fi/HTTP stacks. */
+    admin_new_code();
+    admin_log_heap("before Wi-Fi");
 
     /* One-time network stack bring-up, shared across start/stop cycles. */
     if (!s_netif_ready)
@@ -1676,9 +2388,12 @@ esp_err_t admin_start(uint16_t *code_out)
     s_wifi_started = true;
 
     httpd_cfg = (httpd_config_t)HTTPD_DEFAULT_CONFIG();
-    httpd_cfg.max_uri_handlers = 8;
+    httpd_cfg.max_uri_handlers = 20;
     httpd_cfg.max_open_sockets = 4;
-    httpd_cfg.stack_size = 32768;
+    httpd_cfg.stack_size = 16384;
+    httpd_cfg.lru_purge_enable = true;
+    httpd_cfg.uri_match_fn = httpd_uri_match_wildcard;
+    admin_log_heap("before HTTP server");
     err = httpd_start(&s_server, &httpd_cfg);
     if (err != ESP_OK)
     {
@@ -1695,14 +2410,14 @@ esp_err_t admin_start(uint16_t *code_out)
         return err;
     }
 
-    admin_new_code();
     s_active = true;
 
     if (code_out != NULL)
     {
-        *code_out = s_code;
+        memcpy(code_out, s_code_str, ADMIN_ACCESS_CODE_LEN + 1);
     }
 
+    admin_log_heap("admin active");
     ESP_LOGI(TAG, "admin mode active (SSID=%s, http://192.168.4.1/)", ADMIN_SSID);
     return ESP_OK;
 }
@@ -1746,4 +2461,15 @@ void admin_set_last_card(const char *url)
 void admin_set_code_callback(admin_code_cb_t cb)
 {
     s_code_cb = cb;
+}
+
+void admin_set_path_callbacks(admin_path_cb_t play_sound,
+                              admin_path_cb_t display_image,
+                              admin_action_cb_t stop_sound,
+                              admin_action_cb_t clear_display)
+{
+    s_play_sound_cb = play_sound;
+    s_display_image_cb = display_image;
+    s_stop_sound_cb = stop_sound;
+    s_clear_display_cb = clear_display;
 }

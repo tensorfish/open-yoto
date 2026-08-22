@@ -4,10 +4,9 @@ icon: lucide/file-cog
 
 # open-yoto-firmware
 
-A from-scratch firmware for the Yoto Player (ESP32). It reads NFC cards and
-plays the matching audio + picture, with an offline admin mode for loading
-your own content — **no Wi-Fi, Bluetooth, or cloud unless you explicitly turn
-on admin mode**.
+A from-scratch firmware for the Yoto Player (ESP32). It reads NFC cards,
+plays matching audio + pictures, and starts an offline administration hotspot
+and web server on every boot. No cloud connection is required.
 
 This page explains the logic in plain terms. The decompilation-based
 understanding of the *original* firmware is elsewhere (see
@@ -17,30 +16,33 @@ understanding of the *original* firmware is elsewhere (see
 
 ```mermaid
 flowchart TD
-  A[boot] --> B[init hardware + services]
-  B --> C{main loop}
-  C -->|powered off| C
-  C -->|admin mode| D[web server runs in background]
-  C -->|normal| E[check battery ~30s]
-  C -->|normal| F[poll NFC]
-  F -->|magic URL| G[toggle admin mode]
+  A[boot] --> B[init hardware + mount SD]
+  B --> C[start openyoto hotspot + authenticated web server]
+  C --> D{main loop}
+  D -->|powered off| D
+  D --> E[check battery]
+  D --> F[poll NFC]
+  F -->|magic URL| G[toggle admin server]
   F -->|content card| H[look up content]
   H --> I[show image + play track]
-  E -->|low| J[show low-battery art]
+  C --> J[remote control + SD file manager]
 ```
 
 ## What it does
 
 1. **Scans an NFC card** → reads its URL.
 2. **Looks up that URL** in a file on the SD card (`mapping.json`).
-3. **Plays the matching audio** (MP3) and **shows the matching picture** (a
-   16×16 pixel image).
+3. **Plays the matching audio** (MP3) and **shows the matching picture**
+   (legacy or color 16×16; older replacement OYIM 64×64 remains readable).
 4. The two knobs control **volume** (left) and **track skip** (right); pressing
    them **pauses**. Long-pressing the right knob or the power button turns the
    device **off/on**.
-5. Scanning a special "magic" card toggles **admin mode** — a temporary Wi-Fi
-   hotspot + web page. After unlocking with the 4-digit PIN, two tabs let you
-   add a folder as a playlist (New) or browse/play/delete content (Browse).
+5. On boot, starts the open `openyoto` hotspot and web UI. A random
+   six-character alphanumeric code is shown as two rows of three glyphs. Rev
+   #04 renders a native 5×7 font at 9× scale inside the panel's verified
+   240×240 visible region and compensates for the MADCTL horizontal mirror;
+   rev #05 uses a compact 5×7 matrix fallback. The authenticated UI provides
+   player remote control, card mappings, and full SD file/directory management.
 
 ## The components
 
@@ -52,9 +54,10 @@ flowchart TD
 | `ht16d35x` | the 16×16 LED display |
 | `cr95hf` | the NFC card reader |
 | `encoder` | the two rotary knobs + push buttons + power button |
-| `content` | the SD card + `mapping.json` catalog |
-| `audio` + `codec_es8156` + `libhelix-mp3` | MP3 playback → headphone DAC |
-| `admin` | the Wi-Fi hotspot + web page |
+| `content` | the SD card + optional `mapping.json` catalog |
+| `audio` + `codec_es8156` + Espressif decoders | MP3/AAC/M4A playback → I²S |
+| `admin` | boot-time hotspot, authenticated API, remote control, SD manager |
+| `yoto_vfs` | read-only embedded `/system` assets |
 | `main` | ties it all together (the state machine) |
 
 ## Boot sequence
@@ -67,28 +70,28 @@ On power-up, in order:
 4. 16×16 display.
 5. NFC reader.
 6. Rotary encoders + buttons.
-7. SD card + content catalog.
-8. Audio.
+7. SD card + optional content catalog.
+8. Audio and stock welcome playback.
+9. `openyoto` SoftAP, six-character code, and HTTP server.
 
-Then it logs the battery level, checks it once, and enters the main loop.
+The web server remains in the background while the NFC/encoder main loop runs.
 
 ## The main loop (the state machine)
 
-It's one loop with three gates, then the real work:
+The loop keeps physical controls and NFC playback active while the web server
+runs:
 
-1. **Powered off?** → sleep 200 ms, do nothing (the power button/knob still
-   works because buttons are event-driven).
-2. **Poll NFC** every ~100 ms in both normal and admin mode.
-3. **Normal mode only** → every ~30 s check the battery (show the low-battery
-   art if depleted).
+1. **Powered off?** → sleep 200 ms; button events remain active.
+2. **Poll NFC** every ~100 ms.
+3. Periodically check battery state when the access-code screen is not pinned.
 
 A card is "new" on a rising edge or when its UID changes (a swap within one
 poll window):
 
-- **Magic URL** (`https://openyoto.local/admin`) → toggle admin mode on/off.
-- **Admin mode, other card** → capture its URL for the web page's pre-fill.
-- **Normal mode, other card** → look it up in the catalog; if found, show its
-  image and start playing its first track (else show the "not found" X).
+- **Magic URL** (`https://openyoto.local/admin`) → explicitly toggle the
+  otherwise boot-enabled admin server.
+- **Other card** → capture its URL for the web UI and continue normal catalog
+  lookup, image display, and audio playback.
 
 Removing the card stops playback; a swap (or rapid remove/re-insert) is
 detected by UID change, not just presence.
@@ -130,28 +133,29 @@ flowchart LR
               "track_images": ["media/track1.img", "media/track2.img"]}]}
   ```
 
-- **rev #05 (HT16D35x)**: images are 16×16, one-bit (32 raw bytes),
-  pre-scaled by the browser; the device displays those bytes directly.
-- **rev #04 (GC9306)**: stock-compatible card art is **16×16 RGBA32** on
-  both display revisions. The factory pipeline rejects decoded PNGs of any
-  other size, alpha-composites the 1,024-byte frame, and nearest-neighbour
-  scales it 12× for the TFT. The replacement's calibrated test path places
-  that 192×192 frame at `(24,24)` after the device's observed 40px
-  vertical correction and applies its observed RGB666 R/B output swap.
-
-  A C PNG/JPEG renderer that retains original uploads and contain-fits them
-  directly to 240×320 is an **optional rev #04-only enhancement**, not a
-  reconstruction of the original behavior. It must calculate dimensions from
-  each source image, letterbox rather than stretch, and establish its own
-  physical-panel calibration; its former native-raster test used a 20px
-  upward correction and does not generalize to the 192px stock frame.
+- Browser-generated `.img` files use the replacement's **OYIM v1** format:
+  an 8-byte `OYIM`, version, RGB565, 16×16 header followed by 512 bytes of
+  little-endian RGB565 pixels. The admin UI decodes PNG/JPEG, stretches it to
+  the full 16×16 canvas, previews the exact color frame, and uploads the
+  resulting 520-byte file.
+- **rev #04 (GC9306)**: OYIM images retain color and scale 12× into the
+  centered `(24,24)..(215,215)` 192×192 content window—the same fit used by
+  stock-sized battery art. The output driver compensates for the panel's
+  `MADCTL=0x48` horizontal mirror and its observed RGB666 R/B swap.
+- **rev #05 (HT16D35x)**: the hardware is monochrome and physically 16×16, so
+  RGB565 is converted to luminance without spatial resampling. Color cannot be
+  retained on that display.
+- Legacy 32-byte 16×16 one-bit `.img` masks remain readable on both revisions.
+  Previously generated 64×64 OYIM files are also accepted and use their older
+  3× rendering path on the GC9306.
 
 ## Audio pipeline
 
 ```text
-SD content ──> Helix MP3 ─┐
-                          ├─> mono 44.1 kHz PCM ─> I2S ─> ES8156 + AW881xx
-YOTO_VFS welcome ─> M4A parser ─> Helix AAC-LC ─┘
+SD MP3 ─────────> Espressif MP3 ─┐
+SD ADTS AAC ────> Espressif AAC ─┼─> metadata-aware resample
+SD / VFS M4A ──> MP4 tables + AAC┘   ─> mono 44.1 kHz PCM
+                                            └─> I2S ─> ES8156 + AW881xx
 ```
 
 - Normal boot plays only `/system/sounds/welcome`. The path is provided by a
@@ -160,10 +164,15 @@ YOTO_VFS welcome ─> M4A parser ─> Helix AAC-LC ─┘
   `0x3f45014b–0x3f4549fb` (SHA-256
   `595d30ff7074658b6cda26d0412655e7adfb1e92c69ead2cbc0080eced895e2d`).
 - Its MP4 sample tables describe 167 mono AAC-LC access units at 44.1 kHz.
-  The replacement parses `stsd`/`stsz`/`stco`, decodes 171,008 samples, and
-  pushes 16-bit mono PCM through the stock APLL I²S path.
-- Local content remains MP3-capable. Stereo frames are downmixed before DMA,
-  and bounded PCM gain affects both speaker and headphone output.
+  The replacement streams `stsd`/`stsz`/`stsc`/`stco` or `co64`, decodes all
+  171,008 samples, and pushes 16-bit mono PCM through the stock APLL I²S path.
+  Sample-size lookups reuse the table handle, so playback needs only the two
+  descriptors provided by the embedded `/system` VFS.
+- Local content supports MP3, standalone ADTS AAC, and M4A/AAC-LC. Format
+  selection uses file signatures rather than extensions. Decoded source rate
+  and channels drive stereo downmix and stateful 8–96 kHz conversion to the
+  oracle's fixed 44.1 kHz mono sink; bounded PCM gain affects speaker and
+  headphone output.
 - Rev #04 uses one AW88194A at 7-bit `0x34`. The replacement reproduces the
   factory ET6416 reset, register table, SmartK firmware/configuration, VCALB,
   DSP/I²S/PLL checks, interrupt setup, and hard-unmute.
@@ -171,36 +180,87 @@ YOTO_VFS welcome ─> M4A parser ─> Helix AAC-LC ─┘
   manual bring-up option and never runs alongside the configured welcome-only
   startup.
 
-## Admin mode
+## Boot-enabled admin web UI
 
-Scanning the magic card starts a temporary **open Wi-Fi hotspot** (`openyoto`,
-at `192.168.4.1`) and a web server. The 4-digit access code appears on the
-16×16 display. The web page shows only the access-code form until the correct
-PIN is entered; then it reveals two tabs:
+Every normal boot starts an open Wi-Fi hotspot named `openyoto`, assigns the
+player `192.168.4.1`, and starts the embedded web server. The landing page
+contains only the login form until the six-character alphanumeric code shown
+on the player display is exchanged for an HttpOnly, SameSite session cookie.
+Every API and file read requires that cookie.
 
-- **New** — select a folder of `.mp3` + images (the audio and its image share a
-  name, different extension). The browser continues to generate the 16×16
-  bitmap for rev #05. For rev #04 it must upload the original PNG/JPEG along
-  with metadata; C performs the best-fit decode/render path on-device.
-- **Browse** — each item shows its picture, track count, a play button (audio
-  streams in the browser), and a delete button.
-- **Scan a card** in admin mode to pre-fill the URL field with that card's URL;
-  the page warns when the card already has content.
+The unlocked responsive UI has three areas:
 
-Routes: `GET /` (the page), `GET /api/list`, `GET /api/last-card`,
-`GET /media/*` (serve files), `POST /api/add`, `POST /api/delete`,
-`POST /api/login`.
+- **Remote control** — play or stop MP3, ADTS AAC, and M4A/AAC-LC files;
+  display an existing `.img`, clear the physical screen, or convert a PNG/JPEG
+  to 16×16 RGB565 for preview, upload, and immediate display. Every
+  asynchronous action reports its in-progress state immediately, then
+  announces success or failure through the page's polite live-status region.
+- **SD files** — starts at an editable `/sdcard/media` path and exposes
+  `/sdcard` explicitly in both browser navigation and filesystem API payloads;
+  upload/download files; create files and
+  directories; rename entries; delete files and empty directories. FatFs uses
+  transient heap-backed long-filename buffers and UTF-8 API names, preserving
+  mixed case and accepting names up to 96 characters. Every path rejects
+  `.`/`..` traversal.
+- **Cards** — inspect/delete mappings, capture the last scanned card URL, and
+  trigger mapped audio or images remotely.
+
+NFC scanning, track playback, knobs, and buttons continue operating while the
+web UI is active.
+
+### Memory-bounded, request-driven loading
+
+The web UI does not preload every subsystem after login:
+
+1. Login requests only the default media directory
+   (`/api/fs/list?path=/sdcard/media`).
+2. Opening a directory requests that one level only; traversal is never
+   recursive.
+3. Card mappings and last-card state load only when the **Cards** tab is
+   selected. Polling also stops while that tab is inactive.
+4. Directory JSON is streamed one entry at a time instead of building a whole
+   cJSON tree and a second response copy.
+5. `mapping.json` is parsed only on the first NFC/card-mapping request.
+6. MP3 and AAC decoder state exists only for the active playback request and
+   is released when that stream closes.
+
+The HTTP task stack is 16 KiB rather than 32 KiB. The 9.6 KiB native access
+code raster is temporary and released before Wi-Fi starts. Heap checkpoints
+are logged before Wi-Fi, before HTTP startup, when admin becomes active, and
+on every explicit allocation failure.
+
+Authenticated routes include:
+
+```text
+POST /api/login
+POST /api/control/play
+POST /api/control/display
+POST /api/control/stop
+POST /api/control/clear
+GET  /api/fs/list
+GET  /api/fs/file
+POST /api/fs/upload
+POST /api/fs/create
+POST /api/fs/mkdir
+POST /api/fs/rename
+POST /api/fs/delete
+GET  /api/list
+GET  /api/last-card
+POST /api/add
+POST /api/delete
+GET  /media/*
+```
+
+Filesystem route `path` values, and `from`/`to` rename values, must be explicit
+absolute `/sdcard` paths. Control requests from the web UI also send explicit
+`/sdcard` paths.
 
 ## Power & battery
-- Battery state comes from the CW2215B fuel gauge when its VCELL/SOC data is
-  nonzero and valid; an ACKing gauge that reports an all-zero frame is treated
-  as inactive and falls back to ADC voltage with unknown SOC. `IOX_CHG_STAT`
-  is active-low and controls charging state even when SGM41513 I²C does not
-  ACK; `IOX_PLUG_STAT` is logged separately for USB diagnostics.
-- **Low battery** = charge < 15% **or** voltage < 3.3 V — checked at boot and
-  every ~30 s, showing the low-battery art (but not shutting down).
-- When charging, the display shows a lightning bolt and a battery bar whose
-  fill is the rough state of charge (0–100%).
-- "Off" is a software standby (stops audio + blanks the display); true
-  deep-sleep power-off needs the I/O-expander interrupt pin as a wake source
-  and isn't implemented yet.
+- Battery state comes from the CW2215B after loading the exact board-specific
+  80-byte profile, activating the gauge, and waiting for ready state. VCELL and
+  SOC are read only after initialization succeeds.
+- **Low battery** = charge < 15% **or** voltage < 3.3 V.
+- `IOX_CHG_STAT` is the active-low charging signal even when the SGM41513 I²C
+  device does not ACK.
+- "Off" is software standby: audio and the admin server stop and the display
+  blanks. True deep sleep is not implemented yet.

@@ -4,8 +4,9 @@ icon: lucide/audio-lines
 
 # Audio
 
-Audio is built on **ESP-ADF** (Espressif Audio Development Framework). The
-source paths embedded in the image confirm the full ADF pipeline:
+The **stock firmware** is built on ESP-ADF (Espressif Audio Development
+Framework). Source paths embedded in the authoritative factory image confirm
+the full ADF pipeline:
 
 ```text
 /opt/esp/adf/components/audio_hal/audio_hal.c
@@ -29,6 +30,18 @@ NFC URL / SD file / HTTP stream
         ▼
 [i2s_stream] ── I2S ──> codec ──> speaker amp / headphone DAC
 ```
+
+The factory image establishes the application-level contract directly:
+
+- `0x400e1d8d` builds the MP3 decoder config and calls the decoder initializer
+  at `0x40144798`; adjacent branches call AAC `0x40143c5c` and OPUS
+  `0x40145748`.
+- `0x400e1f0e` stores `0xAC44` (44,100) as the resampler destination rate,
+  stores complexity `1`, and calls `rsp_filter_init` at `0x401d2220`.
+- Decoder-info handling at `0x400e24ef` passes the decoded sample rate and
+  channel count to `rsp_filter_set_src_info` at `0x401d21a4`.
+- The sink remains APLL, 16-bit, mono-left I²S. Thus compressed files are
+  decoded first; they are never converted to an image or preconverted PCM.
 
 Streams include local file, **HTTP**, and **HLS** (`hls_playlist.c`,
 `application/vnd.apple.mpegurl`). Playback is a streaming architecture with
@@ -86,18 +99,31 @@ payloads are adjacent-byte-swapped and sent in 128-byte chunks through windows
 After SmartPA startup, the factory pipeline sets AW88194 volume register
 `0x0f=0x0000` (100%) and settles I²S to APLL 44.1 kHz, 16-bit mono-left with
 the ESP32 legacy mono WS polarity. The replacement reproduces those settings,
-downmixes decoded stereo before DMA, and validates I²S lock, power/mute,
-volume, format, and DSP status.
+propagates decoded source metadata, downmixes stereo, and statefully resamples
+8–96 kHz MP3/AAC sources to the fixed 44.1 kHz sink across frame boundaries.
+It also validates I²S lock, power/mute, volume, format, and DSP status.
 
 ## Decoders & stream types
 
-- **Decoders**: MP3 (`pvmp3`), MP4/AAC (`DEC_AAC`), WAV (`DEC_WAV`),
-  **OPUS** (`DEC_OPUS` / `OPUS_DECODER`), **OGG** (`DEC_OGG`).
-- **MIME types**: `audio/mp4`, `audio/aacp`, `audio/wav`, `audio/opus`,
-  `audio/x-scpls` (Shoutcast PLS), plus HLS (`application/vnd.apple.mpegurl`).
-- **Replacement decoder path**: Helix MP3 for local files and fixed-point
-  Helix AAC-LC for the stock M4A welcome asset.
-- **EQ**: `APP_EQ_PRESET` setting; `esp-resample` for sample-rate conversion.
+- **Oracle decoders**: Stagefright/pvmp3 (`DEC_MP3`), MP4/ADTS AAC
+  (`DEC_AAC`), WAV (`DEC_WAV`), OPUS (`DEC_OPUS`), and OGG.
+- **Oracle MIME types** include `audio/mp4`, `audio/aacp`, `audio/wav`,
+  `audio/opus`, `audio/x-scpls`, and HLS
+  (`application/vnd.apple.mpegurl`).
+- **Replacement decoder path**: Espressif's supported ESP32 MP3 and AAC
+  decoder component preserves the oracle's decoder family and decoded-PCM
+  contract. Format selection inspects `ftyp`, ADTS, ID3, and Layer III frame
+  headers instead of trusting the extension.
+- **M4A**: streams `stsd`, `stsz`, `stsc`, and `stco`/`co64` sample tables,
+  including variable sample sizes and multiple chunks; it does not allocate a
+  whole-file copy.
+- **AAC**: supports both raw AAC access units in M4A and standalone ADTS `.aac`.
+- **Factory EQ/resampler**: `APP_EQ_PRESET`, `esp-resample`, FIR complexity 1.
+  The replacement uses a bounded stateful linear resampler at the same pipeline
+  position and destination format.
+- **Memory placement**: the WROVER-E PSRAM is initialized at boot; `malloc`
+  blocks larger than 4 KiB may use external RAM while 32 KiB stays reserved
+  for internal/DMA allocations. Decoder instances exist only during playback.
 - **Volume**: per-path (speaker / headphone), with a sleep timer that fades
   volume and restores it.
 - **Diagnostics**: `/eq-gains`, `/vol-curve`, `/dump-aw881` (DSP register dump).

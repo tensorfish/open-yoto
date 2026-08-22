@@ -120,11 +120,9 @@ esp_err_t content_get_track_image(const char *url, int index,
 esp_err_t content_delete(const char *url);
 
 /**
- * Serialize the whole mapping as a JSON array of card objects into out.
+ * Allocate the mapping as a compact JSON array on first request.
  *
- * @param out  output buffer.
- * @param cap  output buffer capacity in bytes.
- * @return ESP_OK on success, ESP_ERR_INVALID_SIZE if out is too small,
- *         ESP_ERR_INVALID_STATE if not initialized.
+ * The caller owns `*out` and must release it with cJSON_free(). Keeping
+ * allocation ownership avoids a second fixed-size copy in the HTTP server.
  */
-esp_err_t content_list(char *out, size_t cap);
+esp_err_t content_list_json(char **out);

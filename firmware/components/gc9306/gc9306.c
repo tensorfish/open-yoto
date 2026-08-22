@@ -67,6 +67,7 @@ static const gc9306_init_step_t k_init[] = {
 
 static spi_device_handle_t s_spi = NULL;
 static uint8_t s_chunk[GC9306_CHUNK_PIXELS * GC9306_BYTES_PER_PX];
+static bool s_color64_active;
 
 /*
  * The panel running the recovered stock MADCTL mode presents the R/B channels
@@ -404,7 +405,7 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
         for (size_t i = 0; i < n; i++)
         {
             size_t pixel = sent + i;
-            size_t sx = (pixel % STOCK_SIZE) / STOCK_SCALE;
+            size_t sx = 15 - ((pixel % STOCK_SIZE) / STOCK_SCALE);
             size_t sy = (pixel / STOCK_SIZE) / STOCK_SCALE;
             const uint8_t *src = &rgba[(sy * 16 + sx) * 4];
             uint8_t alpha = src[3];
@@ -428,6 +429,124 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
     }
 
     (void)iox_set_pin(IOX_TFT_CS, true);
+    return err;
+}
+
+esp_err_t gc9306_color64_begin(void)
+{
+    enum {
+        COLOR_SCALE = 3,
+        COLOR_X = 24,
+        COLOR_Y = 24,
+        COLOR_SIZE = 64 * COLOR_SCALE,
+    };
+    uint8_t b[4];
+    esp_err_t err = gc9306_fill_rect(0, 0, 239, 319, 0x000000);
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    err = iox_set_pin(IOX_TFT_CS, false);
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2A;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = COLOR_X;
+        b[2] = 0x00;
+        b[3] = COLOR_X + COLOR_SIZE - 1;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2B;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = COLOR_Y;
+        b[2] = 0x00;
+        b[3] = COLOR_Y + COLOR_SIZE - 1;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2C;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        err = iox_set_pin(IOX_TFT_DC, true);
+    }
+
+    s_color64_active = err == ESP_OK;
+    if (!s_color64_active)
+    {
+        (void)iox_set_pin(IOX_TFT_CS, true);
+    }
+    return err;
+}
+
+esp_err_t gc9306_color64_write_row(const uint16_t pixels[64])
+{
+    enum {
+        SOURCE_WIDTH = 64,
+        COLOR_SCALE = 3,
+        OUTPUT_WIDTH = SOURCE_WIDTH * COLOR_SCALE,
+        OUTPUT_PIXELS = OUTPUT_WIDTH * COLOR_SCALE,
+    };
+    spi_transaction_t t = { 0 };
+    spi_transaction_t *completed;
+
+    if (!s_color64_active)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (pixels == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (size_t i = 0; i < OUTPUT_PIXELS; i++)
+    {
+        size_t output_x = i % OUTPUT_WIDTH;
+        size_t source_x = SOURCE_WIDTH - 1 - output_x / COLOR_SCALE;
+        uint16_t color = pixels[source_x];
+        uint8_t red5 = (uint8_t)((color >> 11) & 0x1F);
+        uint8_t green6 = (uint8_t)((color >> 5) & 0x3F);
+        uint8_t blue5 = (uint8_t)(color & 0x1F);
+
+        gc9306_store_rgb(i,
+                          (uint8_t)((red5 << 3) | (red5 >> 2)),
+                          (uint8_t)((green6 << 2) | (green6 >> 4)),
+                          (uint8_t)((blue5 << 3) | (blue5 >> 2)));
+    }
+
+    t.length = OUTPUT_PIXELS * GC9306_BYTES_PER_PX * 8;
+    t.tx_buffer = s_chunk;
+    esp_err_t err = spi_device_queue_trans(s_spi, &t, portMAX_DELAY);
+    if (err == ESP_OK)
+    {
+        err = spi_device_get_trans_result(s_spi, &completed, portMAX_DELAY);
+    }
+    return err;
+}
+
+esp_err_t gc9306_color64_end(void)
+{
+    esp_err_t err;
+
+    if (!s_color64_active)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_color64_active = false;
+    err = iox_set_pin(IOX_TFT_CS, true);
     return err;
 }
 

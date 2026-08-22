@@ -11,8 +11,64 @@
  */
 #include "display.h"
 
+#include <string.h>
+
+/* Native 5x7 rows for 0-9 and A-Z. Low five bits are left-to-right pixels. */
+static const uint8_t ACCESS_FONT[36][7] = {
+    { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E },
+    { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E },
+    { 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F },
+    { 0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E },
+    { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 },
+    { 0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E },
+    { 0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E },
+    { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
+    { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E },
+    { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E },
+    { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 },
+    { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E },
+    { 0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F },
+    { 0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E },
+    { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F },
+    { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 },
+    { 0x0F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0F },
+    { 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 },
+    { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F },
+    { 0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0E },
+    { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 },
+    { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F },
+    { 0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11 },
+    { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 },
+    { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E },
+    { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 },
+    { 0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D },
+    { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 },
+    { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E },
+    { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 },
+    { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E },
+    { 0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04 },
+    { 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A },
+    { 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 },
+    { 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04 },
+    { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F },
+};
+
+static int access_glyph_index(char ch)
+{
+    if (ch >= '0' && ch <= '9')
+    {
+        return ch - '0';
+    }
+    if (ch >= 'A' && ch <= 'Z')
+    {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
 #ifdef CONFIG_BOARD_REV_04
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -98,10 +154,11 @@ void display_flush(void)
         {
             if (s_fb[y][x])
             {
-                err = gc9306_fill_rect(x * DISPLAY_TFT_SCALE + DISPLAY_TFT_OFFSET_X,
+                int panel_x = (15 - x) * DISPLAY_TFT_SCALE
+                            + DISPLAY_TFT_OFFSET_X;
+                err = gc9306_fill_rect(panel_x,
                                        y * DISPLAY_TFT_SCALE + DISPLAY_TFT_OFFSET_Y,
-                                       x * DISPLAY_TFT_SCALE + DISPLAY_TFT_OFFSET_X
-                                           + DISPLAY_TFT_SCALE - 1,
+                                       panel_x + DISPLAY_TFT_SCALE - 1,
                                        y * DISPLAY_TFT_SCALE + DISPLAY_TFT_OFFSET_Y
                                            + DISPLAY_TFT_SCALE - 1,
                                        0xFFFFFF);
@@ -135,6 +192,60 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
     }
 }
 
+esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
+{
+    uint8_t rgba[16 * 16 * 4];
+    esp_err_t err;
+
+    if (pixels == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < 16 * 16; i++)
+    {
+        uint16_t color = pixels[i];
+        uint8_t red5 = (uint8_t)((color >> 11) & 0x1F);
+        uint8_t green6 = (uint8_t)((color >> 5) & 0x3F);
+        uint8_t blue5 = (uint8_t)(color & 0x1F);
+
+        rgba[i * 4] = (uint8_t)((red5 << 3) | (red5 >> 2));
+        rgba[i * 4 + 1] = (uint8_t)((green6 << 2) | (green6 >> 4));
+        rgba[i * 4 + 2] = (uint8_t)((blue5 << 3) | (blue5 >> 2));
+        rgba[i * 4 + 3] = 0xFF;
+    }
+
+    err = gc9306_fill_rect(0, 0, 239, 319, 0x000000);
+    if (err == ESP_OK)
+    {
+        err = gc9306_draw_rgba16(rgba);
+    }
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "RGB565 frame failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t display_color64_begin(void)
+{
+    return gc9306_color64_begin();
+}
+
+esp_err_t display_color64_write_row(uint8_t y,
+                                    const uint16_t pixels[64])
+{
+    if (y >= 64)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return gc9306_color64_write_row(pixels);
+}
+
+esp_err_t display_color64_end(void)
+{
+    return gc9306_color64_end();
+}
+
 void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
                             uint32_t foreground, uint32_t background)
 {
@@ -151,11 +262,89 @@ void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
 }
 
 
+#define ACCESS_MASK_BYTES (240 * 320 / 8)
+#define ACCESS_GLYPH_SCALE 9
+#define ACCESS_ROW_WIDTH   (3 * 5 * ACCESS_GLYPH_SCALE + 2 * ACCESS_GLYPH_SCALE)
+
+
+static void access_mask_pixel(uint8_t *mask, int x, int y)
+{
+    if (x >= 0 && x < 240 && y >= 0 && y < 320)
+    {
+        /* MADCTL 0x48 mirrors RAMWR horizontally on the physical panel. */
+        int panel_x = 239 - x;
+        size_t pixel = (size_t)y * 240 + (size_t)panel_x;
+        mask[pixel / 8] |= (uint8_t)(1U << (7 - (pixel % 8)));
+    }
+}
+
+static void access_draw_native_glyph(uint8_t *mask, int x, int y, char ch)
+{
+    int index = access_glyph_index(ch);
+
+    if (index < 0)
+    {
+        return;
+    }
+    for (int row = 0; row < 7; row++)
+    {
+        uint8_t bits = ACCESS_FONT[index][row];
+        for (int col = 0; col < 5; col++)
+        {
+            if ((bits & (uint8_t)(1U << (4 - col))) == 0)
+            {
+                continue;
+            }
+            for (int sy = 0; sy < ACCESS_GLYPH_SCALE; sy++)
+            {
+                for (int sx = 0; sx < ACCESS_GLYPH_SCALE; sx++)
+                {
+                    access_mask_pixel(mask,
+                                      x + col * ACCESS_GLYPH_SCALE + sx,
+                                      y + row * ACCESS_GLYPH_SCALE + sy);
+                }
+            }
+        }
+    }
+}
+
+void display_show_access_code(
+    const char code[DISPLAY_ACCESS_CODE_LEN + 1])
+{
+    int start_x = (240 - ACCESS_ROW_WIDTH) / 2;
+    uint8_t *mask = calloc(1, ACCESS_MASK_BYTES);
+
+    if (mask == NULL)
+    {
+        ESP_LOGE(TAG, "access-code mask allocation failed");
+        return;
+    }
+    if (code != NULL)
+    {
+        for (int i = 0; i < DISPLAY_ACCESS_CODE_LEN; i++)
+        {
+            int x = start_x + (i % 3)
+                  * (5 * ACCESS_GLYPH_SCALE + ACCESS_GLYPH_SCALE);
+            int y = i < 3 ? 40 : 145;
+            access_draw_native_glyph(mask, x, y, code[i]);
+        }
+    }
+    esp_err_t err = gc9306_draw_mask_full(mask, 0xF5A623, 0x000000);
+    free(mask);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "access-code render failed: %s", esp_err_to_name(err));
+    }
+}
+
 #else /* CONFIG_BOARD_REV_04 */
 
 #include "ht16d35x.h"
 
 
+
+static uint32_t s_color64_luma[16];
+static uint8_t s_color64_next_row;
 esp_err_t display_init(void)
 {
     return ht16d35x_init();
@@ -200,6 +389,81 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
     display_flush();
 }
 
+esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
+{
+    if (pixels == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    display_clear();
+    for (int y = 0; y < 16; y++)
+    {
+        for (int x = 0; x < 16; x++)
+        {
+            uint16_t color = pixels[y * 16 + x];
+            uint16_t red = (uint16_t)(((color >> 11) & 0x1F) * 255 / 31);
+            uint16_t green = (uint16_t)(((color >> 5) & 0x3F) * 255 / 63);
+            uint16_t blue = (uint16_t)((color & 0x1F) * 255 / 31);
+            uint16_t luma = (red * 77 + green * 150 + blue * 29) / 256;
+
+            display_set_pixel(x, y, luma >= 96);
+        }
+    }
+    display_flush();
+    return ESP_OK;
+}
+
+esp_err_t display_color64_begin(void)
+{
+    memset(s_color64_luma, 0, sizeof(s_color64_luma));
+    s_color64_next_row = 0;
+    display_clear();
+    return ESP_OK;
+}
+
+esp_err_t display_color64_write_row(uint8_t y,
+                                    const uint16_t pixels[64])
+{
+    if (pixels == NULL || y != s_color64_next_row || y >= 64)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (int x = 0; x < 64; x++)
+    {
+        uint16_t color = pixels[x];
+        uint16_t red = (uint16_t)(((color >> 11) & 0x1F) * 255 / 31);
+        uint16_t green = (uint16_t)(((color >> 5) & 0x3F) * 255 / 63);
+        uint16_t blue = (uint16_t)((color & 0x1F) * 255 / 31);
+
+        s_color64_luma[x / 4] += (red * 77 + green * 150 + blue * 29) / 256;
+    }
+    if ((y & 3) == 3)
+    {
+        int target_y = y / 4;
+
+        for (int target_x = 0; target_x < 16; target_x++)
+        {
+            display_set_pixel(target_x, target_y,
+                              s_color64_luma[target_x] >= 96 * 16);
+            s_color64_luma[target_x] = 0;
+        }
+    }
+    s_color64_next_row++;
+    return ESP_OK;
+}
+
+esp_err_t display_color64_end(void)
+{
+    if (s_color64_next_row != 64)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    display_flush();
+    return ESP_OK;
+}
+
 void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
                             uint32_t foreground, uint32_t background)
 {
@@ -225,5 +489,37 @@ void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
     display_flush();
 }
 
+
+void display_show_access_code(
+    const char code[DISPLAY_ACCESS_CODE_LEN + 1])
+{
+    ht16d35x_clear();
+    if (code != NULL)
+    {
+        for (int i = 0; i < DISPLAY_ACCESS_CODE_LEN; i++)
+        {
+            int index = access_glyph_index(code[i]);
+            int x0 = (i % 3) * 5;
+            int y0 = i < 3 ? 0 : 9;
+
+            if (index < 0)
+            {
+                continue;
+            }
+            for (int row = 0; row < 7; row++)
+            {
+                uint8_t bits = ACCESS_FONT[index][row];
+                for (int col = 0; col < 5; col++)
+                {
+                    if ((bits & (uint8_t)(1U << (4 - col))) != 0)
+                    {
+                        ht16d35x_set_pixel(x0 + col, y0 + row, true);
+                    }
+                }
+            }
+        }
+    }
+    ht16d35x_flush();
+}
 
 #endif /* CONFIG_BOARD_REV_04 */

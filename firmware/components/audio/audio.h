@@ -1,11 +1,10 @@
 /*
- * audio.h — Yoto Player MP3 player (I2S std TX -> AW88194A speaker amp
- * and ES8156 headphone DAC).
+ * audio.h — Yoto Player compressed-audio playback over I2S.
  *
- * Brings up the stock-matched I2S master TX path (APLL 44100 Hz, 16-bit
- * mono-left), both audio sinks, and streams MP3 files from FatFS. Playback is
- * decoded with Helix, downmixed to mono, and written to I2S DMA by a dedicated
- * FreeRTOS task.
+ * Brings up the stock-matched APLL 44.1 kHz, 16-bit mono-left sink and both
+ * audio outputs. A dedicated task streams MP3, standalone ADTS AAC, and
+ * M4A/AAC-LC through Espressif decoders, source-metadata-driven downmix and
+ * resampling, then bounded-volume I2S DMA writes.
  */
 #pragma once
 
@@ -26,14 +25,14 @@
 esp_err_t audio_init(void);
 
 /**
- * Begin playing an MP3 file from the VFS. The file is decoded with Helix,
- * stereo frames are downmixed to mono, and PCM is pushed to I2S DMA. Decoding
- * runs in a dedicated FreeRTOS task, so this call returns after playback has
- * started.
+ * Begin playing a supported compressed-audio file from the VFS. Content
+ * signatures select MP3, ADTS AAC, or M4A/AAC-LC; the extension is only a
+ * fallback. Decoding runs in a dedicated FreeRTOS task, so this call returns
+ * after scheduling playback.
  *
  * If another file is already playing it is stopped first.
  *
- * path NUL-terminated path to the MP3 file.
+ * path NUL-terminated VFS path to the audio file.
  *
  * return ESP_OK on success, ESP_ERR_INVALID_ARG on a NULL path,
  *        ESP_ERR_NOT_FOUND if the file cannot be opened, or the underlying

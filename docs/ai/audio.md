@@ -147,9 +147,10 @@ Replacement implementation:
    `/system`.
 2. Normal boot mounts SD, starts user mode, and opens only
    `/system/sounds/welcome`.
-3. `components/audio` parses `stsd`, `stsz`, and `stco`; fixed-point Helix AAC
-   decodes raw AAC-LC blocks.
-4. PCM uses the same bounded volume and mono-left I²S path as MP3 playback.
+3. `components/audio` streams `stsd`, `stsz`, `stsc`, and `stco`/`co64`;
+   Espressif's ESP32 AAC decoder processes the raw AAC-LC access units.
+4. Decoded metadata drives downmix and resampling into the same bounded-volume,
+   mono-left 44.1 kHz I²S path as MP3 playback.
 5. `CONFIG_APP_SPEAKER_TEST_TONE` is disabled in the normal configuration, so
    the welcome asset is the only boot audio.
 

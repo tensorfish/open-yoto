@@ -50,6 +50,23 @@ void display_flush(void);
 void display_show_rgba(const uint8_t rgba[16 * 16 * 4]);
 
 /**
+ * Render a 16x16 RGB565 icon in ordinary source orientation and RGB order.
+ * Rev #04 scales it 12× in color; rev #05 converts it to luminance.
+ */
+esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16]);
+
+/**
+ * Stream a 64x64 RGB565 image without allocating a full frame.
+ *
+ * Call begin once, write rows 0..63 in order, then call end even after a row
+ * error. RGB565 values use ordinary source orientation and colour order.
+ */
+esp_err_t display_color64_begin(void);
+esp_err_t display_color64_write_row(uint8_t y,
+                                    const uint16_t pixels[64]);
+esp_err_t display_color64_end(void);
+
+/**
  * Render a packed 1-bit 192x192 raster at the stock GC9306 window. This is
  * intended for native-resolution display tests; the #05 path downsamples it.
  *
@@ -66,3 +83,14 @@ void display_show_mask192(const uint8_t mask[192 * 192 / 8],
  */
 void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
                             uint32_t foreground, uint32_t background);
+
+#define DISPLAY_ACCESS_CODE_LEN 6
+
+/**
+ * Render a six-character alphanumeric access code.
+ *
+ * Rev #04 uses a native 5x7 font on the 240x320 TFT. Rev #05 uses a compact
+ * two-row fallback on the 16x16 LED matrix.
+ */
+void display_show_access_code(
+    const char code[DISPLAY_ACCESS_CODE_LEN + 1]);

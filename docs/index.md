@@ -7,9 +7,9 @@ icon: lucide/radio
 This project has three parts:
 
 1. **[open-yoto firmware](open-yoto-firmware.md)** — a from-scratch, open-source
-   firmware for the Yoto Player (C / ESP-IDF). It reads NFC cards, plays the
-   matching audio + picture, and has an offline admin mode to load your own
-   content. No Wi-Fi / Bluetooth / cloud unless admin mode is turned on.
+   firmware for the Yoto Player. It reads NFC cards, plays audio + pictures,
+   and boots an offline `openyoto` hotspot with authenticated remote control
+   and SD file management. No cloud connection is required.
 2. **Reverse engineering** (this section) — a map of the *original* stock
    firmware in `yoto-firmware.bin` (the 8 MiB flash dump), documented below.
 3. **[Research](ai/index.md)** — dense, evidence-backed detail (exact strings,

@@ -253,6 +253,34 @@ RGBA SHA-256 `169c10ad0c134122ebbda95423466d734a2e461575db29deefdb914038e43863`)
 The stock compositor calculates `floor(rgb * alpha / 255)`, then renders the
 frame nearest-neighbour at 12× into `(24,27)..(215,218)`.
 
+### Device-observed full-raster handling
+
+Facts established on the rev #04 physical unit while rendering the boot admin
+code:
+
+- GC9306 GRAM is addressed as 240×320 (`CASET 0..239`, `RASET 0..319`), but
+  the reliable visible UI region is the upper 240×240. Stock's calibrated
+  `(24,27)..(215,218)` icon window remains the authoritative safe bound.
+- Native content whose bottom row extended through Y≈259 was physically cut
+  off. Critical text is now constrained to Y≤207.
+- With recovered `MADCTL=0x48`, row-major full-raster mask writes appear
+  horizontally mirrored. Native visual coordinates must be packed at
+  `gram_x = 239 - visual_x`.
+- Horizontal mirror compensation and RGB666 R/B byte correction are distinct:
+  coordinate reversal belongs in mask packing; channel reversal remains only
+  in `gc9306_store_rgb()`.
+- The readable access-code layout uses a 5×7 font, 9× pixels per font cell,
+  three glyphs per row, visual rows starting at Y=40 and Y=145. The lower row
+  ends at Y=207.
+- HT16D35x does not use the GC9306 coordinate correction; its fallback draws
+  5×7 glyphs directly into two rows of the 16×16 matrix.
+
+Implementation locations:
+
+- `display_show_access_code()` in `firmware/components/display/display.c`
+- `access_mask_pixel()` for the horizontal GRAM correction
+- `gc9306_draw_mask_full()` for the 240×320 transfer
+
 ### Nightlight / ambient LED (tags `NIGHT_LIGHT` @ `0x3f420668`, `LEDS` @ `0x3f411e14`)
 | Address | Likely role |
 |---|---|

@@ -20,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,7 @@ static cJSON *s_root;
 static cJSON *s_cards;
 
 static bool s_mounted;
+static bool s_index_loaded;
 
 /*
  * Build the persisted media path for a bare file name. A name that already
@@ -226,6 +228,46 @@ static esp_err_t content_create_empty_index(void)
     return ESP_OK;
 }
 
+static esp_err_t content_ensure_index_loaded(void)
+{
+    struct stat st;
+    esp_err_t err;
+
+    if (s_index_loaded)
+    {
+        return ESP_OK;
+    }
+    if (!s_mounted)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (stat(CONTENT_MAP_PATH, &st) == 0)
+    {
+        ESP_LOGI(TAG, "loading optional index %s on demand", CONTENT_MAP_PATH);
+        err = content_load();
+        if (err == ESP_ERR_NO_MEM)
+        {
+            return err;
+        }
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "ignoring invalid optional index %s: %s",
+                     CONTENT_MAP_PATH, esp_err_to_name(err));
+            err = content_create_empty_index();
+        }
+    }
+    else
+    {
+        err = content_create_empty_index();
+    }
+    if (err == ESP_OK)
+    {
+        s_index_loaded = true;
+    }
+    return err;
+}
+
 
 esp_err_t content_init(void)
 {
@@ -233,7 +275,6 @@ esp_err_t content_init(void)
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
     esp_vfs_fat_sdmmc_mount_config_t mount_config;
-    struct stat st;
     int attempt;
 
     if (s_mounted)
@@ -301,33 +342,16 @@ esp_err_t content_init(void)
     }
     s_mounted = true;
     ESP_LOGI(TAG, "SD card mounted at %s", CONTENT_MOUNT_POINT);
-
-    /* Stock firmware considers the SD operational immediately after the
-     * FatFS mount. mapping.json is an open-yoto extension, so its absence or
-     * invalid contents must not turn a successful mount into "SD unavailable"
-     * or write to a stock card during boot. */
-    if (stat(CONTENT_MAP_PATH, &st) == 0)
+    if (mkdir(CONTENT_MEDIA_DIR, 0755) != 0 && errno != EEXIST)
     {
-        err = content_load();
-        if (err != ESP_OK)
-        {
-            ESP_LOGW(TAG, "ignoring invalid optional index %s: %s",
-                     CONTENT_MAP_PATH, esp_err_to_name(err));
-            err = content_create_empty_index();
-        }
-    }
-    else
-    {
-        ESP_LOGI(TAG, "optional index %s not present", CONTENT_MAP_PATH);
-        err = content_create_empty_index();
-    }
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "could not initialize in-memory content index: %s",
-                 esp_err_to_name(err));
-        return err;
+        ESP_LOGW(TAG, "could not ensure media directory %s: errno=%d (%s)",
+                 CONTENT_MEDIA_DIR, errno, strerror(errno));
     }
 
+    /* mapping.json is not needed to mount SD or start the web UI. Parse it
+     * only when NFC mapping or the Cards tab first requests it. */
+    s_index_loaded = false;
+    ESP_LOGI(TAG, "content index deferred until first use");
     ESP_LOGI(TAG, "content store ready at %s", CONTENT_MOUNT_POINT);
     return ESP_OK;
 }
@@ -339,6 +363,12 @@ esp_err_t content_lookup(const char *url, char *sound_path, size_t sp,
     cJSON *u;
     cJSON *sound;
     cJSON *image;
+
+    esp_err_t index_err = content_ensure_index_loaded();
+    if (index_err != ESP_OK)
+    {
+        return index_err;
+    }
 
     if (s_root == NULL || s_cards == NULL)
     {
@@ -400,6 +430,11 @@ static cJSON *content_find_card(const char *url)
 {
     cJSON *card;
     cJSON *u;
+
+    if (content_ensure_index_loaded() != ESP_OK)
+    {
+        return NULL;
+    }
 
     if (s_root == NULL || s_cards == NULL || url == NULL)
     {
@@ -484,7 +519,15 @@ esp_err_t content_get_track(const char *url, int index,
 
     if (sound_path != NULL && sp > 0)
     {
-        snprintf(sound_path, sp, "%s", val);
+        if (strncmp(val, CONTENT_MOUNT_POINT "/",
+                    strlen(CONTENT_MOUNT_POINT) + 1) == 0)
+        {
+            snprintf(sound_path, sp, "%s", val);
+        }
+        else
+        {
+            snprintf(sound_path, sp, CONTENT_MOUNT_POINT "/%s", val);
+        }
     }
     return ESP_OK;
 }
@@ -499,9 +542,10 @@ esp_err_t content_add(const char *url, const char *sound_name,
     int idx;
     int i;
 
-    if (s_root == NULL || s_cards == NULL)
+    esp_err_t index_err = content_ensure_index_loaded();
+    if (index_err != ESP_OK)
     {
-        return ESP_ERR_INVALID_STATE;
+        return index_err;
     }
     if (url == NULL || sound_name == NULL || image_name == NULL)
     {
@@ -551,9 +595,10 @@ esp_err_t content_delete(const char *url)
     int idx;
     int i;
 
-    if (s_root == NULL || s_cards == NULL)
+    esp_err_t index_err = content_ensure_index_loaded();
+    if (index_err != ESP_OK)
     {
-        return ESP_ERR_INVALID_STATE;
+        return index_err;
     }
     if (url == NULL)
     {
@@ -584,36 +629,22 @@ esp_err_t content_delete(const char *url)
     return content_save();
 }
 
-esp_err_t content_list(char *out, size_t cap)
+esp_err_t content_list_json(char **out)
 {
-    char *json;
-    size_t len;
+    esp_err_t err;
 
-    if (out == NULL || cap == 0)
+    if (out == NULL)
     {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_cards == NULL)
+    *out = NULL;
+    err = content_ensure_index_loaded();
+    if (err != ESP_OK)
     {
-        return ESP_ERR_INVALID_STATE;
+        return err;
     }
-
-    json = cJSON_PrintUnformatted(s_cards);
-    if (json == NULL)
-    {
-        return ESP_ERR_NO_MEM;
-    }
-
-    len = strlen(json);
-    if (len + 1 > cap)
-    {
-        cJSON_free(json);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    memcpy(out, json, len + 1);
-    cJSON_free(json);
-    return ESP_OK;
+    *out = cJSON_PrintUnformatted(s_cards);
+    return *out == NULL ? ESP_ERR_NO_MEM : ESP_OK;
 }
 
 esp_err_t content_add_playlist(const char *url,
@@ -630,9 +661,10 @@ esp_err_t content_add_playlist(const char *url,
     int idx;
     int i;
 
-    if (s_root == NULL || s_cards == NULL)
+    esp_err_t index_err = content_ensure_index_loaded();
+    if (index_err != ESP_OK)
     {
-        return ESP_ERR_INVALID_STATE;
+        return index_err;
     }
     if (url == NULL || tracks == NULL || n <= 0)
     {

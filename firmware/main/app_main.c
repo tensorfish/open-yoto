@@ -1,11 +1,10 @@
 /*
  * app_main.c — Yoto replacement firmware: state machine.
  *
- * Boot -> battery check (low-battery art) -> normal mode (NFC scan -> play +
- * display) with encoders for volume/skip and buttons for pause. A "magic" NDEF
- * URL toggles admin mode (open softAP + web UI + 4-digit code).
- *
- * Wi-Fi/BT are NOT enabled in normal mode; only admin mode brings up the radio.
+ * Boot initializes the player, mounts SD, starts the `openyoto` SoftAP and
+ * authenticated web UI, then continues normal NFC/encoder playback. The
+ * six-character admin code is rendered on the player display at startup.
+ * A magic NDEF card can still explicitly toggle admin mode.
  */
 #include <stdio.h>
 #include <string.h>
@@ -48,6 +47,21 @@ static int s_volume = 70;
 /* 16x16 one-bit bitmaps: 2 bytes per row (32 bytes total). Each byte holds 8
  * pixels; bit 7 (MSB) is the leftmost pixel of that byte. */
 
+#define PLAYER_COLOR_IMAGE_MAGIC "OYIM"
+#define PLAYER_COLOR_IMAGE_VERSION 1
+#define PLAYER_COLOR_IMAGE_RGB565 1
+#define PLAYER_COLOR_IMAGE_HEADER_SIZE 8
+#define PLAYER_COLOR_IMAGE_16_WIDTH 16
+#define PLAYER_COLOR_IMAGE_16_DATA_SIZE \
+    (PLAYER_COLOR_IMAGE_16_WIDTH * PLAYER_COLOR_IMAGE_16_WIDTH * 2)
+#define PLAYER_COLOR_IMAGE_16_FILE_SIZE \
+    (PLAYER_COLOR_IMAGE_HEADER_SIZE + PLAYER_COLOR_IMAGE_16_DATA_SIZE)
+#define PLAYER_COLOR_IMAGE_64_WIDTH 64
+#define PLAYER_COLOR_IMAGE_64_DATA_SIZE \
+    (PLAYER_COLOR_IMAGE_64_WIDTH * PLAYER_COLOR_IMAGE_64_WIDTH * 2)
+#define PLAYER_COLOR_IMAGE_64_FILE_SIZE \
+    (PLAYER_COLOR_IMAGE_HEADER_SIZE + PLAYER_COLOR_IMAGE_64_DATA_SIZE)
+
 /* "Not found" indicator — an X, shown when a scanned card has no content. */
 
 static const uint8_t NOT_FOUND_ART[32] = {
@@ -55,23 +69,6 @@ static const uint8_t NOT_FOUND_ART[32] = {
     0x08, 0x10, 0x04, 0x20, 0x02, 0x40, 0x01, 0x80,
     0x01, 0x80, 0x02, 0x40, 0x04, 0x20, 0x08, 0x10,
     0x10, 0x08, 0x20, 0x04, 0x40, 0x02, 0x80, 0x01,
-};
-
-/* (admin-mode indicator removed — the 4-digit code is shown instead.) */
-
-/* 3x5 digit font. Each digit is 3 columns; each byte is one column with bit 0
- * at the top row and bit 4 at the bottom row. */
-static const uint8_t DIGIT_FONT[10][3] = {
-    { 0x1F, 0x11, 0x1F }, /* 0 */
-    { 0x00, 0x1F, 0x00 }, /* 1 */
-    { 0x1D, 0x15, 0x17 }, /* 2 */
-    { 0x15, 0x15, 0x1F }, /* 3 */
-    { 0x07, 0x04, 0x1F }, /* 4 */
-    { 0x17, 0x15, 0x1D }, /* 5 */
-    { 0x1F, 0x15, 0x1D }, /* 6 */
-    { 0x01, 0x01, 0x1F }, /* 7 */
-    { 0x1F, 0x15, 0x1F }, /* 8 */
-    { 0x17, 0x15, 0x1F }, /* 9 */
 };
 
 /* ------------------------------------------------------------ display --- */
@@ -95,57 +92,11 @@ static void draw_bitmap(const uint8_t bmp[32])
     display_flush();
 }
 
-/*
- * Draw one 3x5 digit at column x (top-anchored at y=1).
- *
- * @param[in] x     Column of the digit's left edge (0..15).
- * @param[in] digit 0..9.
- */
-static void draw_digit(int x, int digit)
+static void show_admin_code(
+    const char code[ADMIN_ACCESS_CODE_LEN + 1])
 {
-    if (digit < 0 || digit > 9 || x < 0 || x + 3 > 16)
-    {
-        return;
-    }
-    for (int col = 0; col < 3; col++)
-    {
-        uint8_t bits = DIGIT_FONT[digit][col];
-        for (int row = 0; row < 5; row++)
-        {
-            display_set_pixel(x + col, 1 + row, (bits & 0x01) != 0);
-            bits >>= 1;
-        }
-    }
-}
-
-/*
- * Render a 4-digit decimal code centered on the 16x16 panel.
- *
- * @param[in] code 0..9999.
- */
-static void draw_code(uint16_t code)
-{
-    display_clear();
-    int digits[4] = {
-        (code / 1000) % 10,
-        (code / 100) % 10,
-        (code / 10) % 10,
-        code % 10,
-    };
-    for (int i = 0; i < 4; i++)
-    {
-        draw_digit(1 + i * 4, digits[i]);
-    }
-    display_flush();
-}
-
-/*
- * Show the 4-digit admin code on the display (admin_code_cb_t callback).
- */
-static void show_admin_code(uint16_t code)
-{
-    ESP_LOGI(TAG, "admin code: %04u", (unsigned int)code);
-    draw_code(code);
+    ESP_LOGI(TAG, "admin code: %s", code);
+    display_show_access_code(code);
 }
 
 /* ------------------------------------------------------------- encoder --- */
@@ -209,7 +160,7 @@ static void power_toggle(void)
     state_unlock();
 }
 
-static void render_image(const char *path);
+static esp_err_t render_image(const char *path);
 
 /* Advance/rewind the current card's tracks by delta (wraps around). */
 static void skip_track(int delta)
@@ -345,37 +296,194 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
 static uint32_t s_battery_check_ticks = 0;
 
 /*
- * Render a 16x16 one-bit image file (32 bytes) to the display.
- *
- * @param[in] path path relative to the content mount point (e.g. "media/x.img").
+ * Render a legacy 16x16 one-bit image or an OYIM v1 RGB565 image. New browser
+ * output is 16x16 color; previously generated 64x64 OYIM files remain valid.
+ * Accepts an absolute /sdcard path or a content-relative card-mapping path.
  */
-static void render_image(const char *path)
+static esp_err_t render_image(const char *path)
 {
     char full[160];
     FILE *f;
-    uint8_t bmp[32];
-    size_t n;
+    long file_size;
 
     if (path == NULL || path[0] == '\0')
     {
-        return;
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strncmp(path, CONTENT_MOUNT_POINT "/",
+                strlen(CONTENT_MOUNT_POINT) + 1) == 0)
+    {
+        snprintf(full, sizeof(full), "%s", path);
+    }
+    else
+    {
+        snprintf(full, sizeof(full), "%s/%s", CONTENT_MOUNT_POINT, path);
     }
 
-    snprintf(full, sizeof(full), "%s/%s", CONTENT_MOUNT_POINT, path);
     f = fopen(full, "rb");
     if (f == NULL)
     {
         ESP_LOGW(TAG, "cannot open image %s", full);
-        return;
+        return ESP_ERR_NOT_FOUND;
     }
-
-    n = fread(bmp, 1, sizeof(bmp), f);
-    fclose(f);
-
-    if (n == sizeof(bmp))
+    if (fseek(f, 0, SEEK_END) != 0
+        || (file_size = ftell(f)) < 0
+        || fseek(f, 0, SEEK_SET) != 0)
     {
-        draw_bitmap(bmp);
+        fclose(f);
+        ESP_LOGW(TAG, "cannot inspect image %s", full);
+        return ESP_FAIL;
     }
+
+    if (file_size == 32)
+    {
+        uint8_t bmp[32];
+
+        if (fread(bmp, 1, sizeof(bmp), f) != sizeof(bmp))
+        {
+            fclose(f);
+            return ESP_FAIL;
+        }
+        fclose(f);
+        draw_bitmap(bmp);
+        return ESP_OK;
+    }
+
+    if (file_size == PLAYER_COLOR_IMAGE_16_FILE_SIZE
+        || file_size == PLAYER_COLOR_IMAGE_64_FILE_SIZE)
+    {
+        uint8_t header[PLAYER_COLOR_IMAGE_HEADER_SIZE];
+        uint8_t width;
+
+        if (fread(header, 1, sizeof(header), f) != sizeof(header)
+            || memcmp(header, PLAYER_COLOR_IMAGE_MAGIC, 4) != 0
+            || header[4] != PLAYER_COLOR_IMAGE_VERSION
+            || header[5] != PLAYER_COLOR_IMAGE_RGB565
+            || header[6] != header[7])
+        {
+            fclose(f);
+            ESP_LOGW(TAG, "invalid color image header in %s", full);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+        width = header[6];
+
+        if (width == PLAYER_COLOR_IMAGE_16_WIDTH
+            && file_size == PLAYER_COLOR_IMAGE_16_FILE_SIZE)
+        {
+            uint8_t pixel_bytes[PLAYER_COLOR_IMAGE_16_DATA_SIZE];
+            uint16_t pixels[PLAYER_COLOR_IMAGE_16_WIDTH
+                            * PLAYER_COLOR_IMAGE_16_WIDTH];
+
+            if (fread(pixel_bytes, 1, sizeof(pixel_bytes), f)
+                != sizeof(pixel_bytes))
+            {
+                fclose(f);
+                return ESP_FAIL;
+            }
+            for (size_t i = 0;
+                 i < PLAYER_COLOR_IMAGE_16_WIDTH
+                     * PLAYER_COLOR_IMAGE_16_WIDTH;
+                 i++)
+            {
+                pixels[i] = (uint16_t)pixel_bytes[i * 2]
+                          | (uint16_t)((uint16_t)pixel_bytes[i * 2 + 1] << 8);
+            }
+            fclose(f);
+            return display_show_rgb56516(pixels);
+        }
+
+        if (width == PLAYER_COLOR_IMAGE_64_WIDTH
+            && file_size == PLAYER_COLOR_IMAGE_64_FILE_SIZE)
+        {
+            uint8_t row_bytes[PLAYER_COLOR_IMAGE_64_WIDTH * 2];
+            uint16_t row[PLAYER_COLOR_IMAGE_64_WIDTH];
+            esp_err_t err = display_color64_begin();
+            esp_err_t end_err;
+
+            if (err != ESP_OK)
+            {
+                fclose(f);
+                return err;
+            }
+            for (uint8_t y = 0; y < PLAYER_COLOR_IMAGE_64_WIDTH; y++)
+            {
+                if (fread(row_bytes, 1, sizeof(row_bytes), f)
+                    != sizeof(row_bytes))
+                {
+                    ESP_LOGW(TAG, "short color image row %u in %s",
+                             (unsigned)y, full);
+                    err = ESP_FAIL;
+                    break;
+                }
+                for (size_t x = 0; x < PLAYER_COLOR_IMAGE_64_WIDTH; x++)
+                {
+                    row[x] = (uint16_t)row_bytes[x * 2]
+                           | (uint16_t)((uint16_t)row_bytes[x * 2 + 1] << 8);
+                }
+                err = display_color64_write_row(y, row);
+                if (err != ESP_OK)
+                {
+                    break;
+                }
+            }
+            end_err = display_color64_end();
+            fclose(f);
+            if (err == ESP_OK)
+            {
+                err = end_err;
+            }
+            if (err != ESP_OK)
+            {
+                ESP_LOGW(TAG, "color image render failed for %s: %s",
+                         full, esp_err_to_name(err));
+            }
+            return err;
+        }
+
+        fclose(f);
+        ESP_LOGW(TAG, "unsupported OYIM dimensions %ux%u in %s",
+                 (unsigned)header[6], (unsigned)header[7], full);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    fclose(f);
+    ESP_LOGW(TAG, "image %s is %ld bytes; expected 32, %u, or %u",
+             full, file_size, (unsigned)PLAYER_COLOR_IMAGE_16_FILE_SIZE,
+             (unsigned)PLAYER_COLOR_IMAGE_64_FILE_SIZE);
+    return ESP_ERR_INVALID_SIZE;
+}
+
+static esp_err_t remote_play_sound(const char *absolute_sd_path)
+{
+    state_lock();
+    esp_err_t err = audio_play(absolute_sd_path);
+    state_unlock();
+    return err;
+}
+
+static esp_err_t remote_display_image(const char *absolute_sd_path)
+{
+    state_lock();
+    esp_err_t err = render_image(absolute_sd_path);
+    state_unlock();
+    return err;
+}
+
+static esp_err_t remote_stop_sound(void)
+{
+    state_lock();
+    esp_err_t err = audio_stop();
+    state_unlock();
+    return err;
+}
+
+static esp_err_t remote_clear_display(void)
+{
+    state_lock();
+    display_clear();
+    display_flush();
+    state_unlock();
+    return ESP_OK;
 }
 
 /*
@@ -562,6 +670,24 @@ void app_main(void)
         }
     }
     admin_set_code_callback(show_admin_code);
+    admin_set_path_callbacks(remote_play_sound, remote_display_image,
+                             remote_stop_sound, remote_clear_display);
+    {
+        char code[ADMIN_ACCESS_CODE_LEN + 1];
+        esp_err_t admin_err = admin_start(code, sizeof(code));
+
+        if (admin_err == ESP_OK)
+        {
+            ESP_LOGI(TAG,
+                     "admin active at boot (SSID=openyoto, code=%s, http://192.168.4.1/)",
+                     code);
+        }
+        else
+        {
+            ESP_LOGE(TAG, "admin startup failed: %s",
+                     esp_err_to_name(admin_err));
+        }
+    }
 
     ESP_LOGI(TAG, "boot complete (battery %d%%, %.1f mV)",
              battery_soc(), (double)battery_voltage());
@@ -621,12 +747,10 @@ void app_main(void)
                     }
                     else
                     {
-                        uint16_t code = 0;
-                        if (admin_start(&code) == ESP_OK)
+                        char code[ADMIN_ACCESS_CODE_LEN + 1];
+                        if (admin_start(code, sizeof(code)) == ESP_OK)
                         {
-                            ESP_LOGI(TAG, "admin mode on, code %04u",
-                                     (unsigned int)code);
-                            draw_code(code);
+                            ESP_LOGI(TAG, "admin mode on, code %s", code);
                         }
                         else
                         {
@@ -634,17 +758,15 @@ void app_main(void)
                         }
                     }
                 }
-                else if (admin_is_active())
+                else
                 {
-                    /* Admin mode: capture the scanned card for the web UI. */
-                    if (url[0] != '\0')
+                    if (admin_is_active() && url[0] != '\0')
                     {
                         admin_set_last_card(url);
                     }
-                }
-                else
-                {
-                    /* Content playback — normal mode only. */
+
+                    /* Admin mode does not suppress normal NFC playback. */
+                    /* Content playback remains active while the web UI runs. */
                     int n = content_get_track_count(url);
                     if (n > 0)
                     {
