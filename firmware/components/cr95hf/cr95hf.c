@@ -1,14 +1,10 @@
 /*
  * cr95hf.c — ST CR95HF NFC transceiver driver (UART transport).
  *
- * The CR95HF is a 13.56 MHz multi-protocol transceiver reached over a simple
- * UART host interface (57600 8-N-2). This driver owns the UART link, drives
- * ISO14443-3A tag activation (REQA -> anticollision -> select), and reads and
- * writes a single NDEF URI record on a Type 2 tag (NTAG / MIFARE Ultralight).
- *
- * Host protocol (CR95HF datasheet DS10311 / AN3954):
- *   host -> CR95HF : [command][length][data...]   (length counts data bytes)
+ * The CR95HF UART host interface uses a control byte before normal commands:
+ *   host -> CR95HF : [0x00][command][length][data...]
  *   CR95HF -> host : [result code][length][data...]
+ * Echo is the special two-byte frame [0x00][0x55] and returns 0x55.
  *
  * The final byte of every SendRecv payload is a transmit-flag byte: 0x07
  * emits a 7-bit short frame (REQA/WUPA), 0x08 adds odd parity (anticollision),
@@ -17,6 +13,7 @@
 #include "cr95hf.h"
 #include "board_pins.h"
 
+#include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -29,9 +26,11 @@ static const char *TAG = "cr95hf";
 /* ---------------------------------------------------------------- CR95HF
  * Host-interface command codes and result codes (DS10311 / AN3954).
  */
+#define CR95HF_CONTROL_COMMAND      0x00
 #define CR95HF_CMD_IDN              0x01
 #define CR95HF_CMD_PROTOCOL_SELECT  0x02
 #define CR95HF_CMD_SENDRECV         0x04
+#define CR95HF_CMD_ECHO             0x55
 
 #define CR95HF_CODE_SUCCESS         0x00   /* command executed successfully  */
 #define CR95HF_CODE_DATA            0x80   /* SendRecv: tag data returned   */
@@ -73,6 +72,9 @@ static const char *TAG = "cr95hf";
 #define CR95HF_UID_MAX              10
 #define CR95HF_URL_MAX              200
 #define CR95HF_TIMEOUT_MS           200
+#define CR95HF_ECHO_ATTEMPTS        530
+#define CR95HF_ECHO_TIMEOUT_MS      2
+#define CR95HF_UART_RX_BUF_SIZE     2048
 
 /* ------------------------------------------------------------ URI prefixes
  * NFC Forum RTD-URI identifier-code table. A URI record payload begins with
@@ -187,22 +189,23 @@ static esp_err_t cr95hf_transact(uint8_t cmd, const uint8_t *data,
     esp_err_t err;
     int written;
 
-    if ((size_t)data_len + 2 > sizeof(frame))
+    if ((size_t)data_len + 3 > sizeof(frame))
     {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    frame[0] = cmd;
-    frame[1] = data_len;
+    frame[0] = CR95HF_CONTROL_COMMAND;
+    frame[1] = cmd;
+    frame[2] = data_len;
     if (data_len > 0)
     {
-        memcpy(&frame[2], data, data_len);
+        memcpy(&frame[3], data, data_len);
     }
 
     uart_flush_input(NFC_UART_PORT);
 
-    written = uart_write_bytes(NFC_UART_PORT, frame, (size_t)data_len + 2);
-    if (written != (int)data_len + 2)
+    written = uart_write_bytes(NFC_UART_PORT, frame, (size_t)data_len + 3);
+    if (written != (int)data_len + 3)
     {
         return ESP_FAIL;
     }
@@ -238,6 +241,31 @@ static esp_err_t cr95hf_transact(uint8_t cmd, const uint8_t *data,
     }
     return ESP_OK;
 }
+/** Synchronize the UART transport using the CR95HF's special Echo frame. */
+static esp_err_t cr95hf_echo_sync(void)
+{
+    const uint8_t frame[2] = { CR95HF_CONTROL_COMMAND, CR95HF_CMD_ECHO };
+    uint8_t response;
+
+    uart_flush_input(NFC_UART_PORT);
+    for (int attempt = 0; attempt < CR95HF_ECHO_ATTEMPTS; attempt++)
+    {
+        if (uart_write_bytes(NFC_UART_PORT, frame, sizeof(frame))
+            == sizeof(frame)
+            && uart_read_bytes(NFC_UART_PORT, &response, 1,
+                               pdMS_TO_TICKS(CR95HF_ECHO_TIMEOUT_MS)) == 1
+            && response == CR95HF_CMD_ECHO)
+        {
+            ESP_LOGI(TAG, "CR95HF synchronized after %d echo attempt(s)",
+                     attempt + 1);
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    return ESP_ERR_TIMEOUT;
+}
+
 
 /** SendRecv: exchange raw RF bytes with the tag using the given TX flags. */
 static esp_err_t cr95hf_send_recv(const uint8_t *rf, uint8_t rf_len,
@@ -643,7 +671,7 @@ esp_err_t cr95hf_init(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
     uint8_t proto[2] = { CR95HF_PROTO_ISO14443A, 0x00 };
-    uint8_t code;
+    uint8_t code = 0xFF;
     uint8_t rsp[16];
     uint8_t rsp_len;
     esp_err_t err;
@@ -657,12 +685,29 @@ esp_err_t cr95hf_init(void)
         }
     }
 
+    err = uart_driver_install(NFC_UART_PORT, CR95HF_UART_RX_BUF_SIZE,
+                              0, 0, NULL, 0);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
     err = uart_param_config(NFC_UART_PORT, &cfg);
     if (err != ESP_OK)
     {
         return err;
     }
 
+    err = gpio_set_direction(PIN_NFC_TX, GPIO_MODE_OUTPUT);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    err = gpio_set_direction(PIN_NFC_RX, GPIO_MODE_INPUT);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
     err = uart_set_pin(NFC_UART_PORT, PIN_NFC_TX, PIN_NFC_RX,
                        UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK)
@@ -670,22 +715,15 @@ esp_err_t cr95hf_init(void)
         return err;
     }
 
-    err = uart_driver_install(NFC_UART_PORT, CR95HF_RX_BUF_SIZE, 0, 0, NULL, 0);
+    err = cr95hf_echo_sync();
     if (err != ESP_OK)
     {
+        ESP_LOGE(TAG, "CR95HF echo synchronization failed: %s",
+                 esp_err_to_name(err));
         return err;
     }
 
-    uart_flush_input(NFC_UART_PORT);
-
-    /* Identity probe: Idn returns code 0x00 on a healthy link. */
-    err = cr95hf_transact(CR95HF_CMD_IDN, NULL, 0, &code, rsp, &rsp_len,
-                          CR95HF_TIMEOUT_MS);
-    if (err != ESP_OK || code != CR95HF_CODE_SUCCESS)
-    {
-        ESP_LOGE(TAG, "CR95HF Idn probe failed (err=%d code=0x%02x)", err, code);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
+    /* The stock driver synchronizes with Echo, then selects ISO14443-A. */
 
     /* Select ISO14443A so SendRecv exchanges with Type A tags. */
     err = cr95hf_transact(CR95HF_CMD_PROTOCOL_SELECT, proto, 2, &code, rsp,
@@ -696,7 +734,7 @@ esp_err_t cr95hf_init(void)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    ESP_LOGI(TAG, "CR95HF ready (UART%d 57600 8-N-2, TX=%d RX=%d)",
+    ESP_LOGI(TAG, "CR95HF ready (UART%d 57600 8-N-2, ESP TX=%d RX=%d)",
              NFC_UART_PORT, PIN_NFC_TX, PIN_NFC_RX);
 
     return ESP_OK;

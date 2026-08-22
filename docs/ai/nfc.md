@@ -16,10 +16,9 @@ which the firmware resolves to a content playlist.
 
 ## 1. Transport: UART vs SPI (revision-dependent)
 
-The CR95HF is driven over **either UART or SPI**, selected by the per-revision `nfc` block in
-`output/hwconfig_*.json` (see §2). The driver/HAL stack is identical; only the physical transport
-and its pins differ. The transport interface is abstracted through a **function pointer** stored in
-the driver data block (see §4, `0x400d5444` → `0x4024bac4`).
+The CR95HF is driven over **either UART or SPI**, selected by the embedded
+per-revision `nfc` block. On UART revisions, the stock firmware uses UART1 at
+57600 8-N-2 with a 2048-byte RX buffer.
 
 Strings confirming both paths:
 - `strings.txt:3168` `UART`
@@ -30,17 +29,16 @@ Strings confirming both paths:
 - `strings.txt:3276` `Unknown NFC Interface`
 - `strings.txt:3500` `Unknown NFC Interface Type`
 
-UART reset is done by sending the **Echo (0x55)** command and expecting `Echo Received.`
-(`strings.txt:3198`), `Echo Sent` (`3278`); driver messages `SENT RESET: 0x01` (`3170`) /
-`Resetting NFC module` (`3279`).
+UART reset/synchronization sends `[0x00, 0x55]` Echo frames until `0x55` is
+returned. The retry path permits up to 530 attempts with a 1 ms delay.
 
 ---
 
 ## 2. Component / pin table (all 6 variants)
 
-`output/pinmap.json` flattened mapping + `output/hwconfig_0[0-5]_*.json` source blocks.
-**Note:** GPIO.32/GPIO.33 are *UART NFC* in most revisions, but are re-purposed as I2S audio in the
-SPI-NFC revision. The SPI bus is a shared `spi` block (mosi/miso/sclk).
+`output/pinmap.json` flattened mapping + `output/hwconfig_0[0-5]_*.json`
+source blocks. GPIO32/GPIO33 are UART NFC in most revisions, but are
+re-purposed as I2S audio in the SPI-NFC revision.
 
 | Variant (file) | NFC type | Pins |
 |---|---|---|
@@ -57,6 +55,7 @@ Exact JSON blocks:
   ```json
   "nfc": { "type": "uart", "rx": "GPIO.32", "tx": "GPIO.33" }
   ```
+
 - SPI variant (`hwconfig_01`, file lines 104–109):
   ```json
   "nfc": { "type": "spi", "cs": "IOX.1.4", "irqin": "IOX.0.7", "irqout": "IOX.1.0" }
@@ -65,6 +64,11 @@ Exact JSON blocks:
   ```json
   "spi": { "comment": "Do we add speed?", "mosi": "GPIO.18", "miso": "GPIO.21", "sclk": "GPIO.2" }
   ```
+
+The JSON names are from the reader's perspective. Binary code at
+`0x401114d2–0x401114f5` configures the resolved `rx` pin as an ESP32 output
+and the resolved `tx` pin as an ESP32 input, then passes them to
+`uart_set_pin(UART1, GPIO32, GPIO33, -1, -1)`.
 
 **Important cross-revision collision:** in `hwconfig_01` (SPI NFC), `GPIO.32`/`GPIO.33` are
 `audio.i2s.lrclk` / `audio.i2s.out` (pinmap.json:167–172), and `GPIO.34` = `sd.miso` (194–196).
@@ -76,23 +80,23 @@ The SPI-NFC build therefore uses the IO-expander pins for NFC CS/IRQ, freeing 32
 
 ## 3. CR95HF driver protocol flow
 
-Driver family names come from the format strings (Ghidra does **not** resolve Xtensa literal-pool
-string refs, so names below are reconstructed from `strings.txt` + decompiled C; role mappings are
-`[INFERENCE]` unless noted).
+The command framing and addresses below were recovered from the regenerated
+factory image using DROM string/literal mapping and Espressif's Xtensa
+objdump.
 
 ### 3.1 CR95HF host command bytes (datasheet + code)
 
 | Byte | Command | Evidence |
 |---|---|---|
-| `0x01` | IDN / reset | `strings.txt:3170` `SENT RESET: 0x01` |
-| `0x02` | Protocol Select | `_cr95hf_Select_protocol()` (`3196–3197`) |
-| `0x04` | SendRecv (raw tag frame) | decompiled `FUN_seg4__4010d270`: `buf[1] = 4` |
-| `0x55` | Echo | `3198`/`3278`; UART resync via echo |
-| `0x0E` | error response code | `timeout: 0x0E0x87` (`3174`) |
-| `0x87` | no-response / frame-waiting timeout | `timeout: 0x87` (`3175`) |
+| `0x01` | IDN | driver diagnostic `SENT RESET: 0x01` |
+| `0x02` | Protocol Select | startup code `0x4010d850` builds `00 02 02 02 00` |
+| `0x04` | SendRecv | frame builder `0x4010d270` |
+| `0x55` | Echo | `0x4010d920` builds `00 55` and expects `55` |
+| `0x0E` | error response code | timeout diagnostics |
+| `0x87` | no-response / frame-waiting timeout | timeout diagnostics |
 
-Frame layout (SendRecv, from `FUN_seg4__4010d270`, decompiled C):
-`[0]=0x00 (control=cmd)`, `[1]=0x04 (SendRecv)`, `[2]=len`, `[3..]=tag frame`.
+Normal command frame: `[0]=0x00`, `[1]=command`, `[2]=payload length`,
+`[3..]=payload`. Echo is the two-byte exception `[0x00, 0x55]`.
 
 ### 3.2 ISO14443-A tag command bytes (initialized DRAM, seg2)
 

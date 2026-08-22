@@ -21,6 +21,16 @@ Mount point: `/sdcard`. The SDMMC host driver is the standard ESP-IDF
 `sdmmc_host` (log strings reference `sdmmc_host_start_command`,
 `sdmmc_send_cmd (ERASE)`, `sdmmc_decode_scr`, `sdmmc_io_send_op_cond`, etc.).
 
+## Boot mount sequence
+
+The original firmware enables the board rail with active-low `PWR_EN`, raises
+the SD clock pin drive capability to 40 mA, and runs SDMMC at 40 MHz. It mounts
+FatFS at `/sdcard` with 10 file slots and a 16 KiB allocation unit.
+
+Normal boot retries five times with 200 ms between failures and does not format
+the card. A successful mount must be SDHC/SDXC; SDSC is treated as the wrong
+format and unmounted. Formatting is a separate maintenance operation.
+
 ## On-card layout
 
 ```text

@@ -25,6 +25,7 @@
 #include "content.h"
 #include "audio.h"
 #include "admin.h"
+#include "yoto_vfs.h"
 #include "stock_low_battery_rgba.h"
 #include "requested_factory_asset_rgba.h"
 static const char *TAG = "main";
@@ -479,6 +480,8 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
+    ESP_ERROR_CHECK(yoto_vfs_init());
+
     /* Mutex serializing playback/track state between the encoder task and
      * this main loop. */
     s_state_mutex = xSemaphoreCreateMutex();
@@ -537,12 +540,26 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(encoder_init());
     encoder_register_cb(encoder_cb);
-    /* SD card is optional at boot: without it (or with a missing/failed
-     * mount) the device still boots and shows the low-battery art; content
-     * lookups fail gracefully afterwards. */
-    if (content_init() != ESP_OK)
+    /* Stock user mode treats a successful FatFS mount as SD availability;
+     * its optional higher-level indexes do not gate the mount. */
+    esp_err_t content_err = content_init();
+    if (content_err != ESP_OK)
     {
-        ESP_LOGW(TAG, "content unavailable (no SD card?); continuing");
+        ESP_LOGW(TAG, "SD/content initialization failed: %s",
+                 esp_err_to_name(content_err));
+    }
+    if (content_err == ESP_OK)
+    {
+        esp_err_t startup_err = audio_play(YOTO_WELCOME_PATH);
+        if (startup_err == ESP_OK)
+        {
+            ESP_LOGI(TAG, "stock welcome queued: %s", YOTO_WELCOME_PATH);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "stock welcome unavailable at %s: %s",
+                     YOTO_WELCOME_PATH, esp_err_to_name(startup_err));
+        }
     }
     admin_set_code_callback(show_admin_code);
 

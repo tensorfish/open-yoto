@@ -57,22 +57,25 @@ Driver stack (ESP-IDF components, strings 9929–10469 & 10239–10271):
 - `sdmmc_cmd` (10374), `sdmmc_common` (10401), `sdmmc_sd` (10446),
   `sdmmc_mmc` (10431), `sdmmc_io` (10423) — protocol init.
 
-Yoto-side mount sequence (`sd_mount_card`, strings 7928–8073):
+Yoto-side normal mount sequence, verified from the original image at
+`0x401ce9fc`, `0x401ceb74`, `0x401cf058`, and `0x401d0554`:
 
-1. `sd_mount_card` logs `Entering SD1/SD4/SPI Card Mode (mount action = %d)`
-   (7931/7934/7935) and `Initializing SD card` (7932); for SPI it bumps the SD
-   clock pin drive strength via `_sd_spi_set_clock_pin_drive_strength`
-   (strings 7929/7930: `40mA` / `20mA`).
-2. Retry loop: `Initializing SD card, attempt: %d` (8021), `Retrying to mount the
-   SD card (retry %d)` (8025), fails after N attempts (8026).
-3. On success logs `SD card mounted` (1920). Rejects SDSC (`Mounted SDSC
-   (incorrect format, so unmounting it)`, 8028) — the card is expected to be
-   SDHC/SDXC (7984, and `Format/Mount Not SDSC`, 8042/8029).
-4. Mount failure path can fall through to `sd_format_and_mount` (8044–8047,
-   `Formatting SD card, please wait...` → `SD card format/mount successful`).
+1. Resolve the embedded SD transport. `sd4` uses GPIO14/15/2/4/12/13;
+   `sd1` uses GPIO14/15/2; the legacy board uses SDSPI.
+2. For SD1/SD4, set the SD clock pin to the maximum ESP32 drive capability
+   (40 mA). The stock SDMMC host configuration also uses the 40 MHz
+   high-speed clock.
+3. Mount FatFS at `/sdcard`. The recovered configuration uses 10 open files
+   and a 16 KiB allocation unit. Normal boot does not format on mount failure.
+4. Retry up to five total attempts, waiting 200 ms between failures.
+5. On success, mark the card mounted and inspect its capacity flags. SDSC is
+   rejected and unmounted; SDHC/SDXC continues.
+6. On explicit unmount, call the VFS/FatFS unmount path. For SD1/SD4, an
+   optional power-down path drives active-low `PWR_EN` high to cut 3V3B.
 
-Unmount/remount: `sd_unmount_card` (7946–7948), `sd_remount_card`
-(8030–8033: pauses BG downloads → unmount → remount → resume).
+`sd_remount_card` pauses background downloads before unmount/remount and
+resumes them afterward. Formatting is a separate maintenance path, not the
+normal boot mount.
 
 Maintenance paths:
 - `sd_check_delete_non_preloaded` (8070) — walks the FS deleting non-preloaded

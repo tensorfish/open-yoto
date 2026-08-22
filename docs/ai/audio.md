@@ -128,8 +128,30 @@ real board — do not use it for one board's pins.
 - `1838` `Mono-mix (speaker)` · `1840` `Mono-mix (headphone)` · `1855` `Mono-mix (speaker) audio test failed` · `1859` `Mono-mix (headphone) audio test failed` · `1856` `play_freq_sweep`
 - `2694` `/eq-gains` · `2695` `/vol-curve` · `2705` `/dump-aw881` (DSP register dump HTTP endpoints)
 
-### System sounds (stored under `/system/sounds/`)
-- `304-314`: `setup_complete_no_voice`, `setup_next`, `battery_fault_beep`, `test_no_sound`, `setup_fail`, `welcome`, `low_battery`, `disconnected_from_power_3_of_3`, `disconnected_from_power_2_of_3`, `disconnected_from_power_low`, `connected_to_power`
+### Stock welcome asset and startup path
+
+- Logical path: `/system/sounds/welcome`, selected as system sound ID `14`.
+- `play_startup_audio` wrapper `0x400f6890`; task body `0x400f6798`;
+  system-sound resolver `0x400e2ed4`.
+- `YOTO_VFS` recognizes `/sounds/welcome` in its open path around
+  `0x400db924` and maps it to DROM `0x3f45014b–0x3f4549fb`.
+- Exact size: 18,608 bytes. SHA-256:
+  `595d30ff7074658b6cda26d0412655e7adfb1e92c69ead2cbc0080eced895e2d`.
+- Header: `ftypM4A`; this is M4A/AAC-LC, not MP3 and not an SD-card file.
+- `stsz` contains 167 access units; `stco` points to the single `mdat` chunk.
+  Decoding yields 171,008 mono, 44.1 kHz, 16-bit samples.
+
+Replacement implementation:
+
+1. `components/yoto_vfs` embeds the oracle bytes once and registers read-only
+   `/system`.
+2. Normal boot mounts SD, starts user mode, and opens only
+   `/system/sounds/welcome`.
+3. `components/audio` parses `stsd`, `stsz`, and `stco`; fixed-point Helix AAC
+   decodes raw AAC-LC blocks.
+4. PCM uses the same bounded volume and mono-left I²S path as MP3 playback.
+5. `CONFIG_APP_SPEAKER_TEST_TONE` is disabled in the normal configuration, so
+   the welcome asset is the only boot audio.
 
 ---
 

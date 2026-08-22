@@ -86,9 +86,8 @@ payloads are adjacent-byte-swapped and sent in 128-byte chunks through windows
 After SmartPA startup, the factory pipeline sets AW88194 volume register
 `0x0f=0x0000` (100%) and settles I²S to APLL 44.1 kHz, 16-bit mono-left with
 the ESP32 legacy mono WS polarity. The replacement reproduces those settings,
-downmixes stereo MP3 frames before DMA, and validates I²S lock, power/mute,
-volume, format, and DSP status. The repeating 1kHz boot tone and physical
-speaker output are verified on rev #04 hardware.
+downmixes decoded stereo before DMA, and validates I²S lock, power/mute,
+volume, format, and DSP status.
 
 ## Decoders & stream types
 
@@ -96,10 +95,11 @@ speaker output are verified on rev #04 hardware.
   **OPUS** (`DEC_OPUS` / `OPUS_DECODER`), **OGG** (`DEC_OGG`).
 - **MIME types**: `audio/mp4`, `audio/aacp`, `audio/wav`, `audio/opus`,
   `audio/x-scpls` (Shoutcast PLS), plus HLS (`application/vnd.apple.mpegurl`).
+- **Replacement decoder path**: Helix MP3 for local files and fixed-point
+  Helix AAC-LC for the stock M4A welcome asset.
 - **EQ**: `APP_EQ_PRESET` setting; `esp-resample` for sample-rate conversion.
 - **Volume**: per-path (speaker / headphone), with a sleep timer that fades
-  volume and restores it (`could not restore user volume after sleep timer
-  expired`).
+  volume and restores it.
 - **Diagnostics**: `/eq-gains`, `/vol-curve`, `/dump-aw881` (DSP register dump).
 
 ## BT audio
@@ -120,7 +120,23 @@ E (%lu) %s: failed to initialise audio board! Rebooting
 The board config is printed at startup (`param audio_cfg [%02x:…]`,
 `param audio_stat [%02x:…]`), reflecting the codec registers.
 
-## System sounds
+## Stock welcome sound
 
-Built-in sounds live under `/system/sounds/` (e.g. `low_battery`,
-`connected_to_power`, `disconnected_from_power_2_of_3`, `battery_fault_beep`).
+The normal boot plays only the stock welcome sound. It does not read that
+sound from SD: `YOTO_VFS` exposes an embedded, read-only asset at
+`/system/sounds/welcome`.
+
+| Property | Value |
+|---|---|
+| Oracle DROM range | `0x3f45014b–0x3f4549fb` |
+| Size | 18,608 bytes |
+| SHA-256 | `595d30ff7074658b6cda26d0412655e7adfb1e92c69ead2cbc0080eced895e2d` |
+| Container | M4A (`ftypM4A`) |
+| Codec | AAC-LC, mono, 44.1 kHz, 16-bit PCM output |
+| Samples | 167 AAC access units → 171,008 decoded samples |
+
+The replacement embeds those exact bytes once, registers a read-only
+`/system` VFS, opens the logical path after the SD mount, parses `stsd`,
+`stsz`, and `stco`, decodes each raw AAC access unit, and writes PCM through
+the existing volume-controlled I²S path. The bring-up test tone remains an
+explicit test-mode facility; it is disabled in the normal boot configuration.

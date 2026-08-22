@@ -65,11 +65,12 @@
 #endif
 #define SD_SLOT_CONFIG              SDMMC_SLOT_CONFIG_DEFAULT()
 
-/* ------------------------------------------------------------------ NFC -- */
-/* CR95HF over UART (hwconfig_05 "nfc": type=uart).                            */
-#define PIN_NFC_RX                  GPIO_NUM_32
-#define PIN_NFC_TX                  GPIO_NUM_33
-#define NFC_UART_PORT               UART_NUM_2
+/* CR95HF over UART. The stock JSON names pins from the reader's perspective:
+ * nfc.rx=GPIO32 is driven by the ESP32 TX signal, and nfc.tx=GPIO33 drives
+ * the ESP32 RX signal. Stock firmware uses UART1. */
+#define PIN_NFC_TX                  GPIO_NUM_32
+#define PIN_NFC_RX                  GPIO_NUM_33
+#define NFC_UART_PORT               UART_NUM_1
 #define NFC_UART_BAUD               57600
 
 /* ------------------------------------------------------------------ I2S -- */

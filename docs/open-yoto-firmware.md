@@ -148,28 +148,28 @@ flowchart LR
 
 ## Audio pipeline
 
-```
-SD card → libhelix-mp3 (decode) → I2S → ES8156 headphone DAC + AW881xx speakers
+```text
+SD content ──> Helix MP3 ─┐
+                          ├─> mono 44.1 kHz PCM ─> I2S ─> ES8156 + AW881xx
+YOTO_VFS welcome ─> M4A parser ─> Helix AAC-LC ─┘
 ```
 
-- A background task decodes MP3, downmixes stereo to mono, and pushes 16-bit
-  mono-left PCM over the stock APLL 44.1 kHz I²S path. Bounded PCM gain makes
-  the left encoder affect both physical outputs.
+- Normal boot plays only `/system/sounds/welcome`. The path is provided by a
+  read-only `YOTO_VFS`; it is not an SD file.
+- The embedded welcome asset is the exact 18,608-byte factory M4A from DROM
+  `0x3f45014b–0x3f4549fb` (SHA-256
+  `595d30ff7074658b6cda26d0412655e7adfb1e92c69ead2cbc0080eced895e2d`).
+- Its MP4 sample tables describe 167 mono AAC-LC access units at 44.1 kHz.
+  The replacement parses `stsd`/`stsz`/`stco`, decodes 171,008 samples, and
+  pushes 16-bit mono PCM through the stock APLL I²S path.
+- Local content remains MP3-capable. Stereo frames are downmixed before DMA,
+  and bounded PCM gain affects both speaker and headphone output.
 - Rev #04 uses one AW88194A at 7-bit `0x34`. The replacement reproduces the
-  factory path: ET6416 output-before-direction setup; `pactrl` LOW 2ms / HIGH
-  2ms reset; five chip-ID retries; the recovered 35-entry register table;
-  firmware and mono/channel-2 SmartK configuration uploads; VCALB; DSP/I²S/PLL
-  checks; interrupt setup; speaker start; and outer hard-unmute.
-- `CONFIG_APP_SPEAKER_TEST_TONE` starts a repeating 1kHz, ±16,000 PCM tone
-  at boot (default when the display-test build is enabled). Clockwise left-knob
-  rotation increases bounded PCM gain; the same gain affects speaker and
-  headphone output.
-- The exact stock ranges are firmware `0x3ffbdf4d..0x3ffbe740`, configuration
-  `0x3ffbeade..0x3ffbee79`, and register table
-  `0x3ffbee7a..0x3ffbef05`. Stock playback then selects APLL 44.1 kHz,
-  16-bit mono-left I²S with the ESP32 legacy WS polarity and sets AW88194
-  volume register `0x0f` to `0x0000` (100%). This complete path, including
-  physical speaker output, is verified on rev #04 hardware.
+  factory ET6416 reset, register table, SmartK firmware/configuration, VCALB,
+  DSP/I²S/PLL checks, interrupt setup, and hard-unmute.
+- `CONFIG_APP_SPEAKER_TEST_TONE` is disabled for normal boot. It remains a
+  manual bring-up option and never runs alongside the configured welcome-only
+  startup.
 
 ## Admin mode
 

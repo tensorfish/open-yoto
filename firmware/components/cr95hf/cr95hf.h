@@ -15,10 +15,10 @@
 #include "esp_err.h"
 
 /**
- * Bring up the CR95HF UART link (UART2, 57600 8-N-2, TX=GPIO33 RX=GPIO32),
- * install the UART driver, and select the ISO14443A RF protocol.
+ * Bring up the CR95HF UART link (UART1, 57600 8-N-2, ESP TX=GPIO32 and
+ * ESP RX=GPIO33), synchronize it with Echo, and select ISO14443A.
  *
- * @return ESP_OK on success, or the underlying UART driver / probe error.
+ * @return ESP_OK on success, or the underlying UART/CR95HF protocol error.
  */
 esp_err_t cr95hf_init(void);
 

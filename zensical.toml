@@ -31,13 +31,13 @@ nav = [
       { "Reference" = [
           { "Overview" = "reference/index.md" },
           { "Hardware & Ports" = "hardware.md" },
-          { "How to Decompile" = "decompile.md" },
+          { "Firmware Analysis" = "decompile.md" },
           { "Methodology" = "methodology.md" },
       ]},
   ]},
   { "Research" = [
       { "Overview" = "ai/index.md" },
-      { "Decompilation & Tooling" = "ai/decompile.md" },
+      { "Firmware Analysis Workflow" = "ai/decompile.md" },
       { "Subsystems" = [
           { "Overview" = "ai/subsystems/index.md" },
           { "NFC" = "ai/nfc.md" },

@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "esptool>=5.3.1",
-    "pyghidra>=3.1.0",
     "zensical>=0.0.55",
 ]
+
+[project.optional-dependencies]
+decompile = ["pyghidra>=3.1.0"]

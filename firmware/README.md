@@ -137,22 +137,27 @@ firmware/
   RGB666 swap at the panel boundary. The exact stock low-SOC PNG is generated
   by `analysis/extract_stock_battery_icon.py` and compiled into the firmware.
 - Stock-matched I2S TX (APLL, mclk=0, bclk=5, lrclk=18, dout=19,
-  44100 Hz, 16-bit mono-left) with bounded PCM volume gain.
+  44100 Hz, 16-bit mono-left) with bounded PCM volume gain, local MP3
+  decoding, and raw AAC-LC decoding from M4A sample tables.
 - **AW88194A speaker amp [rev #04]**: factory reset timing, five ID retries,
   exact 35-entry register table, recovered SmartK firmware and mono config,
-  VCALB, DSP/I²S/PLL validation, interrupts, start, and hard-unmute. The
-  optional repeating 1kHz, ±16,000 PCM boot tone exercises the physical path
-  while preserving responsive volume control.
-- UART (CR95HF, TX=33, RX=32, 57600 8-N-1).
+  VCALB, DSP/I²S/PLL validation, interrupts, start, and hard-unmute.
+- **SD startup**: stock SDMMC width flags, 40 MHz clock, 40 mA CLK drive,
+  five mount attempts, and FatFS at `/sdcard`. `mapping.json` is optional and
+  never gates a successful mount.
+- **Stock welcome**: the exact 18,608-byte oracle M4A asset is embedded once,
+  exposed read-only as `/system/sounds/welcome` by `YOTO_VFS`, parsed as one
+  AAC-LC/44.1 kHz/mono MP4 track, decoded, and sent through the shared I2S path
+  after the SD mount.
+- CR95HF on UART1, ESP TX=GPIO32, ESP RX=GPIO33, 57600 8-N-2, with the
+  stock control-byte and Echo synchronization sequence.
 
-**TODO** (register-level detail, marked in the `.c` files with datasheet refs):
+**TODO**:
 
-- CW2215B fuel-gauge register reads (VCELL/SOC).
 - HT16D35x frame format + 6-bit-gray fan-out [rev #05].
-- CR95HF command sequence (Idn/ProtocolSelect/SendRecv + ISO14443-3A activation).
 - AW88194A runtime headphone insertion/removal routing and per-path volume
   curves; cold-start SmartK data and speaker activation are implemented.
-- The NFC → `mapping.json` → play/render main loop, and the hidden upload mode.
+- Translation of stock `/sdcard/cards` metadata into open-yoto playlists.
 
 ## Hardware revision caveat
 

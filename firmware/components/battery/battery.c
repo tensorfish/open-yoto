@@ -20,18 +20,27 @@ static const char *TAG = "battery";
 #define BATTERY_I2C_TIMEOUT_MS  100
 
 /* ---- CW2215B fuel gauge (CellWise CW2215B datasheet) ---- */
-#define CW2215B_REG_ID          0x00    /* chip ID, reads 0xA0               */
-#define CW2215B_REG_VCELL       0x02    /* cell voltage, big-endian 16-bit   */
-#define CW2215B_REG_SOC         0x04    /* state of charge, 0..100 %         */
-#define CW2215B_CHIP_ID         0xA0
+#define CW2215B_REG_ID            0x00
+#define CW2215B_REG_VCELL         0x02
+#define CW2215B_REG_SOC           0x04
+#define CW2215B_REG_MODE_CONFIG   0x08
+#define CW2215B_REG_GPIO_CONFIG   0x0A
+#define CW2215B_REG_SOC_ALERT     0x0B
+#define CW2215B_REG_BAT_PROFILE   0x10
+#define CW2215B_REG_IC_STATE      0xA7
+#define CW2215B_CHIP_ID           0xA0
 
-/* TODO: confirm the VCELL reserved-bit position and LSB scale from the
- * CW2215B datasheet. The gauge reports a 14-bit field; the top two bits of
- * the 16-bit read are reserved and masked off. The 0.3125 mV/LSB scale below
- * gives a ~5.12 V full scale over 14 bits (4.2 V at 0x3480). */
-#define CW2215B_VCELL_MASK      0x3FFFu
-#define CW2215B_VCELL_LSB_MV    0.3125f
-#define CW2215B_SOC_MAX         100
+#define CW2215B_MODE_RESTART      0x30
+#define CW2215B_MODE_ACTIVE       0x00
+#define CW2215B_MODE_SLEEP        0xF0
+#define CW2215B_UPDATE_FLAG       0x80
+#define CW2215B_IC_READY_MASK     0x0C
+#define CW2215B_PROFILE_SIZE      80
+#define CW2215B_READY_ATTEMPTS    50
+
+#define CW2215B_VCELL_MASK        0x3FFFu
+#define CW2215B_VCELL_LSB_MV      0.3125f
+#define CW2215B_SOC_MAX           100
 
 /* ---- low-battery policy ---- */
 #define BATTERY_LOW_SOC_PCT     15
@@ -53,6 +62,202 @@ static esp_err_t cw2215b_read_reg(uint8_t reg, uint8_t *val)
     return i2c_master_write_read_device(I2C_PORT, I2C_ADDR_FUEL_GAUGE,
                                         &reg, 1, val, 1,
                                         pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS));
+}
+
+static esp_err_t cw2215b_write_reg(uint8_t reg, uint8_t val)
+{
+    uint8_t buf[2] = { reg, val };
+    return i2c_master_write_to_device(I2C_PORT, I2C_ADDR_FUEL_GAUGE,
+                                      buf, sizeof(buf),
+                                      pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS));
+}
+
+/* Exact 80-byte profiles embedded in the stock image. hwconfig_04 selects
+ * UTL-FD70X-2000; hwconfig_05 selects LJDX30X-4500. */
+#ifdef CONFIG_BOARD_REV_04
+static const uint8_t CW2215B_PROFILE[CW2215B_PROFILE_SIZE] = {
+    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xB1, 0xB0, 0xBE, 0xB7, 0xB6, 0xAB, 0xCC, 0xB2,
+    0xA2, 0xFF, 0xFF, 0xD8, 0x9E, 0x6D, 0x59, 0x4C,
+    0x43, 0x3E, 0x35, 0x93, 0x77, 0xD2, 0x2D, 0xD7,
+    0xC3, 0xC1, 0x92, 0xE1, 0xA7, 0x86, 0xA4, 0xA6,
+    0xA3, 0xA4, 0x97, 0x81, 0x6E, 0x64, 0x58, 0x4F,
+    0x47, 0x5B, 0x71, 0x8F, 0xA6, 0x76, 0x4E, 0x53,
+    0x20, 0x00, 0xAB, 0x10, 0x00, 0xA1, 0x8D, 0x00,
+    0x00, 0x00, 0x64, 0x15, 0xB0, 0xA8, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x26,
+};
+#else
+static const uint8_t CW2215B_PROFILE[CW2215B_PROFILE_SIZE] = {
+    0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xC1, 0xBD, 0xB1, 0xA5, 0x99, 0x94, 0xFA, 0xFA,
+    0xFB, 0xBA, 0xA2, 0x8A, 0x67, 0x59, 0x4D, 0x45,
+    0x42, 0x41, 0x3E, 0xA1, 0xAB, 0xD1, 0xA0, 0xF7,
+    0xA7, 0x8C, 0xBA, 0xCE, 0xCB, 0xC3, 0xB9, 0xC0,
+    0xC8, 0xD0, 0xD5, 0xC7, 0xAD, 0x9A, 0x92, 0x92,
+    0x95, 0xA1, 0xBD, 0xCB, 0xD7, 0xD0, 0xB2, 0x53,
+    0x20, 0x00, 0xAB, 0x10, 0x00, 0xB0, 0xCE, 0x00,
+    0x00, 0x00, 0x64, 0x3B, 0xC0, 0x07, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xD5,
+};
+#endif
+
+static esp_err_t cw2215b_set_active(void)
+{
+    esp_err_t err = cw2215b_write_reg(CW2215B_REG_MODE_CONFIG,
+                                      CW2215B_MODE_RESTART);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    err = cw2215b_write_reg(CW2215B_REG_MODE_CONFIG, CW2215B_MODE_ACTIVE);
+    if (err == ESP_OK)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return err;
+}
+
+static esp_err_t cw2215b_set_sleep(void)
+{
+    esp_err_t err = cw2215b_write_reg(CW2215B_REG_MODE_CONFIG,
+                                      CW2215B_MODE_RESTART);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    err = cw2215b_write_reg(CW2215B_REG_MODE_CONFIG, CW2215B_MODE_SLEEP);
+    if (err == ESP_OK)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return err;
+}
+
+static esp_err_t cw2215b_wait_ready(void)
+{
+    uint8_t state;
+
+    for (int attempt = 0; attempt < CW2215B_READY_ATTEMPTS; attempt++)
+    {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_err_t err = cw2215b_read_reg(CW2215B_REG_IC_STATE, &state);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+        if ((state & CW2215B_IC_READY_MASK) == CW2215B_IC_READY_MASK)
+        {
+            return ESP_OK;
+        }
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t cw2215b_profile_matches(bool *matches)
+{
+    *matches = true;
+    for (size_t i = 0; i < CW2215B_PROFILE_SIZE; i++)
+    {
+        uint8_t value;
+        esp_err_t err = cw2215b_read_reg(
+            (uint8_t)(CW2215B_REG_BAT_PROFILE + i), &value);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+        if (value != CW2215B_PROFILE[i])
+        {
+            *matches = false;
+            return ESP_OK;
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t cw2215b_write_profile(void)
+{
+    for (size_t i = 0; i < CW2215B_PROFILE_SIZE; i++)
+    {
+        esp_err_t err = cw2215b_write_reg(
+            (uint8_t)(CW2215B_REG_BAT_PROFILE + i), CW2215B_PROFILE[i]);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t cw2215b_ensure_ready(void)
+{
+    uint8_t mode;
+    uint8_t alert;
+    bool profile_matches = false;
+    esp_err_t err = cw2215b_read_reg(CW2215B_REG_MODE_CONFIG, &mode);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    err = cw2215b_read_reg(CW2215B_REG_SOC_ALERT, &alert);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    if ((alert & CW2215B_UPDATE_FLAG) != 0)
+    {
+        err = cw2215b_profile_matches(&profile_matches);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+    }
+
+    if (mode == CW2215B_MODE_ACTIVE && profile_matches)
+    {
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "CW2215B startup: mode=0x%02x update=%d profile=%s",
+             mode, (alert & CW2215B_UPDATE_FLAG) != 0,
+             profile_matches ? "match" : "update required");
+
+    if (!profile_matches)
+    {
+        err = cw2215b_set_sleep();
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+        err = cw2215b_write_profile();
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+        err = cw2215b_write_reg(CW2215B_REG_GPIO_CONFIG, 0x00);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+        err = cw2215b_write_reg(CW2215B_REG_SOC_ALERT,
+                                CW2215B_UPDATE_FLAG);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+    }
+
+    err = cw2215b_set_active();
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    return cw2215b_wait_ready();
 }
 
 /* Read a big-endian 16-bit register pair (reg, reg + 1). */
@@ -121,26 +326,39 @@ static bool i2c_device_probe(uint8_t addr)
 
 esp_err_t battery_init(void)
 {
-    /* CW2215B fuel gauge over I2C: chip ID + VCELL + SOC. */
+    /* CW2215B fuel gauge over I2C: detect, load the board-specific stock
+     * profile when needed, activate the IC, then read VCELL and SOC. */
     s_gauge_present = cw2215b_detect();
     if (s_gauge_present)
     {
         int vcell_mv = 0;
         int soc = 0;
-        bool vcell_ok;
-        bool soc_ok;
+        bool vcell_ok = false;
+        bool soc_ok = false;
+        esp_err_t gauge_err;
 
         ESP_LOGI(TAG, "CW2215B fuel gauge (0x%02x): chip id 0x%02x OK",
                  (unsigned)I2C_ADDR_FUEL_GAUGE, (unsigned)CW2215B_CHIP_ID);
-        vcell_ok = cw2215b_read_vcell_mv(&vcell_mv);
-        soc_ok = cw2215b_read_soc(&soc);
+
+        gauge_err = cw2215b_ensure_ready();
+        if (gauge_err == ESP_OK)
+        {
+            vcell_ok = cw2215b_read_vcell_mv(&vcell_mv);
+            soc_ok = cw2215b_read_soc(&soc);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "CW2215B initialization failed: %s",
+                     esp_err_to_name(gauge_err));
+        }
+
         if (vcell_ok)
         {
             ESP_LOGI(TAG, "CW2215B VCELL = %d mV", vcell_mv);
         }
         else
         {
-            ESP_LOGW(TAG, "CW2215B VCELL read failed");
+            ESP_LOGW(TAG, "CW2215B VCELL unavailable");
         }
         if (soc_ok)
         {
@@ -148,7 +366,7 @@ esp_err_t battery_init(void)
         }
         else
         {
-            ESP_LOGW(TAG, "CW2215B SOC read failed");
+            ESP_LOGW(TAG, "CW2215B SOC unavailable");
         }
 
         s_gauge_data_valid = vcell_ok && vcell_mv > 0 && soc_ok;
@@ -208,6 +426,11 @@ int battery_soc(void)
 
 bool battery_is_low(void)
 {
+    if (!s_gauge_present || !s_gauge_data_valid)
+    {
+        return false;
+    }
+
     int soc = battery_soc();
     if (soc >= 0 && soc < BATTERY_LOW_SOC_PCT)
     {

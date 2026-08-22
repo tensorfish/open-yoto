@@ -13,9 +13,12 @@
 #include "board_pins.h"
 
 #include "cJSON.h"
+#include "driver/gpio.h"
 #include "driver/sdmmc_host.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,8 +35,10 @@ static const char *TAG = "content";
 /* Upper bound for a persisted media path ("media/<name>") built on add. */
 #define CONTENT_MEDIA_PATH_MAX 128
 
-/* Maximum open file descriptors FatFS should reserve for this component. */
-#define CONTENT_MAX_OPEN_FILES 4
+/* Values recovered from the stock sd_mount_card path. */
+#define CONTENT_MAX_OPEN_FILES 10
+#define CONTENT_MOUNT_ATTEMPTS 5
+#define CONTENT_MOUNT_RETRY_MS 200
 
 /* Handle returned by the mount; retained for later deinit/format. */
 static sdmmc_card_t *s_card;
@@ -195,6 +200,33 @@ static esp_err_t content_load(void)
     return ESP_OK;
 }
 
+static esp_err_t content_create_empty_index(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *cards;
+
+    if (root == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+    cards = cJSON_CreateArray();
+    if (cards == NULL)
+    {
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddItemToObject(root, "cards", cards);
+
+    if (s_root != NULL)
+    {
+        cJSON_Delete(s_root);
+    }
+    s_root = root;
+    s_cards = cards;
+    return ESP_OK;
+}
+
+
 esp_err_t content_init(void)
 {
     esp_err_t err;
@@ -202,11 +234,27 @@ esp_err_t content_init(void)
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
     esp_vfs_fat_sdmmc_mount_config_t mount_config;
     struct stat st;
+    int attempt;
 
     if (s_mounted)
     {
         return ESP_OK;
     }
+
+    /* Stock firmware drives SD_CLK at the ESP32's maximum 40 mA and clocks
+     * SDMMC at 40 MHz. The stronger clock edge is required on the Yoto PCB. */
+    err = gpio_set_drive_capability(PIN_SD_CLK, GPIO_DRIVE_CAP_3);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not set SD clock drive strength: %s",
+                 esp_err_to_name(err));
+    }
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+#ifdef CONFIG_BOARD_REV_04
+    host.flags = SDMMC_HOST_FLAG_4BIT;
+#else
+    host.flags = SDMMC_HOST_FLAG_1BIT;
+#endif
 
     /* 1-bit bus on the Yoto's SDMMC pins (see board_pins.h). */
     slot_config.clk = PIN_SD_CLK;
@@ -221,7 +269,6 @@ esp_err_t content_init(void)
 #else
     slot_config.width = BOARD_SD_WIDTH;
 #endif
-    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
     mount_config.format_if_mount_failed = false;
     mount_config.max_files = CONTENT_MAX_OPEN_FILES;
@@ -229,57 +276,56 @@ esp_err_t content_init(void)
     mount_config.disk_status_check_enable = false;
     mount_config.use_one_fat = false;
 
-    err = esp_vfs_fat_sdmmc_mount(CONTENT_MOUNT_POINT, &host, &slot_config,
-                                  &mount_config, &s_card);
+    err = ESP_FAIL;
+    for (attempt = 1; attempt <= CONTENT_MOUNT_ATTEMPTS; attempt++)
+    {
+        ESP_LOGI(TAG, "mounting SD card (attempt %d/%d)",
+                 attempt, CONTENT_MOUNT_ATTEMPTS);
+        err = esp_vfs_fat_sdmmc_mount(CONTENT_MOUNT_POINT, &host,
+                                      &slot_config, &mount_config, &s_card);
+        if (err == ESP_OK)
+        {
+            break;
+        }
+        if (attempt < CONTENT_MOUNT_ATTEMPTS)
+        {
+            vTaskDelay(pdMS_TO_TICKS(CONTENT_MOUNT_RETRY_MS));
+        }
+    }
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "SD card mount failed at %s: %s",
-                 CONTENT_MOUNT_POINT, esp_err_to_name(err));
+        ESP_LOGE(TAG, "SD card mount failed at %s after %d attempts: %s",
+                 CONTENT_MOUNT_POINT, CONTENT_MOUNT_ATTEMPTS,
+                 esp_err_to_name(err));
         return err;
     }
     s_mounted = true;
+    ESP_LOGI(TAG, "SD card mounted at %s", CONTENT_MOUNT_POINT);
 
-    /* Ensure the media directory exists. */
-    if (stat(CONTENT_MEDIA_DIR, &st) != 0)
-    {
-        if (mkdir(CONTENT_MEDIA_DIR, 0755) != 0)
-        {
-            ESP_LOGW(TAG, "could not create %s", CONTENT_MEDIA_DIR);
-        }
-    }
-
-    /* Ensure mapping.json exists, then load it into memory. */
-    if (stat(CONTENT_MAP_PATH, &st) != 0)
-    {
-        s_root = cJSON_CreateObject();
-        if (s_root == NULL)
-        {
-            return ESP_ERR_NO_MEM;
-        }
-        s_cards = cJSON_CreateArray();
-        if (s_cards == NULL)
-        {
-            cJSON_Delete(s_root);
-            s_root = NULL;
-            return ESP_ERR_NO_MEM;
-        }
-        cJSON_AddItemToObject(s_root, "cards", s_cards);
-
-        err = content_save();
-        if (err != ESP_OK)
-        {
-            return err;
-        }
-    }
-    else
+    /* Stock firmware considers the SD operational immediately after the
+     * FatFS mount. mapping.json is an open-yoto extension, so its absence or
+     * invalid contents must not turn a successful mount into "SD unavailable"
+     * or write to a stock card during boot. */
+    if (stat(CONTENT_MAP_PATH, &st) == 0)
     {
         err = content_load();
         if (err != ESP_OK)
         {
-            ESP_LOGE(TAG, "failed to load %s: %s",
+            ESP_LOGW(TAG, "ignoring invalid optional index %s: %s",
                      CONTENT_MAP_PATH, esp_err_to_name(err));
-            return err;
+            err = content_create_empty_index();
         }
+    }
+    else
+    {
+        ESP_LOGI(TAG, "optional index %s not present", CONTENT_MAP_PATH);
+        err = content_create_empty_index();
+    }
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "could not initialize in-memory content index: %s",
+                 esp_err_to_name(err));
+        return err;
     }
 
     ESP_LOGI(TAG, "content store ready at %s", CONTENT_MOUNT_POINT);

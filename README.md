@@ -8,7 +8,7 @@ ESP32 (Xtensa LX6) device running ESP-IDF + ESP-ADF.
 | Path | Contents |
 |------|----------|
 | `docs/` | Zensical documentation site (human + AI-agent reference) |
-| `analysis/` | Python toolchain: extraction, string/config recovery, decompilation |
+| `analysis/` | Python toolchain: partition extraction and string/config recovery |
 | `zensical.toml` | Zensical site config (content in `docs/`, output in `site/`) |
 | `pyproject.toml`, `uv.lock` | `uv`-managed Python project |
 
@@ -32,27 +32,17 @@ gitignored — regenerate them with the scripts below.
 ```bash
 uv sync
 
-# extract partitions + app image
-uv run python analysis/extract_app.py
+# extract partitions + app image from the authoritative flash dump
+uv run python analysis/extract_app.py ~/Downloads/yoto_firmware_clean.bin
 
-# recover the embedded hardware pin maps
+# verify the extracted ESP32 app image
+uv run esptool image-info output/factory.bin
+
+# recover embedded strings and hardware pin maps
 uv run python analysis/extract_hwconfig.py
 uv run python analysis/extract_strings.py
-
-# decompile with Ghidra/PyGhidra (fast Xtensa path)
-GHIDRA_INSTALL_DIR=/opt/homebrew/Cellar/ghidra/12.0.4/libexec \
-  uv run python analysis/ghidra_dump.py
 
 # build / serve the docs
 uv run zensical build
 uv run zensical serve
 ```
-
-## Decompilation notes
-
-Binary Ninja (Personal) has no built-in Xtensa support; load the app with the
-community `ESPFirmware` + Xtensa plugins for correct-type analysis and ROM
-symbols. Ghidra 12 + PyGhidra is the primary decompilation engine — it analyzes
-the whole app in ~90s (vs. hours for Binary Ninja's Python Xtensa plugin). See
-`docs/ai/decompile.md` for the full how-to, including the Xtensa `L32R`
-literal-pool caveat.

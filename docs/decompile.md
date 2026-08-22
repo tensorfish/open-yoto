@@ -2,66 +2,54 @@
 icon: lucide/file-code-2
 ---
 
-# How to Decompile This Firmware
+# How to Analyze This Firmware
 
-A short guide to reproducing the reverse engineering. Full detail (exact
-commands, addresses, caveats) is in the
-[Research section](ai/decompile.md).
+A reproducible workflow based on `esptool` and the repository's extraction
+scripts. No GUI disassembler or decompiler is required.
 
 ## What you need
 
 | Tool | Purpose |
 |------|---------|
-| `uv` | Python package/env manager (pins Python 3.13) |
-| `esptool` / custom Python | parse the ESP32 partition table + app image |
-| ESP-IDF toolchain `xtensa-esp32-elf-objdump` | **primary** Xtensa disassembly (no GUI, no Ghidra) |
-| Binary Ninja + **ESPFirmware** & **Xtensa** plugins | *optional* GUI: correct-type load + ROM symbols |
-| Ghidra 12 + **PyGhidra** | *optional* C-level decompilation |
+| `uv` | Python package/environment manager |
+| `esptool` | validate the extracted ESP32 application image |
+| repository analysis scripts | extract partitions, strings, and embedded hardware configs |
 
 ## Steps
 
-1. **Extract the app** — the firmware is an 8 MiB flash dump. The factory app
-   is a self-contained ESP32 image at offset `0x40000`.
+1. **Extract the app from the original flash dump.**
 
    ```bash
-   uv run python analysis/extract_app.py
+   uv run python analysis/extract_app.py ~/Downloads/yoto_firmware_clean.bin
    ```
 
-2. **Disassemble with the Espressif objdump** — no Ghidra needed. Extract the
-   code segment to a raw file, then disassemble at its real virtual address:
+   The script parses the ESP32 partition table at flash offset `0x8000` and
+   writes the factory application to `output/factory.bin`.
+
+2. **Validate the extracted image with Espressif's tool.**
 
    ```bash
-   # IROM segment: vaddr 0x400D0020, file offset 0xB0020, size 0x18F0CC
-   python3 -c "d=open('output/factory.bin','rb').read(); \
-     open('/tmp/irom.bin','wb').write(d[0xB0020:0xB0020+0x18F0CC])"
-   xtensa-esp32-elf-objdump -D -b binary -m xtensa --adjust-vma=0x400D0020 \
-     /tmp/irom.bin > /tmp/irom.dis
+   uv run esptool image-info output/factory.bin
    ```
 
-   `xtensa-esp32-elf-objdump` ships with ESP-IDF
-   (`~/.espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/`, or on `PATH`
-   after `source $IDF_PATH/export.sh`). To disassemble one function cleanly,
-   extract a window starting at its address and re-anchor:
-   `--adjust-vma=<function address>` (linear decode drifts at literal pools).
+   For the analyzed image, `esptool` reports an ESP32 image, seven segments,
+   entry point `0x400813a8`, 8 MB flash, ESP-IDF `v5.1.4-dirty`, and valid
+   checksum and validation hash.
 
-3. **Recover strings + pin map** — the firmware embeds its own hardware pin
-   map as JSON:
+3. **Recover strings and the pin map.**
 
    ```bash
    uv run python analysis/extract_strings.py
    uv run python analysis/extract_hwconfig.py
    ```
 
-4. **Optional GUI passes** — Binary Ninja (`ESPFirmware` view) adds ~2,000 ROM
-   symbols; Ghidra/PyGhidra give C pseudocode:
-
-   ```bash
-   GHIDRA_INSTALL_DIR=/opt/homebrew/Cellar/ghidra/12.0.4/libexec \
-     uv run python analysis/ghidra_dump.py
-   ```
+   `extract_strings.py` exposes the firmware's subsystem names, boot messages,
+   error paths, and driver diagnostics. `extract_hwconfig.py` recovers all six
+   hardware-config JSON documents embedded in the factory image.
 
 ## The key insight
 
-The firmware's own embedded **hardware-config JSON** is the authoritative pin
-map — more reliable than inferring pins from decompiled `gpio_config()` calls.
+The firmware's embedded **hardware-config JSON** is the authoritative pin map.
+Use it together with the original image's strings and `esptool image-info`;
+do not infer the hardware from prose documentation.
 See [Methodology](methodology.md).

@@ -11,13 +11,26 @@ creation / blanking — see below).
 
 ## Interface
 
-The CR95HF can be driven over UART or SPI; the firmware supports both, chosen
-by the hardware config's `nfc.type` field:
+The CR95HF can be driven over UART or SPI; the firmware selects the transport
+from the embedded `nfc.type` field:
 
 | Config | Interface | Pins |
 |--------|-----------|------|
 | #01 | **SPI** | `mosi`=GPIO18, `miso`=GPIO21, `sclk`=GPIO2, `cs`=IOX1.4, `irqin`=IOX0.7, `irqout`=IOX1.0 |
-| #00/#02/#04/#05 | **UART** | `rx`=GPIO32, `tx`=GPIO33 |
+| #00/#02/#04/#05 | **UART1, 57600 8-N-2** | ESP TX=GPIO32, ESP RX=GPIO33 |
+
+The JSON pin names are from the reader's perspective: `nfc.rx=GPIO32` is
+driven by the ESP32 TX signal, while `nfc.tx=GPIO33` drives ESP32 RX.
+
+### UART startup
+
+The stock boot path installs a 2048-byte RX buffer, applies 57600 8-N-2,
+configures GPIO32 as output and GPIO33 as input, and routes UART1 to those
+pins. It then synchronizes with `[0x00, 0x55]` Echo frames before sending
+ProtocolSelect `[0x00, 0x02, 0x02, 0x02, 0x00]`.
+
+Normal commands use `[0x00][command][length][payload]`; responses use
+`[result][length][payload]`.
 
 ## Driver protocol (Type-A activation)
 

@@ -1,15 +1,11 @@
 /*
- * audio.c — Yoto Player MP3 player (I2S std TX -> AW88194A speaker amp
+ * audio.c — Yoto Player MP3/M4A player (I2S std TX -> AW88194A speaker amp
  * and ES8156 headphone DAC).
  *
  * audio_init() installs the stock-matched I2S master TX path at 44100 Hz,
  * 16-bit mono-left on I2S_NUM_0, then brings up both audio sinks. A persistent
- * FreeRTOS task decodes MP3 files, downmixes stereo to mono, and writes int16
- * PCM to the I2S TX DMA.
- *
- * Playback control (play/stop/pause/resume) is shared state checked by the
- * decode task. A task notification carries the stop/play requests so the task
- * can block on its idle wait and still be woken from a paused sleep.
+ * FreeRTOS task decodes MP3 files or the stock embedded AAC-LC welcome asset,
+ * downmixes stereo to mono, and writes int16 PCM to I2S DMA.
  */
 #include "audio.h"
 
@@ -21,6 +17,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "aacdec.h"
 #include "mp3dec.h"
 #include <stdint.h>
 #include <stdlib.h>
@@ -315,6 +312,220 @@ static bool audio_write_pcm(const int16_t *pcm, size_t samples)
     return true;
 }
 
+typedef struct
+{
+    const uint8_t *data;
+    size_t size;
+} mp4_box_t;
+
+static uint16_t read_be16(const uint8_t *p)
+{
+    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+}
+
+static uint32_t read_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static bool mp4_is_container(const uint8_t *type)
+{
+    return memcmp(type, "moov", 4) == 0 || memcmp(type, "trak", 4) == 0
+        || memcmp(type, "mdia", 4) == 0 || memcmp(type, "minf", 4) == 0
+        || memcmp(type, "stbl", 4) == 0;
+}
+
+static bool mp4_find_box(const uint8_t *data, size_t size,
+                         const char type[4], mp4_box_t *out)
+{
+    size_t offset = 0;
+
+    while (offset + 8 <= size)
+    {
+        uint32_t box_size = read_be32(data + offset);
+        const uint8_t *box_type = data + offset + 4;
+
+        if (box_size < 8 || box_size > size - offset)
+        {
+            return false;
+        }
+        if (memcmp(box_type, type, 4) == 0)
+        {
+            out->data = data + offset + 8;
+            out->size = box_size - 8;
+            return true;
+        }
+        if (mp4_is_container(box_type)
+            && mp4_find_box(data + offset + 8, box_size - 8, type, out))
+        {
+            return true;
+        }
+        offset += box_size;
+    }
+    return false;
+}
+
+static esp_err_t audio_decode_m4a_aac(FILE *fp, int16_t *pcm,
+                                      size_t pcm_capacity)
+{
+    mp4_box_t stsd;
+    mp4_box_t stsz;
+    mp4_box_t stco;
+    AACFrameInfo config = { 0 };
+    HAACDecoder decoder = NULL;
+    uint8_t *file_data = NULL;
+    long file_size;
+    uint32_t sample_count;
+    uint32_t fixed_sample_size;
+    uint32_t data_offset;
+    uint16_t channels;
+    uint32_t sample_rate;
+    esp_err_t result = ESP_FAIL;
+
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        return ESP_FAIL;
+    }
+    file_size = ftell(fp);
+    if (file_size <= 0 || fseek(fp, 0, SEEK_SET) != 0)
+    {
+        return ESP_FAIL;
+    }
+    file_data = malloc((size_t)file_size);
+    if (file_data == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+    if (fread(file_data, 1, (size_t)file_size, fp) != (size_t)file_size)
+    {
+        goto cleanup;
+    }
+
+    if (!mp4_find_box(file_data, (size_t)file_size, "stsd", &stsd)
+        || !mp4_find_box(file_data, (size_t)file_size, "stsz", &stsz)
+        || !mp4_find_box(file_data, (size_t)file_size, "stco", &stco)
+        || stsd.size < 44 || stsz.size < 12 || stco.size < 12)
+    {
+        ESP_LOGE(TAG, "welcome M4A has invalid sample tables");
+        goto cleanup;
+    }
+
+    /* stsd: full-box header + entry count + AudioSampleEntry. */
+    const uint8_t *entry = stsd.data + 8;
+    uint32_t entry_size = read_be32(entry);
+    if (entry_size < 36 || entry_size > stsd.size - 8
+        || memcmp(entry + 4, "mp4a", 4) != 0)
+    {
+        ESP_LOGE(TAG, "welcome M4A does not contain mp4a");
+        goto cleanup;
+    }
+    channels = read_be16(entry + 24);
+    sample_rate = read_be32(entry + 32) >> 16;
+    if (channels == 0 || channels > AAC_MAX_NCHANS
+        || sample_rate != I2S_SAMPLE_RATE_HZ)
+    {
+        ESP_LOGE(TAG, "unsupported welcome AAC format: %u channel(s), %lu Hz",
+                 (unsigned)channels, (unsigned long)sample_rate);
+        goto cleanup;
+    }
+
+    fixed_sample_size = read_be32(stsz.data + 4);
+    sample_count = read_be32(stsz.data + 8);
+    if (sample_count == 0 || sample_count > 4096
+        || (fixed_sample_size == 0
+            && stsz.size < 12 + (size_t)sample_count * 4))
+    {
+        ESP_LOGE(TAG, "invalid welcome AAC sample count");
+        goto cleanup;
+    }
+    if (read_be32(stco.data + 4) != 1)
+    {
+        ESP_LOGE(TAG, "welcome M4A must have one chunk");
+        goto cleanup;
+    }
+    data_offset = read_be32(stco.data + 8);
+
+    decoder = AACInitDecoder();
+    if (decoder == NULL)
+    {
+        result = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+    config.nChans = channels;
+    config.sampRateCore = (int)sample_rate;
+    config.profile = AAC_PROFILE_LC;
+    if (AACSetRawBlockParams(decoder, 0, &config) != ERR_AAC_NONE)
+    {
+        ESP_LOGE(TAG, "AACSetRawBlockParams failed");
+        goto cleanup;
+    }
+
+    for (uint32_t sample = 0; sample < sample_count && !s_stop_req; sample++)
+    {
+        uint32_t sample_size = fixed_sample_size != 0
+                             ? fixed_sample_size
+                             : read_be32(stsz.data + 12 + sample * 4);
+        unsigned char *input;
+        int bytes_left;
+        int rc;
+        AACFrameInfo info;
+        size_t output_samples;
+
+        if (data_offset > (uint32_t)file_size
+            || sample_size > (uint32_t)file_size - data_offset)
+        {
+            ESP_LOGE(TAG, "welcome AAC sample %lu exceeds mdat",
+                     (unsigned long)sample);
+            goto cleanup;
+        }
+        input = file_data + data_offset;
+        bytes_left = (int)sample_size;
+        rc = AACDecode(decoder, &input, &bytes_left, pcm);
+        data_offset += sample_size;
+        if (rc != ERR_AAC_NONE)
+        {
+            ESP_LOGE(TAG, "AACDecode sample %lu failed: %d",
+                     (unsigned long)sample, rc);
+            goto cleanup;
+        }
+
+        AACGetLastFrameInfo(decoder, &info);
+        output_samples = (size_t)info.outputSamps;
+        if (output_samples > pcm_capacity)
+        {
+            ESP_LOGE(TAG, "AAC output exceeds PCM buffer");
+            goto cleanup;
+        }
+        if (info.nChans == 2)
+        {
+            size_t frames = output_samples / 2;
+            for (size_t i = 0; i < frames; i++)
+            {
+                int32_t mixed = (int32_t)pcm[i * 2]
+                              + (int32_t)pcm[i * 2 + 1];
+                pcm[i] = (int16_t)(mixed / 2);
+            }
+            output_samples = frames;
+        }
+        if (!audio_write_pcm(pcm, output_samples))
+        {
+            result = ESP_ERR_INVALID_STATE;
+            goto cleanup;
+        }
+    }
+
+    result = s_stop_req ? ESP_ERR_INVALID_STATE : ESP_OK;
+
+cleanup:
+    if (decoder != NULL)
+    {
+        AACFreeDecoder(decoder);
+    }
+    free(file_data);
+    return result;
+}
+
 /**
  * Decode task body: waits for a PLAY notification, then streams the pending
  * file until it ends or a STOP request arrives.
@@ -343,12 +554,6 @@ static void audio_decode_task(void *arg)
         {
             continue;
         }
-        if (decoder == NULL)
-        {
-            ESP_LOGE(TAG, "decoder unavailable; ignoring play request");
-            s_playing = false;
-            continue;
-        }
 
         fp = fopen(s_path, "rb");
         if (fp == NULL)
@@ -358,20 +563,48 @@ static void audio_decode_task(void *arg)
             continue;
         }
 
-        if (audio_skip_id3v2(fp) != ESP_OK)
         {
-            ESP_LOGE(TAG, "failed to skip ID3v2 tag");
-            fclose(fp);
-            fp = NULL;
-            s_playing = false;
-            continue;
-        }
+            unsigned char header[12];
+            bool is_m4a = fread(header, 1, sizeof(header), fp) == sizeof(header)
+                       && memcmp(header + 4, "ftypM4A ", 8) == 0;
+            (void)fseek(fp, 0, SEEK_SET);
 
-        codec_es8156_unmute();
-        s_playing = true;
-        ESP_LOGI(TAG, "playing \"%s\"", s_path);
+            if (!is_m4a && decoder == NULL)
+            {
+                ESP_LOGE(TAG, "MP3 decoder unavailable; ignoring play request");
+                fclose(fp);
+                fp = NULL;
+                s_playing = false;
+                continue;
+            }
 
-        {
+            if (!is_m4a && audio_skip_id3v2(fp) != ESP_OK)
+            {
+                ESP_LOGE(TAG, "failed to skip ID3v2 tag");
+                fclose(fp);
+                fp = NULL;
+                s_playing = false;
+                continue;
+            }
+
+            codec_es8156_unmute();
+            s_playing = true;
+            ESP_LOGI(TAG, "playing \"%s\" (%s)", s_path,
+                     is_m4a ? "M4A/AAC-LC" : "MP3");
+
+            if (is_m4a)
+            {
+                esp_err_t aac_err = audio_decode_m4a_aac(
+                    fp, pcm, AUDIO_PCM_BUF_SAMPLES);
+                if (aac_err != ESP_OK && aac_err != ESP_ERR_INVALID_STATE)
+                {
+                    ESP_LOGE(TAG, "welcome AAC playback failed: %s",
+                             esp_err_to_name(aac_err));
+                }
+            }
+            else
+            {
+
             const unsigned char *in_ptr = inbuf;
             size_t left = 0;
 
@@ -451,6 +684,7 @@ static void audio_decode_task(void *arg)
                     }
                     ESP_LOGD(TAG, "MP3Decode error %d, resyncing", rc);
                 }
+            }
             }
         }
 

@@ -13,7 +13,7 @@ the human-facing pages under **Reverse Engineering** are intentionally simpler.
 
 | Page | Covers |
 |------|--------|
-| [decompile.md](decompile.md) | Full decompilation how-to: toolchain, exact commands, memory map, L32R caveat |
+| [decompile.md](decompile.md) | `esptool` workflow, exact input, extraction commands, and evidence rules |
 | [nfc.md](nfc.md) | CR95HF driver, Type 2 tag format, function addresses |
 | [storage.md](storage.md) | SD transports, FatFS, content model, .preload.json schema |
 | [display.md](display.md) | HT16D35x / GC9306, rendering, nightlight |
@@ -24,9 +24,9 @@ the human-facing pages under **Reverse Engineering** are intentionally simpler.
 
 ## Ground-truth files
 
-- `output/strings.txt` — all strings (primary ground truth)
-- `output/hwconfig_*.json` — six hardware configs (pin maps)
+- `~/Downloads/yoto_firmware_clean.bin` — authoritative original flash dump
+- `output/factory.bin` — extracted app validated by `esptool image-info`
+- `output/strings.txt` — firmware-owned strings
+- `output/hwconfig_*.json` — six embedded hardware configs
 - `output/pinmap.json` — flattened pin map
-- `output/decompiled_manifest.json` — 5,915 decompiled functions
-- `output/decompiled/*.c` — decompiled C
-- `output/layout.json` — partition + segment map
+- `output/layout.json` — partition and segment map

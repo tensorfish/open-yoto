@@ -366,16 +366,21 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "esptool" },
-    { name = "pyghidra" },
     { name = "zensical" },
+]
+
+[package.optional-dependencies]
+decompile = [
+    { name = "pyghidra" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "esptool", specifier = ">=5.3.1" },
-    { name = "pyghidra", specifier = ">=3.1.0" },
+    { name = "pyghidra", marker = "extra == 'decompile'", specifier = ">=3.1.0" },
     { name = "zensical", specifier = ">=0.0.55" },
 ]
+provides-extras = ["decompile"]
 
 [[package]]
 name = "packaging"

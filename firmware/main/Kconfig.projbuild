@@ -25,12 +25,12 @@ menu "open-yoto Application"
 
     config APP_SPEAKER_TEST_TONE
         bool "Play a speaker test tone at boot"
-        default y if APP_DISPLAY_TEST_ICON
         default n
         help
             Start a repeating 440 Hz I2S tone after boot. The left encoder
             controls its PCM volume. Intended for speaker-path bring-up; it
             stops when normal content playback starts.
+
     config BOARD_REV_04
         bool "Target hardware revision #04 (TFT, single IOX)"
         default n
