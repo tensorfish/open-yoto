@@ -1,10 +1,10 @@
 /*
  * cr95hf.c — ST CR95HF NFC transceiver driver (UART transport).
  *
- * The CR95HF UART host interface sends commands directly:
- *   host -> CR95HF : [command][length][data...]
- *   CR95HF -> host : [result code][length][data...]
- * Echo is the special single-byte command 0x55 and returns 0x55.
+ * The cold-start Echo uses the recovered 0x00 prefix:
+ *   host -> CR95HF Echo: 0x00 0x55
+ * Other host commands use the documented [command][length][data...] framing.
+ * CR95HF replies are [result code][length][data...].
  *
  * The final byte of every SendRecv payload is a transmit-flag byte: 0x07
  * emits a 7-bit short frame, 0x08 emits a whole-byte frame without CRC-A,
@@ -290,7 +290,7 @@ static esp_err_t cr95hf_transact(uint8_t cmd, const uint8_t *data,
  */
 static esp_err_t cr95hf_echo_sync(void)
 {
-    const uint8_t command = CR95HF_CMD_ECHO;
+    static const uint8_t command[] = { 0x00, CR95HF_CMD_ECHO };
     uint8_t response;
 
     uart_flush_input(NFC_UART_PORT);
@@ -298,7 +298,8 @@ static esp_err_t cr95hf_echo_sync(void)
     {
         int received;
 
-        if (uart_write_bytes(NFC_UART_PORT, &command, 1) != 1)
+        if (uart_write_bytes(NFC_UART_PORT, command, sizeof(command))
+            != (int)sizeof(command))
         {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
@@ -369,6 +370,19 @@ static bool cr95hf_type_a_response(const char *operation, uint8_t code,
         ESP_LOGW(TAG,
                  "%s invalid response: code=0x%02x len=%u raw=%s",
                  operation, code, (unsigned)rsp_len, raw);
+        if (rsp_len >= 3)
+        {
+            size_t tag_bytes = rsp_len - 3;
+            uint8_t status = rsp[tag_bytes];
+            uint8_t collision_byte = rsp[tag_bytes + 1];
+            uint8_t collision_bit = rsp[tag_bytes + 2];
+
+            ESP_LOGW(TAG,
+                     "%s RF detail: tag_bytes=%u status=0x%02x"
+                     " significant_bits=%u collision_byte=%u collision_bit=%u",
+                     operation, (unsigned)tag_bytes, status,
+                     (unsigned)(status & 0x0f), collision_byte, collision_bit);
+        }
         return false;
     }
     return true;
@@ -391,14 +405,10 @@ static esp_err_t cr95hf_protocol_select(const uint8_t *params, uint8_t len)
     return ESP_OK;
 }
 
-/**
- * Select ISO14443A with an extended frame-wait time. The default FDT (~90 µs)
- * is shorter than the MIFARE Ultralight WRITE time (~4.5 ms), so the WRITE
- * ACK is lost and the exchange times out; the longer FDT keeps the field on.
- */
+/** Select ISO14443-A with the recovered stock startup parameters. */
 static esp_err_t cr95hf_select_iso14443a(void)
 {
-    static const uint8_t params[4] = { 0x02, 0x00, 0x01, 0xA0 };
+    static const uint8_t params[2] = { 0x02, 0x00 };
     return cr95hf_protocol_select(params, sizeof(params));
 }
 
@@ -412,11 +422,15 @@ static void cr95hf_field_off(void)
     cr95hf_protocol_select(off, sizeof(off));
 }
 
-/** Apply the factory-tuned RF timing and max receiver gain for the Yoto antenna. */
+/**
+ * Type-A receiver tuning for the Yoto antenna. TimerW 0x58 synchronizes the
+ * analog/digital receive paths; ARC_B D3 keeps 95% modulation with 27 dB RX
+ * gain, improving marginal clone load modulation without D0 saturation.
+ */
 static bool cr95hf_configure_rf(void)
 {
     static const uint8_t timer_w[] = { 0x3A, 0x00, 0x58, 0x04 };
-    static const uint8_t modulation_gain[] = { 0x68, 0x01, 0x01, 0xD0 };
+    static const uint8_t modulation_gain[] = { 0x68, 0x01, 0x01, 0xD3 };
     uint8_t code = 0xFF;
     uint8_t rsp[4];
     uint8_t rsp_len;
@@ -1386,8 +1400,9 @@ esp_err_t cr95hf_init(void)
         goto done;
     }
     /*
-     * Establish a defined inactive level before the IRQ_IN wake pulse. The
-     * reader's power-up delay has already elapsed during system boot.
+     * IRQ_IN needs a >=10-us low wake pulse. Hold GPIO32 high first, then
+     * low for 1 ms to tolerate the board level shifter, then allow the
+     * 10-ms-max HFO setup interval before sending Echo.
      */
     esp_rom_delay_us(1000);
     err = gpio_set_level(PIN_NFC_TX, 0);
@@ -1395,13 +1410,12 @@ esp_err_t cr95hf_init(void)
     {
         goto done;
     }
-    esp_rom_delay_us(20);
+    esp_rom_delay_us(1000);
     err = gpio_set_level(PIN_NFC_TX, 1);
     if (err != ESP_OK)
     {
         goto done;
     }
-    /* tSU(HFO) is 10 ms maximum; leave margin before the first UART byte. */
     vTaskDelay(pdMS_TO_TICKS(20));
 
     err = gpio_set_direction(PIN_NFC_RX, GPIO_MODE_INPUT);
@@ -1415,7 +1429,6 @@ esp_err_t cr95hf_init(void)
     {
         goto done;
     }
-
     err = cr95hf_echo_sync();
     if (err != ESP_OK)
     {
@@ -1473,6 +1486,11 @@ done:
         {
             uart_driver_delete(NFC_UART_PORT);
         }
+        /* uart_driver_delete() releases the driver but leaves the GPIO matrix
+         * binding intact. Reset both pins so a bounded cr95hf_init() retry
+         * repeats the exact first-boot GPIO wake and UART attachment. */
+        gpio_reset_pin(PIN_NFC_TX);
+        gpio_reset_pin(PIN_NFC_RX);
     }
     xSemaphoreGive(s_uart_mutex);
     return err;

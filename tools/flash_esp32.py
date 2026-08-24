@@ -176,6 +176,23 @@ def release_lines(serial_port: Any, *, boot_line: str, reset_line: str,
     set_line(serial_port, boot_line, not asserted_value(boot_asserted))
     set_line(serial_port, reset_line, not asserted_value(reset_asserted))
 
+def reset_application(
+    serial_port: Any,
+    *,
+    boot_line: str,
+    reset_line: str,
+    boot_asserted: str,
+    reset_asserted: str,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Pulse RESET/EN with BOOT released."""
+
+    set_line(serial_port, boot_line, not asserted_value(boot_asserted))
+    set_line(serial_port, reset_line, asserted_value(reset_asserted))
+    sleep(0.1)
+    set_line(serial_port, reset_line, not asserted_value(reset_asserted))
+    sleep(0.3)
+
 def reboot_and_capture(
     serial_port: Any,
     *,
@@ -189,11 +206,14 @@ def reboot_and_capture(
 ) -> None:
     """Reset into the application and save its UART output."""
 
-    set_line(serial_port, boot_line, not asserted_value(boot_asserted))
-    set_line(serial_port, reset_line, asserted_value(reset_asserted))
-    sleep(0.1)
-    set_line(serial_port, reset_line, not asserted_value(reset_asserted))
-    sleep(0.3)
+    reset_application(
+        serial_port,
+        boot_line=boot_line,
+        reset_line=reset_line,
+        boot_asserted=boot_asserted,
+        reset_asserted=reset_asserted,
+        sleep=sleep,
+    )
 
     raw = bytearray()
     deadline = time.monotonic() + seconds
@@ -364,6 +384,16 @@ def flash(args: argparse.Namespace, *, serial_factory: Callable[[str], Any] = _s
             return flash_process.returncode
 
         serial_port = serial_factory(args.port)
+        # The CR95HF consistently synchronizes after a second application
+        # reset following esptool's bootloader session.
+        reset_application(
+            serial_port,
+            boot_line=args.boot_line,
+            reset_line=args.reset_line,
+            boot_asserted=args.boot_asserted,
+            reset_asserted=args.reset_asserted,
+            sleep=sleep,
+        )
         reboot_and_capture(
             serial_port,
             boot_line=args.boot_line,

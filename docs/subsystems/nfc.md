@@ -136,33 +136,81 @@ correctly yields a blank URL; its UID must still be reported.
 
 ## Tag writing
 
-The replacement's authenticated Cards UI writes NDEF URLs through the CR95HF
-driver. The request must carry the captured UID. UI sequence numbers are
-advisory: the backend accepts a stale sequence when the UID still matches,
-then reactivates the physical card and compares its UID under the UART mutex.
-A removed or substituted card is therefore still rejected without allowing
-poll churn to block a valid write.
+The replacement writes NDEF URLs through `cr95hf_write_url()`. The writer
+reactivates the card, compares its physical UID with the requested UID, writes
+page-wise with `A2`, then re-reads the URI and requires an exact match.
 
-Factory helper `0x4010d770` constructs exactly
-`A2 <page> <four data bytes> 28`; this matches the ST Type-2 sequence. A
-decoded four-bit ACK is CR95HF result `0x90` with payload `0A 24 00 00`.
-However, ST's own Type-2 appendix shows a successful `A2` returning `87 00`,
-then confirms the changed bytes with `READ`. The replacement therefore treats
-`0x87` as ambiguous: it waits for EEPROM programming and accepts the page only
-when immediate readback matches. It reports failure when readback differs.
+### Required Type-2 layout
 
-Overwrite mode never touches manufacturer, static-lock, OTP, or CC pages 0–3.
-For a zero/invalid CC it writes a complete NDEF TLV directly into user pages
-4+ and assumes only the minimum 48-byte area. The replacement reader uses the
-same page-4 fallback, so the card becomes compatible with this firmware even
-though generic NFC Forum readers may continue to call it unformatted.
+Working cards must be NFC Forum Type 2 formatted. Page 3 is the Capability
+Container (CC); user data begins at page 4:
 
-Because overwrite is explicit, a logical read-only CC does not prevent an
-attempt. Before writing, the driver reads `LOCK0/LOCK1` from page 2 and rejects
-any target page whose irreversible static lock bit is set (`LOCK0` bit 4 for
-page 4; bits 5–7 for pages 5–7; `LOCK1` bits 0–7 for pages 8–15). Remaining
-password/configuration protection is enforced by the physical `A2` ACK/NAK.
-URLs that do not fit the selected user area return an explicit HTTP conflict.
+```text
+page 3:  E1 10 06 00       # NFC Forum Type 2, v1.0, 48 user bytes, read/write
+page 4+: NDEF TLV
+```
+
+The verified on-card representation of `https://openyoto.com/admin` is:
+
+```text
+03 17                         # NDEF TLV, 23-byte value
+D1 01 13                      # MB|ME|SR|TNF=well-known, type len=1, payload len=19
+55                            # RTD-URI type ("U")
+04                            # URI prefix: https://
+6f 70 65 6e 79 6f 74 6f 2e 63 6f 6d 2f 61 64 6d 69 6e
+                              # "openyoto.com/admin"
+FE                            # TLV terminator
+```
+
+The observed page stream was:
+
+```text
+page 4: 03 17 D1 01
+page 5: 13 55 04 6F
+page 6: 70 65 6E 79
+page 7: 6F 74 6F 2E
+page 8: 63 6F 6D 2F
+page 9: 61 64 6D 69
+page 10: 6E FE 00 00
+```
+
+Bytes after `FE` are not part of the NDEF message. The writer stages an empty
+NDEF length before page writes, publishes the final length only after the
+payload is present, and verifies the final URI read-back. This prevents a
+partially written card from presenting a valid new record.
+
+For an all-zero CC, `cr95hf_format_blank_mf0ul11()` first identifies an
+unlocked 48-byte MIFARE Ultralight/EV1-compatible tag, writes an empty NDEF
+area, writes and verifies `E1 10 06 00` at page 3, then performs the normal
+URI write. It does not format unknown or locked tags. Valid formatted cards
+are overwritten only in pages 4+; manufacturer, lock, OTP, and CC pages are
+never rewritten.
+
+Factory helper `0x4010d770` constructs `A2 <page> <four data bytes> 28`.
+CR95HF can report `87 00` after a successful physical page program, so the
+writer treats that response as ambiguous and accepts it only when immediate
+read-back matches.
+
+### Anticollision diagnostic
+
+An NFC memory or formatting change cannot fix a failure before Type-2 pages are
+read. For a 7-byte UID, cascade-level 1 must return five tag bytes:
+
+```text
+88 UID0 UID1 UID2 BCC
+```
+
+For example, UID `04 34 6E EA 42 59 80` requires CL1
+`88 04 34 6E D6`; CL2 then returns `EA 42 59 80 71`. A complete CR95HF
+anticollision response has those five tag bytes followed by three RF status
+bytes. The driver logs the received tag-byte count and status/collision fields
+when a response is partial.
+
+When the log contains partial CL1 prefixes from different cards, remove every
+other tag from the antenna field before changing firmware. If exactly one tag
+still returns a truncated CL1 reply, test its position, orientation, and
+millimetres of spacing. This is an RF coupling or clone-chip compatibility
+problem, not an NDEF, lock, or page-write problem.
 
 ## Task model
 

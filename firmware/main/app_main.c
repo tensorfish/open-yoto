@@ -791,6 +791,7 @@ void app_main(void)
             memcpy(last_uid, uid, uid_len);
             last_uid_len = uid_len;
             log_card_diagnostics(uid, uid_len, url, &card_info);
+            admin_set_last_card(uid, uid_len, url);
 
             state_lock();
             audio_stop();
@@ -798,7 +799,6 @@ void app_main(void)
             s_track_index = 0;
             s_current_url[0] = '\0';
             state_unlock();
-
             if (card_info.state != CR95HF_CARD_BLANK)
             {
                 ESP_LOGI(TAG, "card: not blank; left unchanged");
@@ -809,6 +809,7 @@ void app_main(void)
                 write_err = cr95hf_write_url(MAGIC_URL, uid, uid_len);
                 if (write_err == ESP_OK)
                 {
+                    admin_set_last_card(uid, uid_len, MAGIC_URL);
                     ESP_LOGI(TAG, "card: provisioned %s", MAGIC_URL);
                 }
                 else
