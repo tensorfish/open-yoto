@@ -508,9 +508,15 @@ static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
                                             false);
         if (!request_ok)
         {
-            ESP_LOGW(TAG,
-                     "Type A activation failed: REQA/WUPA transport=%s code=0x%02x len=%u",
-                     esp_err_to_name(err), code, (unsigned)rsp_len);
+            /* Frame-wait timeout is the normal no-card result; keep the
+             * 100-ms poll loop quiet unless transport itself misbehaves. */
+            if (err != ESP_OK || code != CR95HF_CODE_TIMEOUT)
+            {
+                ESP_LOGW(TAG,
+                         "Type A activation failed: REQA/WUPA transport=%s"
+                         " code=0x%02x len=%u",
+                         esp_err_to_name(err), code, (unsigned)rsp_len);
+            }
             return false;
         }
     }

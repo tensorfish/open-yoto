@@ -191,7 +191,7 @@ CR95HF can report `87 00` after a successful physical page program, so the
 writer treats that response as ambiguous and accepts it only when immediate
 read-back matches.
 
-### Anticollision diagnostic
+### Corrupted anticollision diagnostic
 
 An NFC memory or formatting change cannot fix a failure before Type-2 pages are
 read. For a 7-byte UID, cascade-level 1 must return five tag bytes:
@@ -203,14 +203,28 @@ read. For a 7-byte UID, cascade-level 1 must return five tag bytes:
 For example, UID `04 34 6E EA 42 59 80` requires CL1
 `88 04 34 6E D6`; CL2 then returns `EA 42 59 80 71`. A complete CR95HF
 anticollision response has those five tag bytes followed by three RF status
-bytes. The driver logs the received tag-byte count and status/collision fields
-when a response is partial.
+bytes.
 
-When the log contains partial CL1 prefixes from different cards, remove every
-other tag from the antenna field before changing firmware. If exactly one tag
-still returns a truncated CL1 reply, test its position, orientation, and
-millimetres of spacing. This is an RF coupling or clone-chip compatibility
-problem, not an NDEF, lock, or page-write problem.
+A corrupted clone can instead produce a partial response such as:
+
+```text
+code=0x90 len=6 raw=88 04 34 27 00 00
+tag_bytes=3 status=0x27 significant_bits=7
+```
+
+Only `88 04 34` arrived; the final UID byte and BCC are missing. The driver
+must reject this response: it cannot safely construct the subsequent
+`93 70 <CL1 bytes> + CRC-A` SELECT frame. A later `SELECT L1` result `0x87`
+is therefore downstream of the malformed anticollision reply, not the cause.
+
+Varying partial prefixes can mean two cards are energized, but they can also
+be corrupted output from one clone. Isolate other cards first. If one card
+still emits partial CL1 frames, test its orientation and a few millimetres of
+spacing; phone-reader success does not prove compatibility with this fixed
+CR95HF antenna. The practical firmware mitigation is Type-A receiver tuning
+after ProtocolSelect: TimerW `0x58` plus ARC_B `0xD3` (95% modulation, 27 dB
+receiver gain). No NDEF, lock, CC, or page-write change can repair a truncated
+UID frame.
 
 ## Task model
 
