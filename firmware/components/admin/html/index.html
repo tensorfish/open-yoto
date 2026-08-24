@@ -14,6 +14,7 @@ button,.button{min-height:40px;border:1px solid transparent;border-radius:9px;ba
 .login{max-width:420px;margin:11vh auto}.code{font:700 26px/1 ui-monospace,SFMono-Regular,monospace;letter-spacing:.22em;text-transform:uppercase;text-align:center}.tabs{display:flex;gap:8px;margin-bottom:16px;overflow:auto}.tab{background:#151922;color:var(--muted);border-color:var(--line);min-width:120px}.tab.active{background:var(--accent);color:#241600}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.row{display:flex;gap:9px;align-items:center}.row>input{margin:0;min-width:0}.row.wrap-actions{flex-wrap:wrap}.status{min-height:22px;margin:10px 2px;color:var(--muted)}.status.ok{color:var(--ok)}.status.err{color:var(--danger)}
 .pathbar{display:flex;gap:8px;align-items:center;margin-bottom:12px}.pathbar input{flex:1;min-width:120px;margin:0;font-family:ui-monospace,SFMono-Regular,monospace}.entries{border-top:1px solid var(--line)}.entry{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}.entry-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.entry-meta{color:var(--muted);font-size:12px}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.actions button,.actions .button{min-height:34px;padding:5px 9px;font-size:12px}.drop{border:1px dashed #465168;border-radius:10px;padding:14px;margin-top:14px}.empty{color:var(--muted);padding:20px 0;text-align:center}
 .image-converter{display:flex;align-items:center;gap:14px;margin:2px 0 12px}.image-preview{width:128px;height:128px;flex:0 0 128px;background:#000;border:1px solid var(--line);border-radius:8px;image-rendering:pixelated}.image-converter .hint{margin:0}.separator{border:0;border-top:1px solid var(--line);margin:18px 0}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.panel-head h2{margin-bottom:0}.progress-wrap{margin-top:12px}.progress-wrap progress{width:100%;height:10px;accent-color:var(--accent)}.progress-wrap .hint{margin:6px 0 0}
 @media(max-width:680px){.grid{grid-template-columns:1fr}.entry{grid-template-columns:1fr}.actions{justify-content:flex-start}header{align-items:start;flex-direction:column}}
 </style>
 </head>
@@ -30,18 +31,19 @@ button,.button{min-height:40px;border:1px solid transparent;border-radius:9px;ba
 <main id="app" hidden>
 <nav class="tabs">
 <button class="tab" data-tab="remote">Remote control</button>
-<button class="tab active" data-tab="files">SD files</button>
+<button class="tab active" data-tab="files">Media files</button>
+<button class="tab" data-tab="tracks">Tracks</button>
 <button class="tab" data-tab="cards">Cards</button>
 </nav>
 <section data-panel="remote" hidden>
 <div class="grid">
-<div class="card"><h2>Play sound on player</h2><label for="soundPath">Absolute SD-card path</label><input id="soundPath" placeholder="/sdcard/media/track.mp3"><div class="row wrap-actions"><button id="playSound">Play sound</button><button class="secondary" id="stopSound">Stop playback</button></div></div>
+<div class="card"><h2>Play sound on player</h2><label for="soundPath">Absolute media path</label><input id="soundPath" placeholder="/sdcard/media/track.mp3"><div class="row wrap-actions"><button id="playSound">Play sound</button><button class="secondary" id="stopSound">Stop playback</button></div></div>
 <div class="card"><h2>Display image on player</h2><label for="imagePath">Saved player image path</label><input id="imagePath" placeholder="/sdcard/media/card.img"><div class="row wrap-actions"><button class="secondary" id="showImage">Display saved .img</button><button class="secondary" id="clearDisplay">Clear screen</button></div><hr class="separator"><label for="imageSource">Convert a PNG or JPEG</label><input id="imageSource" type="file" accept="image/png,image/jpeg"><div class="image-converter"><canvas class="image-preview" id="imagePreview" width="16" height="16" hidden></canvas><p class="hint" id="imageConversionHint">The browser will stretch the image to the player's centered 16×16 RGB565 color frame.</p></div><button id="convertImage" disabled>Upload and display</button></div>
 </div>
 </section>
 <section data-panel="files">
 <div class="card">
-<h2>SD file manager</h2>
+<h2>SD media manager</h2>
 <div class="pathbar"><button class="secondary" id="up">Up</button><input id="cwd" value="/sdcard/media" aria-label="Current SD card path" autocapitalize="off" spellcheck="false"><button class="secondary" id="goFiles">Go</button><button class="secondary" id="refreshFiles">Refresh</button></div>
 <div class="entries" id="entries"></div>
 <div class="drop">
@@ -51,25 +53,30 @@ button,.button{min-height:40px;border:1px solid transparent;border-radius:9px;ba
 </div>
 </section>
 <section data-panel="cards" hidden>
-<div class="card"><h2>NFC card mappings</h2><p class="hint" id="lastCard">No card scanned yet.</p><div class="entries" id="cards"></div></div>
+<div class="card" id="cardReader"><div class="panel-head"><h2>Card reader</h2><button class="secondary" id="refreshCard">Refresh</button></div><p class="hint" id="lastCard" role="status" aria-live="polite">No card scanned yet.</p><label for="cardUrl">URL to write to the captured card</label><input id="cardUrl" maxlength="200" placeholder="https://example.com/card" autocapitalize="off" spellcheck="false"><button id="writeCard" disabled>Write URL to card</button></div>
+<div class="card"><h2>NFC card mappings</h2><div class="entries" id="cards"></div></div>
+</section>
+<section data-panel="tracks" hidden>
+<div class="card"><h2>Add track folder</h2><p class="hint">Choose one folder containing supported audio and images. Its structure is preserved under <code>/sdcard/media</code>; PNG/JPEG files become 16×16 color <code>.img</code> files.</p><label for="trackFolder">Track folder</label><input id="trackFolder" type="file" webkitdirectory directory multiple accept=".mp3,.m4a,.aac,.img,.png,.jpg,.jpeg,audio/mpeg,audio/mp4,audio/aac,image/png,image/jpeg"><p class="hint" id="trackSelection">No folder selected.</p><button id="uploadTrackFolder" disabled>Upload folder</button><div class="progress-wrap" id="trackProgressWrap" hidden><progress id="trackProgress" value="0" max="1"></progress><p class="hint" id="trackProgressText" role="status" aria-live="polite"></p></div></div>
+<div class="card"><div class="panel-head"><h2>Current tracks</h2><button class="secondary" id="refreshTracks">Refresh</button></div><div class="entries" id="tracks"></div></div>
 </section>
 </main>
 </div>
 <script>
-const $=s=>document.querySelector(s);let unlocked=false;let cwd='/sdcard/media';let activeTab='files';
+const $=s=>document.querySelector(s);const MEDIA_ROOT='/sdcard/media';let unlocked=false;let cwd=MEDIA_ROOT;let activeTab='files';let lastCard={captured:false,uid:'',url:'',seq:0};let lastCardBusy=false;let cardUrlDirty=false;let trackQueue=[];let trackRoot='';let tracksLoadSeq=0;
 function status(text,kind=''){const e=$('#status');e.textContent=text;e.className='status '+kind}
 function lock(){unlocked=false;$('#app').hidden=true;$('#login').hidden=false;$('#connection').textContent='Locked'}
 async function api(url,options={}){options.credentials='same-origin';const r=await fetch(url,options);if(r.status===401){lock();throw new Error('Session expired')}if(!r.ok){throw new Error((await r.text())||('HTTP '+r.status))}return r}
 function jsonPost(url,data){return api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})}
-function sdPath(path){if(path.startsWith('/sdcard/'))return path;if(path==='/sdcard')return path;return '/sdcard'+(path.startsWith('/')?'':'/')+path}
+function sdPath(path){path=path.trim().replace(/\/+/g,'/');if(path.startsWith('media/'))path='/sdcard/'+path;else if(path==='/media'||path.startsWith('/media/'))path='/sdcard'+path;else if(!path.startsWith('/'))path=MEDIA_ROOT+'/'+path;if(path!==MEDIA_ROOT&&!path.startsWith(MEDIA_ROOT+'/'))throw new Error('Web UI paths must stay under '+MEDIA_ROOT);return path}
 async function unlock(){const pin=$('#pin').value.trim().toUpperCase();if(!/^[A-Z0-9]{6}$/.test(pin)){status('Enter all six letters and numbers.','err');return}status('Checking access code...');try{const r=await fetch('/api/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})});if(r.status===401){status('Invalid access code.','err');$('#pin').focus();$('#pin').select();return}if(!r.ok){status('Login service error ('+r.status+').','err');return}unlocked=true;$('#login').hidden=true;$('#app').hidden=false;$('#connection').textContent='Connected to openyoto';status('Admin unlocked.','ok');await loadFiles()}catch(e){status('Unable to contact the player: '+e.message,'err')}}
-async function selectTab(name){activeTab=name;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('[data-panel]').forEach(p=>p.hidden=p.dataset.panel!==name);if(name==='files')await loadFiles();if(name==='cards'){await loadCards();await pollLastCard()}}
-async function remote(endpoint,path,label){path=sdPath(path.trim());status(label+' '+path+'...');try{await jsonPost(endpoint,{path});status(label+' '+path,'ok')}catch(e){status(label+' failed: '+e.message,'err')}}
+async function selectTab(name){activeTab=name;if(name!=='tracks')tracksLoadSeq++;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('[data-panel]').forEach(p=>p.hidden=p.dataset.panel!==name);if(name==='files')await loadFiles();if(name==='cards'){await Promise.all([loadCards(),pollLastCard(false)])}if(name==='tracks')await loadTracks()}
+async function remote(endpoint,path,label){try{path=sdPath(path);status(label+' '+path+'...');await jsonPost(endpoint,{path});status(label+' '+path,'ok')}catch(e){status(label+' failed: '+e.message,'err')}}
 async function remoteAction(endpoint,busyLabel,doneLabel){status(busyLabel);try{await api(endpoint,{method:'POST'});status(doneLabel,'ok')}catch(e){status(doneLabel+' failed: '+e.message,'err')}}
 let convertedImage=null;
 function defaultImagePath(file){const stem=file.name.replace(/\.[^.]*$/,'').replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').trim().slice(0,80)||'image';return '/sdcard/media/'+stem+'.img'}
 function decodeBrowserImage(file){return new Promise((resolve,reject)=>{const url=URL.createObjectURL(file);const image=new Image();image.onload=()=>{URL.revokeObjectURL(url);resolve(image)};image.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('The selected image could not be decoded'))};image.src=url})}
-async function convertBrowserImage(file){
+async function convertBrowserImage(file,showPreview=true){
  const size=16;
  const image=await decodeBrowserImage(file);
  const source=document.createElement('canvas');
@@ -88,18 +95,20 @@ async function convertBrowserImage(file){
   const rgb565=((red>>3)<<11)|((green>>2)<<5)|(blue>>3);
   view.setUint16(8+i*2,rgb565,true);
  }
- const preview=$('#imagePreview');
- preview.getContext('2d').putImageData(imageData,0,0);
- preview.hidden=false;
+ if(showPreview){
+  const preview=$('#imagePreview');
+  preview.getContext('2d').putImageData(imageData,0,0);
+  preview.hidden=false;
+ }
  return new Blob([bytes],{type:'application/octet-stream'});
 }
 async function prepareBrowserImage(){const file=$('#imageSource').files[0];const button=$('#convertImage');convertedImage=null;button.disabled=true;if(!file){$('#imagePreview').hidden=true;$('#imageConversionHint').textContent="The browser will stretch the image to the player's centered 16×16 RGB565 color frame.";return}status('Converting image...');$('#imageConversionHint').textContent='Converting preview…';try{const blob=await convertBrowserImage(file);convertedImage={file,blob};$('#imagePath').value=defaultImagePath(file);$('#imageConversionHint').textContent='Preview of the exact stretched 16×16 RGB565 frame that will be stored on the SD card.';status('Image preview ready.','ok');button.disabled=false}catch(e){$('#imagePreview').hidden=true;$('#imageConversionHint').textContent=e.message;status('Image conversion failed: '+e.message,'err')}}
 async function uploadAndDisplayImage(){const file=$('#imageSource').files[0];if(!file){status('Choose a PNG or JPEG first.','err');return}const button=$('#convertImage');button.disabled=true;status('Uploading and displaying image...');try{if(!convertedImage||convertedImage.file!==file)convertedImage={file,blob:await convertBrowserImage(file)};let path=$('#imagePath').value.trim()||defaultImagePath(file);if(!/\.img$/i.test(path))path+='.img';path=sdPath(path);$('#imagePath').value=path;await api('/api/fs/upload?path='+encodeURIComponent(path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:convertedImage.blob});await jsonPost('/api/control/display',{path});status('Uploaded and displayed '+path,'ok')}catch(e){status('Image upload failed: '+e.message,'err')}finally{button.disabled=false}}
 function humanSize(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KiB';return (n/1048576).toFixed(1)+' MiB'}
 function join(base,name){return base==='/'?'/'+name:base+'/'+name}
-function parent(path){if(path==='/sdcard')return '/sdcard';const i=path.lastIndexOf('/');return i<=7?'/sdcard':path.slice(0,i)}
-function normalizeBrowserPath(path){path=path.trim();if(path===''||path==='/')return '/sdcard';if(!path.startsWith('/'))path='/'+path;if(!path.startsWith('/sdcard/'))path='/sdcard'+path;path=path.replace(/\/+/g,'/');if(path.length>7)path=path.replace(/\/+$/,'');return path}
-async function browsePath(){const next=normalizeBrowserPath($('#cwd').value);if(next.split('/').some(segment=>segment==='.'||segment==='..')){status('Path cannot contain . or .. segments.','err');return}cwd=next;$('#cwd').value=cwd;await loadFiles()}
+function parent(path){if(path===MEDIA_ROOT)return MEDIA_ROOT;const i=path.lastIndexOf('/');return i<=MEDIA_ROOT.length?MEDIA_ROOT:path.slice(0,i)}
+function normalizeBrowserPath(path){path=path.trim();if(path===''||path==='/')return MEDIA_ROOT;if(!path.startsWith('/'))path=MEDIA_ROOT+'/'+path;path=path.replace(/\/+/g,'/');if(path.length>MEDIA_ROOT.length)path=path.replace(/\/+$/,'');if(path!==MEDIA_ROOT&&!path.startsWith(MEDIA_ROOT+'/'))throw new Error('Media browser is confined to '+MEDIA_ROOT);return path}
+async function browsePath(){try{const next=normalizeBrowserPath($('#cwd').value);if(next.split('/').some(segment=>segment==='.'||segment==='..'))throw new Error('Path cannot contain . or .. segments');cwd=next;$('#cwd').value=cwd;await loadFiles()}catch(e){$('#cwd').value=cwd;status(e.message,'err')}}
 function isSound(path){return /\.(mp3|m4a|aac)$/i.test(path)}function isImage(path){return /\.img$/i.test(path)}
 function action(text,fn,cls='secondary'){const b=document.createElement('button');b.textContent=text;b.className=cls;b.onclick=fn;return b}
 async function loadFiles(){if(!unlocked)return;$('#cwd').value=cwd;const box=$('#entries');box.innerHTML='<p class="empty">Loading...</p>';try{const r=await api('/api/fs/list?path='+encodeURIComponent(cwd));const items=await r.json();items.sort((a,b)=>a.type===b.type?a.name.localeCompare(b.name):(a.type==='directory'?-1:1));box.innerHTML='';if(!items.length)box.innerHTML='<p class="empty">Directory is empty.</p>';items.forEach(it=>{const row=document.createElement('div');row.className='entry';const info=document.createElement('div');const name=document.createElement('div');name.className='entry-name';name.textContent=(it.type==='directory'?'[DIR] ':'')+it.name;const meta=document.createElement('div');meta.className='entry-meta';meta.textContent=it.type==='directory'?'Directory':humanSize(it.size);info.append(name,meta);const acts=document.createElement('div');acts.className='actions';if(it.type==='directory')acts.append(action('Open',()=>{cwd=it.path;loadFiles()}));else{if(isSound(it.path))acts.append(action('Play',()=>remote('/api/control/play',it.path,'Playing')));if(isImage(it.path))acts.append(action('Display',()=>remote('/api/control/display',it.path,'Displaying')));const dl=document.createElement('a');dl.className='button secondary';dl.textContent='Download';dl.href='/api/fs/file?path='+encodeURIComponent(it.path);acts.append(dl)}acts.append(action('Rename',()=>renamePath(it.path)));acts.append(action('Delete',()=>deletePath(it.path),'danger'));row.append(info,acts);box.append(row)})}catch(e){box.innerHTML='<p class="empty">Could not load directory.</p>';status('Directory failed: '+e.message,'err')}}
@@ -110,9 +119,135 @@ async function renamePath(from){const name=prompt('New name',from.split('/').pop
 async function deletePath(path){if(!confirm('Delete '+path+'?'))return;status('Deleting '+path+'...');try{await jsonPost('/api/fs/delete',{path});status('Deleted.','ok');loadFiles()}catch(e){status('Delete failed: '+e.message,'err')}}
 async function loadCards(){if(!unlocked)return;const box=$('#cards');box.innerHTML='<p class="empty">Loading...</p>';try{const r=await api('/api/list');const items=await r.json();box.innerHTML='';if(!items.length)box.innerHTML='<p class="empty">No card mappings.</p>';items.forEach(it=>{const row=document.createElement('div');row.className='entry';const info=document.createElement('div');info.className='entry-name';info.textContent=it.url;const acts=document.createElement('div');acts.className='actions';const sound=it.tracks&&it.tracks.length?it.tracks[0]:it.sound;if(sound)acts.append(action('Play',()=>remote('/api/control/play',sound,'Playing')));if(it.image)acts.append(action('Display',()=>remote('/api/control/display',it.image,'Displaying')));acts.append(action('Delete mapping',()=>deleteCard(it.url),'danger'));row.append(info,acts);box.append(row)})}catch(e){box.innerHTML='<p class="empty">Unable to load mappings.</p>';status(e.message,'err')}}
 async function deleteCard(url){if(!confirm('Delete mapping for '+url+'?'))return;status('Deleting card mapping...');try{await jsonPost('/api/delete',{url});status('Mapping deleted.','ok');loadCards()}catch(e){status('Delete failed: '+e.message,'err')}}
-async function pollLastCard(){if(!unlocked)return;try{const r=await api('/api/last-card');const d=await r.json();$('#lastCard').textContent=d.url?('Last scanned: '+d.url+(d.exists?' (mapped)':'')):'No card scanned yet.'}catch(e){}}
+function showLastCard(d){
+ lastCard=d;
+ const input=$('#cardUrl');
+ const label=$('#lastCard');
+ if(!d.captured){
+  label.textContent='No card scanned yet.';
+ }else if(d.url){
+  label.textContent='Last scanned UID '+d.uid+': '+d.url+(d.exists?' (mapped)':' (unmapped)');
+ }else{
+  label.textContent='Last scanned UID '+d.uid+': blank card';
+ }
+ if(d.url&&!cardUrlDirty&&!input.value.trim())input.value=d.url;
+ $('#writeCard').disabled=!d.captured;
+}
+async function pollLastCard(force=false){
+ if(!unlocked||(activeTab!=='cards'&&!force)||lastCardBusy)return;
+ if(!force&&$('#cardUrl').value.trim())return;
+ lastCardBusy=true;$('#refreshCard').disabled=true;
+ if(force)status('Checking for the last scanned card...');
+ try{
+  const r=await api('/api/last-card');const d=await r.json();
+  if(force||d.seq!==lastCard.seq||d.captured!==lastCard.captured)showLastCard(d);
+  if(force)status(d.captured?'Captured card refreshed.':'No card has been scanned.','ok');
+ }catch(e){if(force)status('Card refresh failed: '+e.message,'err')}
+ finally{lastCardBusy=false;$('#refreshCard').disabled=false}
+}
+async function writeCard(){
+ const button=$('#writeCard');const url=$('#cardUrl').value.trim();
+ if(!lastCard.captured||!lastCard.uid){status('Scan the card to write first.','err');return}
+ if(!url||url.length>200){status('Enter a URL of 200 characters or fewer.','err');return}
+ button.disabled=true;button.textContent='Writing…';$('#cardReader').setAttribute('aria-busy','true');status('Writing URL to captured card...');
+ try{
+  const r=await jsonPost('/api/card/write',{url,uid:lastCard.uid,seq:lastCard.seq});
+  const result=await r.json();lastCard={...lastCard,url,seq:result.seq};cardUrlDirty=false;showLastCard(lastCard);status('Card written and verified.','ok');
+ }catch(e){status('Card write failed: '+e.message,'err')}
+ finally{button.textContent='Write URL to card';button.disabled=!lastCard.captured;$('#cardReader').removeAttribute('aria-busy')}
+}
+function trackKind(name){
+ if(/\.(mp3|m4a|aac)$/i.test(name))return'audio';
+ if(/\.img$/i.test(name))return'image';
+ if(/\.(png|jpe?g)$/i.test(name))return'convert';
+ return'';
+}
+function safeTrackSegment(segment){return segment&&segment!=='.'&&segment!=='..'&&!/[\\/:*?"<>|\x00-\x1f]/.test(segment)&&!/[. ]$/.test(segment)}
+async function validPlayerImage(file){
+ if(file.size===32)return true;
+ if(file.size!==520&&file.size!==8200)return false;
+ const h=new Uint8Array(await file.slice(0,8).arrayBuffer());
+ const width=file.size===520?16:64;
+ return h[0]===0x4f&&h[1]===0x59&&h[2]===0x49&&h[3]===0x4d&&h[4]===1&&h[5]===1&&h[6]===width&&h[7]===width;
+}
+async function listDirectory(path){const r=await api('/api/fs/list?path='+encodeURIComponent(path));return r.json()}
+async function prepareTrackFolder(){
+ const files=[...$('#trackFolder').files];const button=$('#uploadTrackFolder');trackQueue=[];trackRoot='';button.disabled=true;button.textContent='Upload folder';$('#trackProgressWrap').hidden=true;
+ if(!files.length){$('#trackSelection').textContent='No folder selected.';return}
+ status('Checking track folder...');
+ try{
+  if(files.length>64)throw new Error('A track folder may contain at most 64 files');
+  let root='';let audioCount=0,imageCount=0,total=0;const targets=new Set();const queue=[];
+  for(const file of files){
+   const relative=(file.webkitRelativePath||file.name).replace(/\\/g,'/');
+   const parts=relative.split('/');
+   if(parts.length<2||parts.some(part=>!safeTrackSegment(part)))throw new Error('Folder contains an invalid path: '+relative);
+   if(!root)root=parts[0];if(parts[0]!==root)throw new Error('Choose one folder at a time');
+   const kind=trackKind(parts.at(-1));if(!kind)continue;
+   if(kind==='audio'&&file.size>4*1024*1024)throw new Error(file.name+' exceeds the 4 MiB upload limit');
+   if(kind==='convert'&&file.size>16*1024*1024)throw new Error(file.name+' is too large to convert');
+   if(kind==='image'&&!await validPlayerImage(file))throw new Error(file.name+' is not a supported player image');
+   if(kind==='audio')audioCount++;else imageCount++;
+   let targetParts=parts.slice(1);
+   if(kind==='convert')targetParts[targetParts.length-1]=targetParts.at(-1).replace(/\.[^.]+$/,'.img');
+   const target=targetParts.join('/');const key=target.toLocaleLowerCase();
+   if(targets.has(key))throw new Error('Folder has colliding output names: '+target);
+   targets.add(key);total+=file.size;queue.push({file,kind,target,done:false});
+  }
+  if(!audioCount||!imageCount)throw new Error('Folder must contain at least one supported audio file and one image');
+  if(total>64*1024*1024)throw new Error('Folder exceeds the 64 MiB selection limit');
+  const existing=await listDirectory('/sdcard/media');
+  if(existing.some(item=>item.name.toLocaleLowerCase()===root.toLocaleLowerCase()))throw new Error('/sdcard/media/'+root+' already exists');
+  trackQueue=queue;trackRoot='/sdcard/media/'+root;
+  $('#trackSelection').textContent=root+' · '+queue.length+' files · '+audioCount+' audio · '+imageCount+' images · '+humanSize(total);
+  button.disabled=false;status('Track folder ready to upload.','ok');
+ }catch(e){$('#trackSelection').textContent=e.message;status('Track folder rejected: '+e.message,'err')}
+}
+async function uploadTrackFolder(){
+ if(!trackQueue.length||!trackRoot)return;
+ const button=$('#uploadTrackFolder');const progress=$('#trackProgress');const progressText=$('#trackProgressText');button.disabled=true;$('#trackProgressWrap').hidden=false;
+ const directories=new Set([trackRoot]);
+ for(const item of trackQueue){const parts=item.target.split('/');for(let i=1;i<parts.length;i++)directories.add(trackRoot+'/'+parts.slice(0,i).join('/'))}
+ try{
+  for(const path of [...directories].sort((a,b)=>a.length-b.length)){status('Creating '+path+'...');await jsonPost('/api/fs/mkdir',{path})}
+  let complete=trackQueue.filter(item=>item.done).length;progress.max=trackQueue.length;progress.value=complete;
+  for(const item of trackQueue){
+   if(item.done)continue;
+   progressText.textContent='Uploading '+(complete+1)+' of '+trackQueue.length+': '+item.target;
+   status(progressText.textContent+'...');
+   const body=item.kind==='convert'?await convertBrowserImage(item.file,false):item.file;
+   const path=trackRoot+'/'+item.target;
+   await api('/api/fs/upload?path='+encodeURIComponent(path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body});
+   item.done=true;complete++;progress.value=complete;
+  }
+  const uploadedRoot=trackRoot;progressText.textContent='Uploaded '+trackQueue.length+' files to '+uploadedRoot;status(progressText.textContent,'ok');trackQueue=[];trackRoot='';$('#trackFolder').value='';button.textContent='Upload folder';button.disabled=true;if(activeTab==='tracks')await loadTracks();
+ }catch(e){progressText.textContent='Upload stopped: '+e.message;status(progressText.textContent,'err');button.textContent='Retry remaining files';button.disabled=false}
+}
+async function collectTracks(path,out,token,depth=0){
+ if(token!==tracksLoadSeq||activeTab!=='tracks'||depth>8||out.length>=512)return;
+ const items=await listDirectory(path);
+ for(const item of items){
+  if(token!==tracksLoadSeq||activeTab!=='tracks'||out.length>=512)return;
+  if(item.type==='directory')await collectTracks(item.path,out,token,depth+1);
+  else if(isSound(item.path)||isImage(item.path))out.push(item);
+ }
+}
+async function loadTracks(){
+ if(!unlocked||activeTab!=='tracks')return;
+ const token=++tracksLoadSeq;const box=$('#tracks');box.innerHTML='<p class="empty">Loading tracks...</p>';
+ try{
+  const items=[];await collectTracks('/sdcard/media',items,token);
+  if(token!==tracksLoadSeq||activeTab!=='tracks')return;
+  items.sort((a,b)=>a.path.localeCompare(b.path));box.innerHTML='';
+  if(!items.length){box.innerHTML='<p class="empty">No playable tracks or player images under /sdcard/media.</p>';return}
+  for(const item of items){
+   const row=document.createElement('div');row.className='entry';const info=document.createElement('div');const name=document.createElement('div');name.className='entry-name';name.textContent=item.path.slice('/sdcard/media/'.length);const meta=document.createElement('div');meta.className='entry-meta';meta.textContent=isSound(item.path)?'Audio · '+humanSize(item.size):'Player image · '+humanSize(item.size);info.append(name,meta);const acts=document.createElement('div');acts.className='actions';acts.append(isSound(item.path)?action('Play',()=>remote('/api/control/play',item.path,'Playing')):action('Display',()=>remote('/api/control/display',item.path,'Displaying')));row.append(info,acts);box.append(row);
+  }
+  status('Loaded '+items.length+' track assets.','ok');
+ }catch(e){if(token===tracksLoadSeq){box.innerHTML='<p class="empty">Unable to load tracks.</p>';status('Tracks failed: '+e.message,'err')}}
+}
 $('#unlock').onclick=unlock;$('#pin').onkeydown=e=>{if(e.key==='Enter')unlock()};$('#pin').oninput=e=>e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'');document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>selectTab(b.dataset.tab));
-$('#playSound').onclick=()=>remote('/api/control/play',$('#soundPath').value,'Playing');$('#stopSound').onclick=()=>remoteAction('/api/control/stop','Stopping playback...','Playback stopped.');$('#showImage').onclick=()=>remote('/api/control/display',$('#imagePath').value,'Displaying');$('#clearDisplay').onclick=()=>remoteAction('/api/control/clear','Clearing screen...','Screen cleared.');$('#imageSource').onchange=prepareBrowserImage;$('#convertImage').onclick=uploadAndDisplayImage;$('#cwd').onkeydown=e=>{if(e.key==='Enter')browsePath()};$('#goFiles').onclick=browsePath;$('#up').onclick=()=>{cwd=parent(cwd);loadFiles()};$('#refreshFiles').onclick=loadFiles;$('#upload').onclick=uploadFiles;$('#newFolder').onclick=makeDir;$('#newFile').onclick=makeFile;setInterval(()=>{if(activeTab==='cards')pollLastCard()},2500);
+$('#playSound').onclick=()=>remote('/api/control/play',$('#soundPath').value,'Playing');$('#stopSound').onclick=()=>remoteAction('/api/control/stop','Stopping playback...','Playback stopped.');$('#showImage').onclick=()=>remote('/api/control/display',$('#imagePath').value,'Displaying');$('#clearDisplay').onclick=()=>remoteAction('/api/control/clear','Clearing screen...','Screen cleared.');$('#imageSource').onchange=prepareBrowserImage;$('#convertImage').onclick=uploadAndDisplayImage;$('#cwd').onkeydown=e=>{if(e.key==='Enter')browsePath()};$('#goFiles').onclick=browsePath;$('#up').onclick=()=>{cwd=parent(cwd);loadFiles()};$('#refreshFiles').onclick=loadFiles;$('#upload').onclick=uploadFiles;$('#newFolder').onclick=makeDir;$('#newFile').onclick=makeFile;$('#refreshCard').onclick=()=>Promise.all([loadCards(),pollLastCard(true)]);$('#cardUrl').oninput=()=>{cardUrlDirty=true};$('#writeCard').onclick=writeCard;$('#trackFolder').onchange=prepareTrackFolder;$('#uploadTrackFolder').onclick=uploadTrackFolder;$('#refreshTracks').onclick=loadTracks;setInterval(()=>{if(activeTab==='cards'&&!$('#cardUrl').value.trim())pollLastCard(false)},2500);
 </script>
 </body>
 </html>

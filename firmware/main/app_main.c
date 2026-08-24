@@ -29,8 +29,8 @@
 #include "requested_factory_asset_rgba.h"
 static const char *TAG = "main";
 
-/* The NDEF URL written to the "magic" admin card. */
-#define MAGIC_URL "https://openyoto.local/admin"
+/* URL provisioned to an empty Type-2 card for the local admin endpoint. */
+#define MAGIC_URL "https://openyoto.com/admin"
 
 /* Number of encoder detents per volume step. */
 #define VOLUME_DELTA_PER_DETENT 5
@@ -62,14 +62,6 @@ static int s_volume = 70;
 #define PLAYER_COLOR_IMAGE_64_FILE_SIZE \
     (PLAYER_COLOR_IMAGE_HEADER_SIZE + PLAYER_COLOR_IMAGE_64_DATA_SIZE)
 
-/* "Not found" indicator — an X, shown when a scanned card has no content. */
-
-static const uint8_t NOT_FOUND_ART[32] = {
-    0x80, 0x01, 0x40, 0x02, 0x20, 0x04, 0x10, 0x08,
-    0x08, 0x10, 0x04, 0x20, 0x02, 0x40, 0x01, 0x80,
-    0x01, 0x80, 0x02, 0x40, 0x04, 0x20, 0x08, 0x10,
-    0x10, 0x08, 0x20, 0x04, 0x40, 0x02, 0x80, 0x01,
-};
 
 /* ------------------------------------------------------------ display --- */
 /*
@@ -103,7 +95,7 @@ static void show_admin_code(
 /* Playback/power state, guarded by s_state_mutex (shared by the encoder task
  * and the main loop). */
 static bool s_powered_off = false;
-static char s_current_url[128];
+static char s_current_url[CR95HF_URL_MAX + 1];
 static int s_track_index = 0;
 static int s_track_count = 0;
 static SemaphoreHandle_t s_state_mutex;
@@ -486,6 +478,13 @@ static esp_err_t remote_clear_display(void)
     return ESP_OK;
 }
 
+static esp_err_t remote_write_card(const char *url,
+                                   const uint8_t *expected_uid,
+                                   uint8_t uid_len)
+{
+    return cr95hf_write_url(url, expected_uid, uid_len);
+}
+
 /*
  * Draw a battery level bar (fill proportional to soc) and, when charging, a
  * lightning bolt above it. Used at boot and on each battery-check period.
@@ -574,6 +573,69 @@ static void battery_periodic_check(void)
 #else
         display_show_rgba(STOCK_LOW_BATTERY_RGBA);
 #endif
+    }
+}
+
+static const char *card_state_name(cr95hf_card_state_t state)
+{
+    switch (state)
+    {
+        case CR95HF_CARD_BLANK:
+            return "blank";
+        case CR95HF_CARD_URI:
+            return "uri";
+        case CR95HF_CARD_NON_URI:
+            return "non-uri";
+        case CR95HF_CARD_LOCKED:
+            return "locked";
+        case CR95HF_CARD_UNREADABLE:
+        default:
+            return "unreadable";
+    }
+}
+
+/* Emit one bounded, human-readable card dump only on an insertion edge. */
+static void log_card_diagnostics(const uint8_t *uid, uint8_t uid_len,
+                                 const char *url,
+                                 const cr95hf_card_info_t *info)
+{
+    char uid_hex[3 * CR95HF_UID_MAX + 1];
+    size_t uid_off = 0;
+    size_t off;
+
+    for (size_t i = 0; i < uid_len && uid_off + 3 < sizeof(uid_hex); i++)
+    {
+        uid_off += (size_t)snprintf(&uid_hex[uid_off],
+                                    sizeof(uid_hex) - uid_off, "%02x ", uid[i]);
+    }
+    uid_hex[uid_off] = '\0';
+    ESP_LOGI(TAG,
+             "card: uid=%s sak=%02x state=%s cc=%02x %02x %02x %02x locks=%02x %02x capacity=%u writable=%s url=%s",
+             uid_hex, info->sak, card_state_name(info->state), info->cc[0],
+             info->cc[1], info->cc[2], info->cc[3], info->lock0, info->lock1,
+             (unsigned)info->capacity, info->writable ? "yes" : "no",
+             url[0] == '\0' ? "<none>" : url);
+
+    for (off = 0; off < info->raw_ndef_len; off += 16)
+    {
+        char bytes[3 * 16 + 1];
+        size_t line_len = info->raw_ndef_len - off;
+        size_t byte_off = 0;
+
+        if (line_len > 16)
+        {
+            line_len = 16;
+        }
+        for (size_t i = 0; i < line_len; i++)
+        {
+            byte_off += (size_t)snprintf(&bytes[byte_off],
+                                         sizeof(bytes) - byte_off, "%02x ",
+                                         info->raw_ndef[off + i]);
+        }
+        bytes[byte_off] = '\0';
+        ESP_LOGI(TAG, "card: pages %u-%u: %s",
+                 (unsigned)(4 + off / 4),
+                 (unsigned)(4 + (off + line_len - 1) / 4), bytes);
     }
 }
 
@@ -672,6 +734,7 @@ void app_main(void)
     admin_set_code_callback(show_admin_code);
     admin_set_path_callbacks(remote_play_sound, remote_display_image,
                              remote_stop_sound, remote_clear_display);
+    admin_set_card_write_callback(remote_write_card);
     {
         char code[ADMIN_ACCESS_CODE_LEN + 1];
         esp_err_t admin_err = admin_start(code, sizeof(code));
@@ -692,10 +755,10 @@ void app_main(void)
     ESP_LOGI(TAG, "boot complete (battery %d%%, %.1f mV)",
              battery_soc(), (double)battery_voltage());
 
-    uint8_t uid[10];
-    char url[128];
+    uint8_t uid[CR95HF_UID_MAX];
+    char url[CR95HF_URL_MAX + 1];
     bool card_present = false;
-    uint8_t last_uid[10];
+    uint8_t last_uid[CR95HF_UID_MAX];
     uint8_t last_uid_len = 0;
 
     while (1)
@@ -706,9 +769,11 @@ void app_main(void)
             continue;
         }
 
-        /* Poll NFC in BOTH modes — the magic card toggles admin on and off. */
+        /* Diagnostic provisioning mode: inspect each detected Type-2 card. */
+        cr95hf_card_info_t card_info;
         uint8_t uid_len = sizeof(uid);
-        bool card = cr95hf_poll(uid, &uid_len, url, sizeof(url));
+        bool card = cr95hf_poll_card(uid, &uid_len, url, sizeof(url),
+                                     &card_info);
         /* A card is "new" on a rising edge, or when its UID changes while a
          * card is held (a swap within one poll window). */
         bool new_card = card && !card_present;
@@ -721,90 +786,38 @@ void app_main(void)
 
         if (new_card)
         {
-            ESP_LOGI(TAG, "card: UID len=%u URL=%s", uid_len, url);
+            esp_err_t write_err;
+
             memcpy(last_uid, uid, uid_len);
             last_uid_len = uid_len;
+            log_card_diagnostics(uid, uid_len, url, &card_info);
 
             state_lock();
-
-            /* A new card supersedes whatever was playing — including a fast
-             * swap, where no removal edge is observed. */
             audio_stop();
             s_track_count = 0;
             s_track_index = 0;
             s_current_url[0] = '\0';
+            state_unlock();
 
-            if (!s_powered_off)
+            if (card_info.state != CR95HF_CARD_BLANK)
             {
-                if (strcmp(url, MAGIC_URL) == 0)
+                ESP_LOGI(TAG, "card: not blank; left unchanged");
+            }
+            else
+            {
+                ESP_LOGI(TAG, "card: blank; provisioning %s", MAGIC_URL);
+                write_err = cr95hf_write_url(MAGIC_URL, uid, uid_len);
+                if (write_err == ESP_OK)
                 {
-                    if (admin_is_active())
-                    {
-                        admin_stop();
-                        display_clear();
-                        display_flush();
-                        ESP_LOGI(TAG, "admin mode off");
-                    }
-                    else
-                    {
-                        char code[ADMIN_ACCESS_CODE_LEN + 1];
-                        if (admin_start(code, sizeof(code)) == ESP_OK)
-                        {
-                            ESP_LOGI(TAG, "admin mode on, code %s", code);
-                        }
-                        else
-                        {
-                            ESP_LOGE(TAG, "admin_start failed");
-                        }
-                    }
+                    ESP_LOGI(TAG, "card: provisioned %s", MAGIC_URL);
                 }
                 else
                 {
-                    if (admin_is_active() && url[0] != '\0')
-                    {
-                        admin_set_last_card(url);
-                    }
-
-                    /* Admin mode does not suppress normal NFC playback. */
-                    /* Content playback remains active while the web UI runs. */
-                    int n = content_get_track_count(url);
-                    if (n > 0)
-                    {
-                        strncpy(s_current_url, url, sizeof(s_current_url) - 1);
-                        s_current_url[sizeof(s_current_url) - 1] = '\0';
-                        s_track_count = n;
-                        s_track_index = 0;
-
-                        char image_path[128] = { 0 };
-                        content_get_track_image(url, 0, image_path,
-                                                sizeof(image_path));
-
-                        char sound_path[128] = { 0 };
-                        if (content_get_track(url, 0, sound_path,
-                                              sizeof(sound_path)) == ESP_OK)
-                        {
-                            ESP_LOGI(TAG, "playing track 1/%d: %s", n, sound_path);
-                            if (image_path[0] != '\0')
-                            {
-                                render_image(image_path);
-                            }
-                            else
-                            {
-                                display_clear();
-                                display_flush();
-                            }
-                            audio_play(sound_path);
-                        }
-                    }
-                    else
-                    {
-                        ESP_LOGW(TAG, "no content for URL %s", url);
-                        draw_bitmap(NOT_FOUND_ART);
-                    }
+                    ESP_LOGE(TAG, "card: provisioning failed: %s",
+                             esp_err_to_name(write_err));
                 }
             }
 
-            state_unlock();
         }
         else if (!card && card_present)
         {

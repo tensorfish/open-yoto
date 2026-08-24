@@ -1,14 +1,14 @@
 /*
  * cr95hf.c — ST CR95HF NFC transceiver driver (UART transport).
  *
- * The CR95HF UART host interface uses a control byte before normal commands:
- *   host -> CR95HF : [0x00][command][length][data...]
+ * The CR95HF UART host interface sends commands directly:
+ *   host -> CR95HF : [command][length][data...]
  *   CR95HF -> host : [result code][length][data...]
- * Echo is the special two-byte frame [0x00][0x55] and returns 0x55.
+ * Echo is the special single-byte command 0x55 and returns 0x55.
  *
  * The final byte of every SendRecv payload is a transmit-flag byte: 0x07
- * emits a 7-bit short frame (REQA/WUPA), 0x08 adds odd parity (anticollision),
- * and 0x28 adds parity + CRC-A (select / read / write).
+ * emits a 7-bit short frame, 0x08 emits a whole-byte frame without CRC-A,
+ * and 0x28 emits a whole-byte frame with CRC-A.
  */
 #include "cr95hf.h"
 #include "board_pins.h"
@@ -16,9 +16,11 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "cr95hf";
@@ -26,13 +28,14 @@ static const char *TAG = "cr95hf";
 /* ---------------------------------------------------------------- CR95HF
  * Host-interface command codes and result codes (DS10311 / AN3954).
  */
-#define CR95HF_CONTROL_COMMAND      0x00
 #define CR95HF_CMD_IDN              0x01
 #define CR95HF_CMD_PROTOCOL_SELECT  0x02
 #define CR95HF_CMD_SENDRECV         0x04
+#define CR95HF_CMD_WRREG            0x09
 #define CR95HF_CMD_ECHO             0x55
 
 #define CR95HF_CODE_SUCCESS         0x00   /* command executed successfully  */
+#define CR95HF_CODE_DATA_NIBBLE     0x90   /* non-byte-aligned tag response */
 #define CR95HF_CODE_DATA            0x80   /* SendRecv: tag data returned   */
 #define CR95HF_CODE_TIMEOUT         0x87   /* SendRecv: no tag in the field */
 
@@ -40,13 +43,14 @@ static const char *TAG = "cr95hf";
 
 /* SendRecv transmit flags (appended as the final payload byte). */
 #define CR95HF_TX_SHORT_FRAME       0x07   /* 7-bit REQA/WUPA, no CRC        */
-#define CR95HF_TX_PARITY            0x08   /* odd parity, no CRC (anticol)   */
-#define CR95HF_TX_CRC               0x28   /* parity + CRC-A (select/read/   */
-                                           /*  write)                         */
+#define CR95HF_TX_NO_CRC           0x08   /* 8-bit frame, no CRC (anticol) */
+#define CR95HF_TX_CRC              0x28   /* 8-bit frame + CRC-A (select/  */
+                                           /*  read/write)                   */
 
 /* ----------------------------------------------------------------- ISO14443
  * ISO14443-3A activation bytes and Type 2 tag memory commands.
  */
+#define ISO14443A_WUPA              0x52
 #define ISO14443A_REQA              0x26
 #define ISO14443A_SEL_CL1           0x93
 #define ISO14443A_SEL_CL2           0x95
@@ -57,6 +61,7 @@ static const char *TAG = "cr95hf";
 
 #define NFC_CMD_READ                0x30
 #define NFC_CMD_WRITE               0xA2
+#define NFC_CMD_GET_VERSION         0x60
 
 /* ------------------------------------------------------------- NDEF / TLV
  * Type 2 tag NDEF TLV tags and the short well-known URI record layout.
@@ -66,13 +71,17 @@ static const char *TAG = "cr95hf";
 #define NFC_TLV_TERMINATOR          0xFE
 #define NDEF_URI_TYPE               0x55   /* 'U' well-known type */
 
+#define NFC_FORUM_CC_MAGIC          0xE1
+#define NFC_FORUM_CC_VERSION_1      0x10
+#define NFC_FORUM_CC_PAGE           3
+#define CR95HF_MF0UL11_CAPACITY     48
 #define CR95HF_USER_PAGE            4      /* first user-data page (after CC) */
 #define CR95HF_RX_BUF_SIZE          256
+#define CR95HF_STATIC_LOCK0_PAGE4   0x10
+#define CR95HF_STATIC_LOCK_OTP      0x08
 #define CR95HF_NDEF_BUF_SIZE        256
-#define CR95HF_UID_MAX              10
-#define CR95HF_URL_MAX              200
 #define CR95HF_TIMEOUT_MS           200
-#define CR95HF_ECHO_ATTEMPTS        530
+#define CR95HF_ECHO_ATTEMPTS        255
 #define CR95HF_ECHO_TIMEOUT_MS      2
 #define CR95HF_UART_RX_BUF_SIZE     2048
 
@@ -139,6 +148,7 @@ static const uri_prefix_map_t URI_PREFIX_MAP[] =
 
 /* Serializes access to the UART: one command/response transaction at a time. */
 static SemaphoreHandle_t s_uart_mutex = NULL;
+static bool s_ready = false;
 
 /** Look up the URI prefix string for an RTD-URI identifier code. */
 static const char *cr95hf_uri_prefix(uint8_t code)
@@ -168,6 +178,24 @@ static esp_err_t cr95hf_read_exact(uint8_t *buf, size_t len, uint32_t timeout_ms
     return ESP_OK;
 }
 
+/** Format raw bytes as two-digit hex into @p dst (truncated at 64 bytes). */
+static void cr95hf_format_hex(char *dst, size_t dst_cap, const uint8_t *buf,
+                              size_t len)
+{
+    size_t off = 0;
+    size_t i;
+
+    if (len > 64)
+    {
+        len = 64;
+    }
+    for (i = 0; i < len && off + 3 < dst_cap; i++)
+    {
+        off += (size_t)snprintf(&dst[off], dst_cap - off, "%02x ", buf[i]);
+    }
+    dst[off] = '\0';
+}
+
 /**
  * Send one CR95HF command frame and read the response frame.
  *
@@ -181,31 +209,35 @@ static esp_err_t cr95hf_read_exact(uint8_t *buf, size_t len, uint32_t timeout_ms
  */
 static esp_err_t cr95hf_transact(uint8_t cmd, const uint8_t *data,
                                  uint8_t data_len, uint8_t *code,
-                                 uint8_t *rsp, uint8_t *rsp_len,
-                                 uint32_t timeout_ms)
+                                 uint8_t *rsp, uint8_t rsp_cap,
+                                 uint8_t *rsp_len, uint32_t timeout_ms)
 {
     uint8_t frame[CR95HF_RX_BUF_SIZE];
     uint8_t len = 0;
     esp_err_t err;
     int written;
 
-    if ((size_t)data_len + 3 > sizeof(frame))
+    if (code == NULL || (data_len > 0 && data == NULL)
+        || (size_t)data_len + 2 > sizeof(frame))
     {
-        return ESP_ERR_INVALID_SIZE;
+        return ESP_ERR_INVALID_ARG;
+    }
+    *code = 0xFF;
+    if (rsp_len != NULL)
+    {
+        *rsp_len = 0;
     }
 
-    frame[0] = CR95HF_CONTROL_COMMAND;
-    frame[1] = cmd;
-    frame[2] = data_len;
+    frame[0] = cmd;
+    frame[1] = data_len;
     if (data_len > 0)
     {
-        memcpy(&frame[3], data, data_len);
+        memcpy(&frame[2], data, data_len);
     }
 
     uart_flush_input(NFC_UART_PORT);
-
-    written = uart_write_bytes(NFC_UART_PORT, frame, (size_t)data_len + 3);
-    if (written != (int)data_len + 3)
+    written = uart_write_bytes(NFC_UART_PORT, frame, (size_t)data_len + 2);
+    if (written != (int)data_len + 2)
     {
         return ESP_FAIL;
     }
@@ -222,18 +254,26 @@ static esp_err_t cr95hf_transact(uint8_t cmd, const uint8_t *data,
         return err;
     }
 
-    if (len > 0)
+    if (len == 0)
     {
-        if (rsp == NULL)
+        if (rsp_len != NULL)
         {
-            return ESP_ERR_INVALID_ARG;
+            *rsp_len = 0;
         }
-        err = cr95hf_read_exact(rsp, len, timeout_ms);
-        if (err != ESP_OK)
-        {
-            return err;
-        }
+        return ESP_OK;
     }
+
+
+    err = cr95hf_read_exact(frame, len, timeout_ms);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    if (rsp == NULL || len > rsp_cap)
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memcpy(rsp, frame, len);
 
     if (rsp_len != NULL)
     {
@@ -241,24 +281,43 @@ static esp_err_t cr95hf_transact(uint8_t cmd, const uint8_t *data,
     }
     return ESP_OK;
 }
-/** Synchronize the UART transport using the CR95HF's special Echo frame. */
+/**
+ * Synchronize the UART transport using the CR95HF's special Echo frame.
+ *
+ * A non-Echo reply means the two ends were out of framing; discard that
+ * response before trying Echo again. Keep below the part's 528-Echo FIFO
+ * recovery limit.
+ */
 static esp_err_t cr95hf_echo_sync(void)
 {
-    const uint8_t frame[2] = { CR95HF_CONTROL_COMMAND, CR95HF_CMD_ECHO };
+    const uint8_t command = CR95HF_CMD_ECHO;
     uint8_t response;
 
     uart_flush_input(NFC_UART_PORT);
     for (int attempt = 0; attempt < CR95HF_ECHO_ATTEMPTS; attempt++)
     {
-        if (uart_write_bytes(NFC_UART_PORT, frame, sizeof(frame))
-            == sizeof(frame)
-            && uart_read_bytes(NFC_UART_PORT, &response, 1,
-                               pdMS_TO_TICKS(CR95HF_ECHO_TIMEOUT_MS)) == 1
-            && response == CR95HF_CMD_ECHO)
+        int received;
+
+        if (uart_write_bytes(NFC_UART_PORT, &command, 1) != 1)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+        received = uart_read_bytes(NFC_UART_PORT, &response, 1,
+                                   pdMS_TO_TICKS(CR95HF_ECHO_TIMEOUT_MS));
+        if (received == 1 && response == CR95HF_CMD_ECHO)
         {
             ESP_LOGI(TAG, "CR95HF synchronized after %d echo attempt(s)",
                      attempt + 1);
             return ESP_OK;
+        }
+        if (received == 1)
+        {
+            /* Drain the mismatched CR95HF reply through an RX idle period. */
+            while (uart_read_bytes(NFC_UART_PORT, &response, 1,
+                                   pdMS_TO_TICKS(CR95HF_ECHO_TIMEOUT_MS)) > 0)
+            {
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -270,7 +329,8 @@ static esp_err_t cr95hf_echo_sync(void)
 /** SendRecv: exchange raw RF bytes with the tag using the given TX flags. */
 static esp_err_t cr95hf_send_recv(const uint8_t *rf, uint8_t rf_len,
                                   uint8_t flags, uint8_t *code,
-                                  uint8_t *rsp, uint8_t *rsp_len)
+                                  uint8_t *rsp, uint8_t rsp_cap,
+                                  uint8_t *rsp_len)
 {
     uint8_t data[CR95HF_RX_BUF_SIZE];
 
@@ -283,91 +343,257 @@ static esp_err_t cr95hf_send_recv(const uint8_t *rf, uint8_t rf_len,
     data[rf_len] = flags;
 
     return cr95hf_transact(CR95HF_CMD_SENDRECV, data, (uint8_t)(rf_len + 1),
-                           code, rsp, rsp_len, CR95HF_TIMEOUT_MS);
+                           code, rsp, rsp_cap, rsp_len, CR95HF_TIMEOUT_MS);
 }
+
+/**
+ * Validate a complete normal-framing ISO14443-A response. The CR95HF appends
+ * two received CRC-A bytes when CRC reception is enabled, then three status
+ * bytes. A no-CRC exchange reports the expected CRC-missing bit in status.
+ */
+static bool cr95hf_type_a_response(const char *operation, uint8_t code,
+                                   const uint8_t *rsp, uint8_t rsp_len,
+                                   size_t data_len, bool with_crc)
+{
+    size_t status_offset = data_len + (with_crc ? 2 : 0);
+    size_t expected_len = status_offset + 3;
+    uint8_t expected_status = with_crc ? 0x08 : 0x28;
+
+    if (code != CR95HF_CODE_DATA || rsp_len != expected_len
+        || rsp[status_offset] != expected_status
+        || rsp[status_offset + 1] != 0
+        || rsp[status_offset + 2] != 0)
+    {
+        char raw[3 * 64 + 1];
+        cr95hf_format_hex(raw, sizeof(raw), rsp, rsp_len);
+        ESP_LOGW(TAG,
+                 "%s invalid response: code=0x%02x len=%u raw=%s",
+                 operation, code, (unsigned)rsp_len, raw);
+        return false;
+    }
+    return true;
+}
+
+/** Select an RF protocol with the given parameters. */
+static esp_err_t cr95hf_protocol_select(const uint8_t *params, uint8_t len)
+{
+    uint8_t code = 0xFF;
+    uint8_t rsp[8];
+    uint8_t rsp_len = 0;
+    esp_err_t err;
+
+    err = cr95hf_transact(CR95HF_CMD_PROTOCOL_SELECT, params, len, &code,
+                          rsp, sizeof(rsp), &rsp_len, CR95HF_TIMEOUT_MS);
+    if (err != ESP_OK || code != CR95HF_CODE_SUCCESS || rsp_len != 0)
+    {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
+}
+
+/**
+ * Select ISO14443A with an extended frame-wait time. The default FDT (~90 µs)
+ * is shorter than the MIFARE Ultralight WRITE time (~4.5 ms), so the WRITE
+ * ACK is lost and the exchange times out; the longer FDT keeps the field on.
+ */
+static esp_err_t cr95hf_select_iso14443a(void)
+{
+    static const uint8_t params[4] = { 0x02, 0x00, 0x01, 0xA0 };
+    return cr95hf_protocol_select(params, sizeof(params));
+}
+
+/**
+ * Turn the RF field off between tag hunts. A tag left in the ACTIVE state is
+ * power-cycled back to IDLE, so the next activation starts from a clean state.
+ */
+static void cr95hf_field_off(void)
+{
+    static const uint8_t off[2] = { 0x00, 0x00 };
+    cr95hf_protocol_select(off, sizeof(off));
+}
+
+/** Apply the factory-tuned RF timing and max receiver gain for the Yoto antenna. */
+static bool cr95hf_configure_rf(void)
+{
+    static const uint8_t timer_w[] = { 0x3A, 0x00, 0x58, 0x04 };
+    static const uint8_t modulation_gain[] = { 0x68, 0x01, 0x01, 0xD0 };
+    uint8_t code = 0xFF;
+    uint8_t rsp[4];
+    uint8_t rsp_len;
+    esp_err_t err;
+
+    err = cr95hf_transact(CR95HF_CMD_WRREG, timer_w, sizeof(timer_w),
+                          &code, rsp, sizeof(rsp), &rsp_len,
+                          CR95HF_TIMEOUT_MS);
+    if (err != ESP_OK || code != CR95HF_CODE_SUCCESS)
+    {
+        ESP_LOGW(TAG, "CR95HF TimerW configuration failed: err=%s code=0x%02x",
+                 esp_err_to_name(err), code);
+        return false;
+    }
+
+    err = cr95hf_transact(CR95HF_CMD_WRREG, modulation_gain,
+                          sizeof(modulation_gain), &code, rsp, sizeof(rsp),
+                          &rsp_len, CR95HF_TIMEOUT_MS);
+    if (err != ESP_OK || code != CR95HF_CODE_SUCCESS)
+    {
+        ESP_LOGW(TAG,
+                 "CR95HF modulation/gain configuration failed: err=%s code=0x%02x",
+                 esp_err_to_name(err), code);
+        return false;
+    }
+    return true;
+}
+
 
 /**
  * Activate a Type A tag and return its UID (4 or 7 bytes). Runs REQA,
  * anticollision and select (cascade levels 1 and 2). Returns false when no
  * tag is in the field.
  */
-static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len)
+static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
 {
     uint8_t reqa = ISO14443A_REQA;
+    uint8_t wupa = ISO14443A_WUPA;
     uint8_t anticol1[2] = { ISO14443A_SEL_CL1, ISO14443A_NVB_ANTICOLL };
     uint8_t anticol2[2] = { ISO14443A_SEL_CL2, ISO14443A_NVB_ANTICOLL };
     uint8_t select1[7];
     uint8_t select2[7];
     uint8_t cl1[5];
     uint8_t cl2[5];
-    uint8_t code;
-    uint8_t rsp[16];
-    uint8_t rsp_len;
+    uint8_t code = 0xFF;
+    uint8_t rsp[24];
+    uint8_t rsp_len = 0;
     esp_err_t err;
+    bool request_ok;
 
-    err = cr95hf_send_recv(&reqa, 1, CR95HF_TX_SHORT_FRAME, &code, rsp, &rsp_len);
-    if (err != ESP_OK)
+    if (cr95hf_select_iso14443a() != ESP_OK)
+    {
+        ESP_LOGW(TAG, "ProtocolSelect (ISO14443A) failed before activation");
+        return false;
+    }
+    if (!cr95hf_configure_rf())
     {
         return false;
     }
-    if (code == CR95HF_CODE_TIMEOUT)
+
+    err = cr95hf_send_recv(&reqa, 1, CR95HF_TX_SHORT_FRAME, &code, rsp,
+                           sizeof(rsp), &rsp_len);
+    request_ok = err == ESP_OK && code == CR95HF_CODE_DATA
+              && cr95hf_type_a_response("REQA", code, rsp, rsp_len, 2, false);
+    if (!request_ok)
     {
-        return false;               /* no tag in the RF field */
-    }
-    if (code != CR95HF_CODE_DATA || rsp_len < 2)
-    {
-        return false;               /* no valid ATQA */
+        /*
+         * REQA addresses IDLE tags only. WUPA also recovers a tag left in
+         * HALT by an earlier transaction.
+         */
+        err = cr95hf_send_recv(&wupa, 1, CR95HF_TX_SHORT_FRAME, &code, rsp,
+                               sizeof(rsp), &rsp_len);
+        request_ok = err == ESP_OK && code == CR95HF_CODE_DATA
+                  && cr95hf_type_a_response("WUPA", code, rsp, rsp_len, 2,
+                                            false);
+        if (!request_ok)
+        {
+            ESP_LOGW(TAG,
+                     "Type A activation failed: REQA/WUPA transport=%s code=0x%02x len=%u",
+                     esp_err_to_name(err), code, (unsigned)rsp_len);
+            return false;
+        }
     }
 
-    err = cr95hf_send_recv(anticol1, 2, CR95HF_TX_PARITY, &code, rsp, &rsp_len);
-    if (err != ESP_OK || code != CR95HF_CODE_DATA || rsp_len < 5)
+    err = cr95hf_send_recv(anticol1, 2, CR95HF_TX_NO_CRC, &code, rsp,
+                           sizeof(rsp), &rsp_len);
+    if (err != ESP_OK
+        || !cr95hf_type_a_response("anticollision L1", code, rsp, rsp_len,
+                                   5, false))
     {
+        ESP_LOGW(TAG,
+                 "anticollision L1 failed: transport=%s code=0x%02x len=%u",
+                 esp_err_to_name(err), code, (unsigned)rsp_len);
         return false;
     }
     memcpy(cl1, rsp, 5);
+    if ((uint8_t)(cl1[0] ^ cl1[1] ^ cl1[2] ^ cl1[3]) != cl1[4])
+    {
+        ESP_LOGW(TAG, "anticollision L1 BCC mismatch");
+        return false;
+    }
 
     select1[0] = ISO14443A_SEL_CL1;
     select1[1] = ISO14443A_NVB_SELECT;
     memcpy(&select1[2], cl1, 5);
-    err = cr95hf_send_recv(select1, 7, CR95HF_TX_CRC, &code, rsp, &rsp_len);
-    if (err != ESP_OK || code != CR95HF_CODE_DATA || rsp_len < 1)
+    err = cr95hf_send_recv(select1, 7, CR95HF_TX_CRC, &code, rsp,
+                           sizeof(rsp), &rsp_len);
+    if (err != ESP_OK
+        || !cr95hf_type_a_response("select L1", code, rsp, rsp_len, 1, true))
     {
-        return false;               /* rsp[0] is the SAK */
+        ESP_LOGW(TAG, "select L1 failed: transport=%s code=0x%02x len=%u",
+                 esp_err_to_name(err), code, (unsigned)rsp_len);
+        return false;
     }
 
     if (cl1[0] != ISO14443A_CT)
     {
-        if (*uid_len < 4)
+        if ((rsp[0] & 0x04) != 0 || *uid_len < 4)
         {
             return false;
         }
-        memcpy(uid, cl1, 4);        /* 4-byte UID (single cascade level) */
+        if (sak != NULL)
+        {
+            *sak = rsp[0];
+        }
+        memcpy(uid, cl1, 4);
         *uid_len = 4;
         return true;
     }
+    if ((rsp[0] & 0x04) == 0)
+    {
+        ESP_LOGW(TAG, "select L1 did not advertise UID cascade");
+        return false;
+    }
 
     /* Cascade tag 0x88: a 7-byte UID — run cascade level 2. */
-    err = cr95hf_send_recv(anticol2, 2, CR95HF_TX_PARITY, &code, rsp, &rsp_len);
-    if (err != ESP_OK || code != CR95HF_CODE_DATA || rsp_len < 5)
+    err = cr95hf_send_recv(anticol2, 2, CR95HF_TX_NO_CRC, &code, rsp,
+                           sizeof(rsp), &rsp_len);
+    if (err != ESP_OK
+        || !cr95hf_type_a_response("anticollision L2", code, rsp, rsp_len,
+                                   5, false))
     {
+        ESP_LOGW(TAG,
+                 "anticollision L2 failed: transport=%s code=0x%02x len=%u",
+                 esp_err_to_name(err), code, (unsigned)rsp_len);
         return false;
     }
     memcpy(cl2, rsp, 5);
+    if ((uint8_t)(cl2[0] ^ cl2[1] ^ cl2[2] ^ cl2[3]) != cl2[4])
+    {
+        ESP_LOGW(TAG, "anticollision L2 BCC mismatch");
+        return false;
+    }
 
     select2[0] = ISO14443A_SEL_CL2;
     select2[1] = ISO14443A_NVB_SELECT;
     memcpy(&select2[2], cl2, 5);
-    err = cr95hf_send_recv(select2, 7, CR95HF_TX_CRC, &code, rsp, &rsp_len);
-    if (err != ESP_OK || code != CR95HF_CODE_DATA || rsp_len < 1)
+    err = cr95hf_send_recv(select2, 7, CR95HF_TX_CRC, &code, rsp,
+                           sizeof(rsp), &rsp_len);
+    if (err != ESP_OK
+        || !cr95hf_type_a_response("select L2", code, rsp, rsp_len, 1, true))
     {
+        ESP_LOGW(TAG, "select L2 failed: transport=%s code=0x%02x len=%u",
+                 esp_err_to_name(err), code, (unsigned)rsp_len);
         return false;
+    }
+    if ((rsp[0] & 0x04) != 0 || cl2[0] == ISO14443A_CT || *uid_len < 7)
+    {
+        ESP_LOGW(TAG, "unsupported UID cascade after level 2");
+        return false;
+    }
+    if (sak != NULL)
+    {
+        *sak = rsp[0];
     }
 
-    if (*uid_len < 7)
-    {
-        return false;
-    }
-    uid[0] = cl1[1];                /* first 3 UID bytes follow the 0x88 tag */
+    uid[0] = cl1[1];
     uid[1] = cl1[2];
     uid[2] = cl1[3];
     memcpy(&uid[3], cl2, 4);
@@ -379,177 +605,369 @@ static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len)
 static esp_err_t cr95hf_read_pages(uint8_t page, uint8_t *out16)
 {
     uint8_t rf[2] = { NFC_CMD_READ, page };
-    uint8_t code;
-    uint8_t rsp[16];
-    uint8_t rsp_len;
+    uint8_t code = 0xFF;
+    uint8_t rsp[24];
+    uint8_t rsp_len = 0;
     esp_err_t err;
 
-    err = cr95hf_send_recv(rf, 2, CR95HF_TX_CRC, &code, rsp, &rsp_len);
+    err = cr95hf_send_recv(rf, 2, CR95HF_TX_CRC, &code, rsp, sizeof(rsp),
+                           &rsp_len);
     if (err != ESP_OK)
     {
+        ESP_LOGW(TAG, "Type 2 READ page %u transport failed: %s",
+                 (unsigned)page, esp_err_to_name(err));
         return err;
     }
-    if (code != CR95HF_CODE_DATA || rsp_len < 16)
+    if (!cr95hf_type_a_response("Type 2 READ", code, rsp, rsp_len, 16, true))
     {
+        ESP_LOGW(TAG,
+                 "Type 2 READ page %u rejected: code=0x%02x len=%u"
+                 " rsp=%02x %02x",
+                 (unsigned)page, code, (unsigned)rsp_len,
+                 rsp_len > 0 ? rsp[0] : 0, rsp_len > 1 ? rsp[1] : 0);
         return ESP_FAIL;
     }
-
     memcpy(out16, rsp, 16);
     return ESP_OK;
 }
 
-/**
- * Decode a short well-known URI record ("D1 01 <plen> 55 <prefix> <uri>")
- * into @p url, reconstructing the full URL from the prefix code.
- */
-static bool cr95hf_decode_uri(const uint8_t *rec, size_t rec_len,
-                              char *url, size_t url_cap)
+/** Read MIFARE Ultralight static lock bytes from page 2 bytes 2 and 3. */
+static esp_err_t cr95hf_read_static_locks(uint8_t *lock0, uint8_t *lock1)
 {
-    uint8_t header;
-    uint8_t tnf;
-    bool short_record;
-    uint8_t type_len;
-    uint8_t payload_len;
-    uint8_t prefix;
-    const char *prefix_str;
-    size_t prefix_len;
-    size_t uri_len;
-    size_t cap;
-    size_t copy_prefix;
-    size_t copy_uri;
+    uint8_t pages[16];
+    esp_err_t err = cr95hf_read_pages(0, pages);
 
-    if (rec_len < 4)
+    if (err != ESP_OK)
     {
-        return false;
+        return err;
     }
-
-    header = rec[0];
-    tnf = header & 0x07;
-    short_record = (header & 0x10) != 0;
-
-    if (tnf != 0x01 || !short_record)
-    {
-        return false;               /* not a short well-known record */
-    }
-
-    type_len = rec[1];
-    payload_len = rec[2];
-
-    if (type_len != 1 || rec[3] != NDEF_URI_TYPE)
-    {
-        return false;               /* not a URI record */
-    }
-    if ((size_t)3 + type_len + payload_len > rec_len)
-    {
-        return false;
-    }
-    if (payload_len < 1)
-    {
-        return false;               /* payload must hold a URI prefix code */
-    }
-
-    prefix = rec[4];
-    prefix_str = cr95hf_uri_prefix(prefix);
-    prefix_len = strlen(prefix_str);
-    uri_len = (size_t)payload_len - 1;   /* payload = prefix code + URI bytes */
-
-    if (url == NULL || url_cap == 0)
-    {
-        return true;                /* caller only needs a URL-present signal */
-    }
-
-    cap = url_cap - 1;
-    copy_prefix = (prefix_len < cap) ? prefix_len : cap;
-    copy_uri = (cap > copy_prefix) ? (cap - copy_prefix) : 0;
-    if (copy_uri > uri_len)
-    {
-        copy_uri = uri_len;
-    }
-
-    if (copy_prefix > 0)
-    {
-        memcpy(url, prefix_str, copy_prefix);
-    }
-    if (copy_uri > 0)
-    {
-        memcpy(url + copy_prefix, &rec[5], copy_uri);
-    }
-    url[copy_prefix + copy_uri] = '\0';
-
-    return true;
+    *lock0 = pages[10];
+    *lock1 = pages[11];
+    return ESP_OK;
 }
 
-/** Walk the Type 2 tag TLV structure and decode the first NDEF URI record. */
-static bool cr95hf_parse_ndef(const uint8_t *buf, size_t len,
+/** Return true when a static lock bit makes a first-16-memory page read-only. */
+static bool cr95hf_page_is_locked(uint8_t page, uint8_t lock0, uint8_t lock1)
+{
+    if (page >= 4 && page <= 7)
+    {
+        return (lock0 & (uint8_t)(CR95HF_STATIC_LOCK0_PAGE4 << (page - 4))) != 0;
+    }
+    if (page >= 8 && page <= 15)
+    {
+        return (lock1 & (uint8_t)(1U << (page - 8))) != 0;
+    }
+    return false;
+}
+
+/**
+ * Walk an NDEF message and decode the first well-known URI record. Supports
+ * short and normal records, optional IDs, and messages where another record
+ * precedes the URI.
+ */
+static bool cr95hf_decode_uri(const uint8_t *message, size_t message_len,
                               char *url, size_t url_cap)
+{
+    size_t offset = 0;
+
+    while (offset < message_len)
+    {
+        uint8_t header = message[offset++];
+        uint8_t tnf = header & 0x07;
+        bool short_record = (header & 0x10) != 0;
+        bool has_id = (header & 0x08) != 0;
+        bool message_end = (header & 0x40) != 0;
+        uint8_t type_len;
+        uint8_t id_len = 0;
+        uint32_t payload_len;
+        const uint8_t *type;
+        const uint8_t *payload;
+
+        if ((header & 0x20) != 0 || offset >= message_len)
+        {
+            return false; /* chunked records are not supported */
+        }
+        type_len = message[offset++];
+        if (short_record)
+        {
+            if (offset >= message_len)
+            {
+                return false;
+            }
+            payload_len = message[offset++];
+        }
+        else
+        {
+            if (message_len - offset < 4)
+            {
+                return false;
+            }
+            payload_len = ((uint32_t)message[offset] << 24)
+                        | ((uint32_t)message[offset + 1] << 16)
+                        | ((uint32_t)message[offset + 2] << 8)
+                        | message[offset + 3];
+            offset += 4;
+        }
+        if (has_id)
+        {
+            if (offset >= message_len)
+            {
+                return false;
+            }
+            id_len = message[offset++];
+        }
+        if ((uint64_t)offset + type_len + id_len + payload_len > message_len)
+        {
+            return false;
+        }
+        type = &message[offset];
+        offset += type_len + id_len;
+        payload = &message[offset];
+        offset += payload_len;
+
+        if (tnf == 0x01 && type_len == 1 && type[0] == NDEF_URI_TYPE
+            && payload_len >= 1)
+        {
+            const char *prefix = cr95hf_uri_prefix(payload[0]);
+            size_t prefix_len = strlen(prefix);
+            size_t uri_len = payload_len - 1;
+
+            if (url == NULL || url_cap == 0)
+            {
+                return true;
+            }
+            if (prefix_len + uri_len + 1 > url_cap)
+            {
+                url[0] = '\0';
+                return false;
+            }
+            memcpy(url, prefix, prefix_len);
+            memcpy(url + prefix_len, payload + 1, uri_len);
+            url[prefix_len + uri_len] = '\0';
+            return true;
+        }
+        if (message_end)
+        {
+            break;
+        }
+    }
+    return false;
+}
+
+typedef enum
+{
+    CR95HF_NDEF_NEED_MORE,
+    CR95HF_NDEF_FOUND_URI,
+    CR95HF_NDEF_EMPTY,
+    CR95HF_NDEF_DONE_NO_URI,
+    CR95HF_NDEF_MALFORMED,
+} cr95hf_ndef_scan_t;
+
+/**
+ * Scan the bytes read so far. A complete TLV is decoded immediately so a
+ * short NDEF record does not depend on later, unrelated user-memory reads.
+ */
+static cr95hf_ndef_scan_t cr95hf_scan_ndef(const uint8_t *buf, size_t len,
+                                           bool complete, char *url,
+                                           size_t url_cap)
 {
     size_t i = 0;
 
-    while (i + 2 <= len)
+    while (i < len)
     {
         uint8_t tlv = buf[i];
+        size_t header_len;
+        size_t value_len;
 
         if (tlv == NFC_TLV_NULL)
         {
-            i += 1;
+            i++;
             continue;
         }
         if (tlv == NFC_TLV_TERMINATOR)
         {
-            break;
+            return CR95HF_NDEF_EMPTY;
+        }
+        if (len - i < 2)
+        {
+            return complete ? CR95HF_NDEF_MALFORMED : CR95HF_NDEF_NEED_MORE;
+        }
+
+        if (buf[i + 1] == 0xFF)
+        {
+            if (len - i < 4)
+            {
+                return complete ? CR95HF_NDEF_MALFORMED
+                                : CR95HF_NDEF_NEED_MORE;
+            }
+            value_len = ((size_t)buf[i + 2] << 8) | buf[i + 3];
+            header_len = 4;
+        }
+        else
+        {
+            value_len = buf[i + 1];
+            header_len = 2;
+        }
+
+        if (value_len > len - i - header_len)
+        {
+            return complete ? CR95HF_NDEF_MALFORMED : CR95HF_NDEF_NEED_MORE;
         }
         if (tlv == NFC_TLV_NDEF)
         {
-            uint8_t lb = buf[i + 1];
-            size_t hdr;
-            size_t ndef_len;
-
-            if (lb == 0xFF)
+            if (value_len == 0)
             {
-                if (i + 4 > len)
-                {
-                    break;
-                }
-                ndef_len = ((size_t)buf[i + 2] << 8) | buf[i + 3];
-                hdr = 4;
+                return CR95HF_NDEF_EMPTY;
             }
-            else
-            {
-                ndef_len = lb;
-                hdr = 2;
-            }
-
-            if (i + hdr + ndef_len > len)
-            {
-                break;
-            }
-            return cr95hf_decode_uri(&buf[i + hdr], ndef_len, url, url_cap);
+            return cr95hf_decode_uri(&buf[i + header_len], value_len,
+                                     url, url_cap)
+                 ? CR95HF_NDEF_FOUND_URI : CR95HF_NDEF_DONE_NO_URI;
         }
-
-        /* Any other TLV: tag byte, length byte, then length payload bytes. */
-        i += 2 + buf[i + 1];
+        i += header_len + value_len;
     }
 
-    return false;
+    return complete ? CR95HF_NDEF_EMPTY : CR95HF_NDEF_NEED_MORE;
 }
 
-/** Read the tag user pages and decode the NDEF URI record within them. */
-static bool cr95hf_read_url(char *url, size_t url_cap)
+/**
+ * Read and validate the NFC Forum Type 2 Capability Container. Byte 2 gives
+ * the user-data area in eight-byte units; the stock firmware reads this page
+ * before walking the NDEF area instead of probing past the end of the tag.
+ */
+static bool cr95hf_read_cc(size_t *capacity, bool *writable, bool *read_ok,
+                           uint8_t cc[4])
 {
-    uint8_t buf[CR95HF_NDEF_BUF_SIZE];
-    uint8_t page;
-    size_t used = 0;
+    uint8_t pages[16];
 
-    for (page = CR95HF_USER_PAGE; used + 16 <= sizeof(buf); page = (uint8_t)(page + 4))
+    if (read_ok != NULL)
     {
-        if (cr95hf_read_pages(page, &buf[used]) != ESP_OK)
+        *read_ok = false;
+    }
+    if (cr95hf_read_pages(NFC_FORUM_CC_PAGE, pages) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "NDEF capability-container read failed");
+        return false;
+    }
+    if (read_ok != NULL)
+    {
+        *read_ok = true;
+    }
+    if (cc != NULL)
+    {
+        memcpy(cc, pages, 4);
+    }
+    if (pages[0] != NFC_FORUM_CC_MAGIC
+        || (pages[1] & 0xF0) != NFC_FORUM_CC_VERSION_1
+        || pages[2] == 0)
+    {
+        if (pages[0] != 0 || pages[1] != 0 || pages[2] != 0 || pages[3] != 0)
         {
-            break;
+            ESP_LOGW(TAG,
+                     "invalid Type 2 capability container: %02x %02x %02x %02x",
+                     pages[0], pages[1], pages[2], pages[3]);
         }
-        used += 16;
+        return false;
     }
 
-    return cr95hf_parse_ndef(buf, used, url, url_cap);
+    *capacity = (size_t)pages[2] * 8;
+    if (*capacity > CR95HF_NDEF_BUF_SIZE)
+    {
+        *capacity = CR95HF_NDEF_BUF_SIZE;
+    }
+    if (writable != NULL)
+    {
+        *writable = (pages[3] & 0x0F) == 0;
+    }
+    return true;
+}
+
+/**
+ * Read the Type-2 NDEF area, retaining enough state to distinguish an empty
+ * tag from a card that must never be overwritten automatically.
+ */
+static cr95hf_card_state_t cr95hf_read_card(char *url, size_t url_cap,
+                                            cr95hf_card_info_t *info)
+{
+    uint8_t buf[CR95HF_NDEF_BUF_SIZE];
+    uint8_t cc[4] = { 0 };
+    size_t capacity = 0;
+    size_t used = 0;
+    uint8_t page = CR95HF_USER_PAGE;
+    bool writable = false;
+    bool read_ok = false;
+    cr95hf_card_state_t state = CR95HF_CARD_UNREADABLE;
+
+    if (!cr95hf_read_cc(&capacity, &writable, &read_ok, cc))
+    {
+        if (info != NULL)
+        {
+            memcpy(info->cc, cc, sizeof(cc));
+        }
+        return read_ok && memcmp(cc, (const uint8_t[4]){ 0 }, sizeof(cc)) == 0
+             ? CR95HF_CARD_BLANK : CR95HF_CARD_UNREADABLE;
+    }
+
+    if (info != NULL)
+    {
+        memcpy(info->cc, cc, sizeof(cc));
+        info->capacity = capacity;
+        info->writable = writable;
+    }
+
+    while (used < capacity)
+    {
+        uint8_t pages[16];
+        size_t copy_len = capacity - used;
+        cr95hf_ndef_scan_t scan;
+
+        if (cr95hf_read_pages(page, pages) != ESP_OK)
+        {
+            ESP_LOGW(TAG, "NDEF user-area read failed at page %u",
+                     (unsigned)page);
+            return CR95HF_CARD_UNREADABLE;
+        }
+        if (copy_len > sizeof(pages))
+        {
+            copy_len = sizeof(pages);
+        }
+        memcpy(&buf[used], pages, copy_len);
+        if (info != NULL)
+        {
+            memcpy(&info->raw_ndef[used], pages, copy_len);
+            info->raw_ndef_len = used + copy_len;
+        }
+        used += copy_len;
+
+        if (state == CR95HF_CARD_UNREADABLE)
+        {
+            scan = cr95hf_scan_ndef(buf, used, used == capacity, url, url_cap);
+            if (scan == CR95HF_NDEF_FOUND_URI)
+            {
+                state = CR95HF_CARD_URI;
+            }
+            else if (scan == CR95HF_NDEF_EMPTY)
+            {
+                state = writable ? CR95HF_CARD_BLANK : CR95HF_CARD_NON_URI;
+            }
+            else if (scan == CR95HF_NDEF_DONE_NO_URI
+                     || scan == CR95HF_NDEF_MALFORMED)
+            {
+                state = CR95HF_CARD_NON_URI;
+            }
+            if (state != CR95HF_CARD_UNREADABLE && info == NULL)
+            {
+                return state;
+            }
+        }
+        page = (uint8_t)(page + 4);
+    }
+    return state == CR95HF_CARD_UNREADABLE ? CR95HF_CARD_NON_URI : state;
+}
+
+/** Read and decode the first URI, preserving the historical boolean API. */
+static bool cr95hf_read_url(char *url, size_t url_cap)
+{
+    return cr95hf_read_card(url, url_cap, NULL) == CR95HF_CARD_URI;
 }
 
 /**
@@ -576,8 +994,230 @@ static uint8_t cr95hf_encode_uri(const char *url, const char **remainder)
     return 0x00;                    /* no prefix match: store the full URI */
 }
 
+/** Positively identify the 48-byte MIFARE Ultralight EV1 before OTP writes. */
+static bool cr95hf_is_mf0ul11(void)
+{
+    static const uint8_t identity[] = { 0x00, 0x04, 0x03 };
+    uint8_t command = NFC_CMD_GET_VERSION;
+    uint8_t code = 0xFF;
+    uint8_t rsp[16];
+    uint8_t rsp_len = 0;
+    esp_err_t err;
+
+    err = cr95hf_send_recv(&command, 1, CR95HF_TX_CRC, &code, rsp,
+                           sizeof(rsp), &rsp_len);
+    if (err != ESP_OK
+        || !cr95hf_type_a_response("GET_VERSION", code, rsp, rsp_len, 8, true))
+    {
+        return false;
+    }
+
+    return memcmp(rsp, identity, sizeof(identity)) == 0
+        && (rsp[3] == 0x01 || rsp[3] == 0x02)
+        && rsp[4] == 0x01
+        && rsp[5] == 0x00
+        && rsp[6] == 0x0B
+        && rsp[7] == 0x03;
+}
+
+/**
+ * Write one Type 2 page and validate the CR95HF's four-bit ACK response.
+ *
+ * On a timeout, the page might still have been programmed. Verify it without
+ * changing the selected tag first; only then cycle the RF field and require
+ * the same UID before a recovery read.
+ */
+static esp_err_t cr95hf_write_page(uint8_t page, const uint8_t data[4],
+                                   const uint8_t *expected_uid,
+                                   uint8_t expected_uid_len)
+{
+    uint8_t rf[6] = {
+        NFC_CMD_WRITE, page, data[0], data[1], data[2], data[3],
+    };
+    uint8_t code = 0xFF;
+    uint8_t rsp[4];
+    uint8_t rsp_len = 0;
+    esp_err_t err;
+
+    ESP_LOGI(TAG, "Type 2 WRITE page %u: A2 %02x %02x %02x %02x",
+             (unsigned)page, data[0], data[1], data[2], data[3]);
+    err = cr95hf_send_recv(rf, sizeof(rf), CR95HF_TX_CRC, &code, rsp,
+                           sizeof(rsp), &rsp_len);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Type 2 page %u transport write failed: %s",
+                 (unsigned)page, esp_err_to_name(err));
+        return err;
+    }
+    {
+        char raw[3 * sizeof(rsp) + 1];
+
+        cr95hf_format_hex(raw, sizeof(raw), rsp, rsp_len);
+        ESP_LOGI(TAG, "Type 2 WRITE page %u response: code=0x%02x len=%u raw=%s",
+                 (unsigned)page, code, (unsigned)rsp_len, raw);
+    }
+    if (code == CR95HF_CODE_DATA_NIBBLE && rsp_len == 4
+        && rsp[0] == ISO14443A_ACK
+        && rsp[1] == 0x24 && rsp[2] == 0 && rsp[3] == 0)
+    {
+        vTaskDelay(pdMS_TO_TICKS(6));
+        return ESP_OK;
+    }
+
+    /*
+     * ST's Type-2 example receives 87 00 after A2, then proves the write
+     * using READ. Do not reactivate before that read: doing so changes the
+     * tag state before observing the command's result.
+     */
+    if (code == CR95HF_CODE_TIMEOUT && rsp_len == 0)
+    {
+        uint8_t verify[16];
+        uint8_t uid[CR95HF_UID_MAX];
+        uint8_t uid_len = sizeof(uid);
+
+        ESP_LOGI(TAG,
+                 "Type 2 WRITE page %u timed out; waiting 6 ms for EEPROM then reading selected tag",
+                 (unsigned)page);
+        vTaskDelay(pdMS_TO_TICKS(6));
+        err = cr95hf_read_pages(page, verify);
+        if (err == ESP_OK)
+        {
+            ESP_LOGI(TAG,
+                     "Type 2 WRITE page %u same-session readback: got=%02x %02x %02x %02x expected=%02x %02x %02x %02x",
+                     (unsigned)page, verify[0], verify[1], verify[2], verify[3],
+                     data[0], data[1], data[2], data[3]);
+            if (memcmp(verify, data, 4) == 0)
+            {
+                ESP_LOGI(TAG, "Type 2 page %u write verified after timeout",
+                         (unsigned)page);
+                return ESP_OK;
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG,
+                     "Type 2 WRITE page %u same-session read failed: %s",
+                     (unsigned)page, esp_err_to_name(err));
+        }
+
+        ESP_LOGI(TAG, "Type 2 WRITE page %u starting RF recovery",
+                 (unsigned)page);
+        cr95hf_field_off();
+        vTaskDelay(pdMS_TO_TICKS(5));
+        if (!cr95hf_activate(uid, &uid_len, NULL))
+        {
+            ESP_LOGE(TAG, "Type 2 WRITE page %u recovery activation failed",
+                     (unsigned)page);
+            return ESP_FAIL;
+        }
+        if (uid_len != expected_uid_len
+            || memcmp(uid, expected_uid, uid_len) != 0)
+        {
+            char actual_uid[3 * CR95HF_UID_MAX + 1];
+            char wanted_uid[3 * CR95HF_UID_MAX + 1];
+
+            cr95hf_format_hex(actual_uid, sizeof(actual_uid), uid, uid_len);
+            cr95hf_format_hex(wanted_uid, sizeof(wanted_uid), expected_uid,
+                              expected_uid_len);
+            ESP_LOGE(TAG,
+                     "Type 2 WRITE page %u recovery UID changed: got=%s expected=%s",
+                     (unsigned)page, actual_uid, wanted_uid);
+            return ESP_ERR_INVALID_STATE;
+        }
+        err = cr95hf_read_pages(page, verify);
+        if (err == ESP_OK)
+        {
+            ESP_LOGI(TAG,
+                     "Type 2 WRITE page %u recovered readback: got=%02x %02x %02x %02x expected=%02x %02x %02x %02x",
+                     (unsigned)page, verify[0], verify[1], verify[2], verify[3],
+                     data[0], data[1], data[2], data[3]);
+            if (memcmp(verify, data, 4) == 0)
+            {
+                ESP_LOGI(TAG, "Type 2 page %u write verified after RF recovery",
+                         (unsigned)page);
+                return ESP_OK;
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Type 2 WRITE page %u recovered read failed: %s",
+                     (unsigned)page, esp_err_to_name(err));
+        }
+        ESP_LOGE(TAG, "Type 2 page %u timeout and readback mismatch",
+                 (unsigned)page);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGE(TAG,
+             "Type 2 page %u write rejected: code=0x%02x len=%u rsp=%02x %02x",
+             (unsigned)page, code, (unsigned)rsp_len,
+             rsp_len > 0 ? rsp[0] : 0, rsp_len > 1 ? rsp[1] : 0);
+    return ESP_FAIL;
+}
+
+/**
+ * Format an all-zero MF0UL11 CC safely. Page 4 advertises an empty NDEF
+ * message before the irreversible OTP/CC bits make the tag discoverable.
+ */
+static esp_err_t cr95hf_format_blank_mf0ul11(const uint8_t cc[4],
+                                             uint8_t lock0, uint8_t lock1,
+                                             const uint8_t *expected_uid,
+                                             uint8_t expected_uid_len)
+{
+    static const uint8_t zero_cc[4] = { 0, 0, 0, 0 };
+    static const uint8_t empty_ndef[4] = {
+        NFC_TLV_NDEF, 0x00, NFC_TLV_TERMINATOR, 0x00,
+    };
+    static const uint8_t formatted_cc[4] = {
+        NFC_FORUM_CC_MAGIC, NFC_FORUM_CC_VERSION_1, 0x06, 0x00,
+    };
+    uint8_t verify[16];
+    esp_err_t err;
+
+    if (memcmp(cc, zero_cc, sizeof(zero_cc)) != 0)
+    {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    if ((lock0 & CR95HF_STATIC_LOCK_OTP) != 0
+        || cr95hf_page_is_locked(CR95HF_USER_PAGE, lock0, lock1))
+    {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+    if (!cr95hf_is_mf0ul11())
+    {
+        ESP_LOGE(TAG, "blank CC belongs to an unsupported Type 2 tag");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    err = cr95hf_write_page(CR95HF_USER_PAGE, empty_ndef, expected_uid,
+                            expected_uid_len);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    err = cr95hf_write_page(NFC_FORUM_CC_PAGE, formatted_cc, expected_uid,
+                            expected_uid_len);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    err = cr95hf_read_pages(NFC_FORUM_CC_PAGE, verify);
+    if (err != ESP_OK || memcmp(verify, formatted_cc, 4) != 0)
+    {
+        ESP_LOGE(TAG, "MF0UL11 capability-container verification failed");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "formatted blank MF0UL11 capability container");
+    return ESP_OK;
+}
+
+
 /** Build the NDEF URI record + TLV and write it page by page from page 4. */
-static esp_err_t cr95hf_write_ndef(const char *url)
+static esp_err_t cr95hf_write_ndef(const char *url, size_t capacity,
+                                   uint8_t lock0, uint8_t lock1,
+                                   const uint8_t *expected_uid,
+                                   uint8_t expected_uid_len)
 {
     uint8_t record[CR95HF_NDEF_BUF_SIZE];
     uint8_t tlv[CR95HF_NDEF_BUF_SIZE + 8];
@@ -627,32 +1267,56 @@ static esp_err_t cr95hf_write_ndef(const char *url)
     {
         tlv[tlv_len++] = 0x00;
     }
+    if (tlv_len > capacity)
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
 
+    /* Reject every locked destination before modifying any page. */
     for (off = 0; off < tlv_len; off += 4)
     {
-        uint8_t rf[6];
-        uint8_t code;
-        uint8_t rsp[4];
-        uint8_t rsp_len;
         uint8_t page = (uint8_t)(CR95HF_USER_PAGE + (off / 4));
 
-        rf[0] = NFC_CMD_WRITE;
-        rf[1] = page;
-        rf[2] = tlv[off + 0];
-        rf[3] = tlv[off + 1];
-        rf[4] = tlv[off + 2];
-        rf[5] = tlv[off + 3];
+        if (cr95hf_page_is_locked(page, lock0, lock1))
+        {
+            ESP_LOGE(TAG, "Type 2 page %u is statically locked",
+                     (unsigned)page);
+            return ESP_ERR_NOT_ALLOWED;
+        }
+    }
 
-        err = cr95hf_send_recv(rf, 6, CR95HF_TX_CRC, &code, rsp, &rsp_len);
+    /*
+     * Make interrupted writes read as an empty NDEF message. Publish the real
+     * length only after all continuation pages have been verified.
+     */
+    uint8_t staged_first_page[4];
+    memcpy(staged_first_page, tlv, sizeof(staged_first_page));
+    staged_first_page[1] = 0;
+    err = cr95hf_write_page(CR95HF_USER_PAGE, staged_first_page, expected_uid,
+                            expected_uid_len);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    for (off = 4; off < tlv_len; off += 4)
+    {
+        uint8_t page = (uint8_t)(CR95HF_USER_PAGE + (off / 4));
+
+        err = cr95hf_write_page(page, &tlv[off], expected_uid,
+                                expected_uid_len);
         if (err != ESP_OK)
         {
             return err;
         }
-        if (code != CR95HF_CODE_DATA || rsp_len < 1 || rsp[0] != ISO14443A_ACK)
-        {
-            return ESP_FAIL;
-        }
     }
+    err = cr95hf_write_page(CR95HF_USER_PAGE, tlv, expected_uid,
+                            expected_uid_len);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    ESP_LOGI(TAG, "NDEF write sent %u bytes across %u page(s)",
+             (unsigned)tlv_len, (unsigned)(tlv_len / 4));
 
     return ESP_OK;
 }
@@ -666,15 +1330,16 @@ esp_err_t cr95hf_init(void)
         .baud_rate  = NFC_UART_BAUD,
         .data_bits  = UART_DATA_8_BITS,
         .parity     = UART_PARITY_DISABLE,
-        .stop_bits  = UART_STOP_BITS_2,       /* CR95HF requires 8-N-2 */
+        .stop_bits  = UART_STOP_BITS_2,
         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
-    uint8_t proto[2] = { CR95HF_PROTO_ISO14443A, 0x00 };
     uint8_t code = 0xFF;
     uint8_t rsp[16];
-    uint8_t rsp_len;
+    char idn[17];
+    uint8_t rsp_len = 0;
     esp_err_t err;
+    bool driver_installed = false;
 
     if (s_uart_mutex == NULL)
     {
@@ -685,34 +1350,70 @@ esp_err_t cr95hf_init(void)
         }
     }
 
+    xSemaphoreTake(s_uart_mutex, portMAX_DELAY);
+    if (s_ready)
+    {
+        xSemaphoreGive(s_uart_mutex);
+        return ESP_OK;
+    }
+
     err = uart_driver_install(NFC_UART_PORT, CR95HF_UART_RX_BUF_SIZE,
                               0, 0, NULL, 0);
     if (err != ESP_OK)
     {
-        return err;
+        goto done;
     }
+    driver_installed = true;
 
     err = uart_param_config(NFC_UART_PORT, &cfg);
     if (err != ESP_OK)
     {
-        return err;
+        goto done;
     }
 
+    /*
+     * RX/IRQ_IN is the reader's input on GPIO32 (the ESP TX line). Pulse it
+     * before attaching the UART, then allow the CR95HF oscillator to start.
+     */
     err = gpio_set_direction(PIN_NFC_TX, GPIO_MODE_OUTPUT);
     if (err != ESP_OK)
     {
-        return err;
+        goto done;
     }
+    err = gpio_set_level(PIN_NFC_TX, 1);
+    if (err != ESP_OK)
+    {
+        goto done;
+    }
+    /*
+     * Establish a defined inactive level before the IRQ_IN wake pulse. The
+     * reader's power-up delay has already elapsed during system boot.
+     */
+    esp_rom_delay_us(1000);
+    err = gpio_set_level(PIN_NFC_TX, 0);
+    if (err != ESP_OK)
+    {
+        goto done;
+    }
+    esp_rom_delay_us(20);
+    err = gpio_set_level(PIN_NFC_TX, 1);
+    if (err != ESP_OK)
+    {
+        goto done;
+    }
+    /* tSU(HFO) is 10 ms maximum; leave margin before the first UART byte. */
+    vTaskDelay(pdMS_TO_TICKS(20));
+
     err = gpio_set_direction(PIN_NFC_RX, GPIO_MODE_INPUT);
     if (err != ESP_OK)
     {
-        return err;
+        goto done;
     }
     err = uart_set_pin(NFC_UART_PORT, PIN_NFC_TX, PIN_NFC_RX,
                        UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK)
     {
-        return err;
+        goto done;
     }
 
     err = cr95hf_echo_sync();
@@ -720,86 +1421,222 @@ esp_err_t cr95hf_init(void)
     {
         ESP_LOGE(TAG, "CR95HF echo synchronization failed: %s",
                  esp_err_to_name(err));
-        return err;
+        goto done;
     }
 
-    /* The stock driver synchronizes with Echo, then selects ISO14443-A. */
-
-    /* Select ISO14443A so SendRecv exchanges with Type A tags. */
-    err = cr95hf_transact(CR95HF_CMD_PROTOCOL_SELECT, proto, 2, &code, rsp,
+    code = 0xFF;
+    rsp_len = 0;
+    err = cr95hf_transact(CR95HF_CMD_IDN, NULL, 0, &code, rsp, sizeof(rsp),
                           &rsp_len, CR95HF_TIMEOUT_MS);
-    if (err != ESP_OK || code != CR95HF_CODE_SUCCESS)
+    if (err == ESP_OK && code == CR95HF_CODE_SUCCESS && rsp_len > 0)
     {
-        ESP_LOGE(TAG, "CR95HF ProtocolSelect failed (err=%d code=0x%02x)", err, code);
-        return ESP_ERR_INVALID_RESPONSE;
+        size_t idn_len = rsp_len < sizeof(idn) - 1 ? rsp_len : sizeof(idn) - 1;
+        size_t i;
+
+        for (i = 0; i < idn_len && rsp[i] >= 0x20 && rsp[i] <= 0x7E; i++)
+        {
+            idn[i] = (char)rsp[i];
+        }
+        idn[i] = '\0';
+        ESP_LOGI(TAG, "95HF IDN: \"%s\" (len=%u ROM=0x%02x)",
+                 idn, (unsigned)rsp_len, rsp[rsp_len - 1]);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "95HF IDN failed: err=%s code=0x%02x len=%u",
+                 esp_err_to_name(err), code, (unsigned)rsp_len);
     }
 
-    ESP_LOGI(TAG, "CR95HF ready (UART%d 57600 8-N-2, ESP TX=%d RX=%d)",
-             NFC_UART_PORT, PIN_NFC_TX, PIN_NFC_RX);
+    /*
+     * Start from the documented clean RF state before selecting Type A. This
+     * also prevents an inherited field state from a prior incomplete session.
+     */
+    cr95hf_field_off();
+    err = cr95hf_select_iso14443a();
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "CR95HF ProtocolSelect failed: %s",
+                 esp_err_to_name(err));
+        goto done;
+    }
 
-    return ESP_OK;
+    s_ready = true;
+    ESP_LOGI(TAG, "CR95HF ready (UART%d %d 8-N-2, ESP TX=%d RX=%d)",
+             NFC_UART_PORT, NFC_UART_BAUD, PIN_NFC_TX, PIN_NFC_RX);
+    err = ESP_OK;
+
+done:
+    if (err != ESP_OK)
+    {
+        s_ready = false;
+        if (driver_installed)
+        {
+            uart_driver_delete(NFC_UART_PORT);
+        }
+    }
+    xSemaphoreGive(s_uart_mutex);
+    return err;
 }
 
 /* ------------------------------------------------------------------- poll */
 
-bool cr95hf_poll(uint8_t *uid, uint8_t *uid_len, char *url, size_t url_cap)
+bool cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
+                      size_t url_cap, cr95hf_card_info_t *info)
 {
     bool ok;
+    uint8_t sak = 0;
 
     if (uid == NULL || uid_len == NULL || *uid_len == 0)
     {
         return false;
     }
-    if (s_uart_mutex == NULL)
+    if (s_uart_mutex == NULL || !s_ready)
     {
         return false;
     }
-
     if (url != NULL && url_cap > 0)
     {
         url[0] = '\0';
     }
+    if (info != NULL)
+    {
+        memset(info, 0, sizeof(*info));
+        info->state = CR95HF_CARD_UNREADABLE;
+    }
 
     xSemaphoreTake(s_uart_mutex, portMAX_DELAY);
 
-    ok = cr95hf_activate(uid, uid_len);
-    if (ok && url != NULL && url_cap > 0)
+    ok = cr95hf_activate(uid, uid_len, &sak);
+    if (ok)
     {
-        /* URL read is best-effort: a tag without a URI still yields its UID. */
-        cr95hf_read_url(url, url_cap);
+        if (info != NULL)
+        {
+            info->sak = sak;
+            if (cr95hf_read_static_locks(&info->lock0, &info->lock1) == ESP_OK)
+            {
+                info->state = cr95hf_read_card(url, url_cap, info);
+                if (info->state == CR95HF_CARD_BLANK
+                    && cr95hf_page_is_locked(CR95HF_USER_PAGE, info->lock0,
+                                              info->lock1))
+                {
+                    info->state = CR95HF_CARD_LOCKED;
+                }
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Type 2 static-lock read failed");
+            }
+        }
+        else if (url != NULL && url_cap > 0)
+        {
+            /* URL read is best-effort: a tag without a URI still yields its UID. */
+            cr95hf_read_url(url, url_cap);
+        }
     }
+    cr95hf_field_off();
 
     xSemaphoreGive(s_uart_mutex);
     return ok;
 }
 
+bool cr95hf_poll(uint8_t *uid, uint8_t *uid_len, char *url, size_t url_cap)
+{
+    return cr95hf_poll_card(uid, uid_len, url, url_cap, NULL);
+}
+
 /* --------------------------------------------------------------- write url */
 
-esp_err_t cr95hf_write_url(const char *url)
+esp_err_t cr95hf_write_url(const char *url, const uint8_t *expected_uid,
+                           uint8_t expected_uid_len)
 {
     uint8_t uid[CR95HF_UID_MAX];
     uint8_t uid_len = sizeof(uid);
+    char readback[CR95HF_URL_MAX + 1];
+    size_t capacity;
+    bool cc_writable;
+    bool cc_read_ok;
+    uint8_t cc[4];
+    uint8_t lock0;
+    uint8_t lock1;
     esp_err_t err;
 
-    if (url == NULL || url[0] == '\0')
+    if (url == NULL || url[0] == '\0' || expected_uid == NULL
+        || expected_uid_len == 0 || expected_uid_len > sizeof(uid))
     {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_uart_mutex == NULL)
+    if (s_uart_mutex == NULL || !s_ready)
     {
         return ESP_ERR_INVALID_STATE;
     }
 
     xSemaphoreTake(s_uart_mutex, portMAX_DELAY);
-
-    if (!cr95hf_activate(uid, &uid_len))
+    if (!cr95hf_activate(uid, &uid_len, NULL))
     {
-        xSemaphoreGive(s_uart_mutex);
-        return ESP_ERR_NOT_FOUND;
+        err = ESP_ERR_NOT_FOUND;
+        goto done;
+    }
+    if (uid_len != expected_uid_len
+        || memcmp(uid, expected_uid, uid_len) != 0)
+    {
+        err = ESP_ERR_INVALID_STATE;
+        goto done;
     }
 
-    err = cr95hf_write_ndef(url);
+    err = cr95hf_read_static_locks(&lock0, &lock1);
+    if (err != ESP_OK)
+    {
+        goto done;
+    }
+    if (!cr95hf_read_cc(&capacity, &cc_writable, &cc_read_ok, cc))
+    {
+        if (!cc_read_ok)
+        {
+            err = ESP_FAIL;
+            goto done;
+        }
 
+        err = cr95hf_format_blank_mf0ul11(cc, lock0, lock1, expected_uid,
+                                          expected_uid_len);
+        if (err != ESP_OK)
+        {
+            goto done;
+        }
+        capacity = CR95HF_MF0UL11_CAPACITY;
+    }
+    else if (!cc_writable)
+    {
+        ESP_LOGE(TAG, "Type 2 capability container declares read-only access");
+        err = ESP_ERR_NOT_ALLOWED;
+        goto done;
+    }
+
+    err = cr95hf_write_ndef(url, capacity, lock0, lock1, expected_uid,
+                            expected_uid_len);
+    if (err != ESP_OK)
+    {
+        goto done;
+    }
+
+    readback[0] = '\0';
+    if (!cr95hf_read_url(readback, sizeof(readback)))
+    {
+        ESP_LOGE(TAG, "NDEF write verification read failed");
+        err = ESP_FAIL;
+    }
+    else if (strcmp(readback, url) != 0)
+    {
+        ESP_LOGE(TAG, "NDEF write verification mismatch: got \"%s\"",
+                 readback);
+        err = ESP_FAIL;
+    }
+    else
+    {
+        ESP_LOGI(TAG, "NDEF write verified: %s", readback);
+    }
+
+done:
+    cr95hf_field_off();
     xSemaphoreGive(s_uart_mutex);
     return err;
 }

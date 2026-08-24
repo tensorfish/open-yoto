@@ -44,6 +44,7 @@ static const char *TAG = "audio";
 /* I2S DMA write timeout. Kept short so the decode task stays responsive to
  * stop/pause while still providing natural backpressure on a full DMA. */
 #define AUDIO_I2S_WRITE_TICK_MS 20
+#define AUDIO_I2S_SILENCE_SAMPLES 256
 
 /* Decode task stack size in bytes (ESP-IDF FreeRTOS convention). */
 #define AUDIO_DECODE_STACK_BYTES 20480
@@ -97,7 +98,6 @@ static char s_path[AUDIO_PATH_MAX];
 static esp_err_t audio_i2s_init(void)
 {
     esp_err_t err;
-
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT,
                                                             I2S_ROLE_MASTER);
     i2s_std_clk_config_t clk_cfg =
@@ -105,6 +105,10 @@ static esp_err_t audio_i2s_init(void)
     i2s_std_slot_config_t slot_cfg =
         I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
                                             I2S_SLOT_MODE_MONO);
+
+    /* Clear each descriptor after transmission so an underrun emits silence
+     * instead of replaying the previous PCM fragment. */
+    chan_cfg.auto_clear_after_cb = true;
 
     /* Stock i2s_stream config @ 0x401d8d16 uses APLL, then
      * i2s_set_clk(44100, 16, 1) @ 0x401d8d82 switches to mono-left. On ESP32
@@ -144,7 +148,6 @@ static esp_err_t audio_i2s_init(void)
                  esp_err_to_name(err));
         return err;
     }
-
     err = i2s_channel_enable(s_tx_chan);
     if (err != ESP_OK)
     {
@@ -158,6 +161,49 @@ static esp_err_t audio_i2s_init(void)
              PIN_I2S_MCLK, PIN_I2S_BCLK, PIN_I2S_LRCLK, PIN_I2S_DOUT,
              I2S_SAMPLE_RATE_HZ);
     return ESP_OK;
+}
+
+/*
+ * Stop the cyclic TX DMA, overwrite every descriptor with silence, and resume
+ * clocks. Without this reset, an idle ESP32 I2S TX ring repeats its final PCM
+ * fragment after the decoder stops producing buffers.
+ */
+static esp_err_t audio_i2s_clear(void)
+{
+    static const int16_t silence[AUDIO_I2S_SILENCE_SAMPLES] = { 0 };
+    esp_err_t err = i2s_channel_disable(s_tx_chan);
+
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "i2s_channel_disable failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+    for (int i = 0; i < 8; i++)
+    {
+        size_t loaded = 0;
+
+        err = i2s_channel_preload_data(s_tx_chan, silence, sizeof(silence),
+                                       &loaded);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "I2S silence preload failed: %s",
+                     esp_err_to_name(err));
+            break;
+        }
+        if (loaded < sizeof(silence))
+        {
+            break;
+        }
+    }
+    esp_err_t enable_err = i2s_channel_enable(s_tx_chan);
+    if (enable_err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "i2s_channel_enable after clear failed: %s",
+                 esp_err_to_name(enable_err));
+        return enable_err;
+    }
+    return err;
 }
 
 /**
@@ -1189,6 +1235,7 @@ static void audio_decode_task(void *arg)
         }
 
         codec_es8156_mute(true);
+        (void)audio_i2s_clear();
         fclose(fp);
         fp = NULL;
         s_paused = false;
@@ -1424,6 +1471,7 @@ esp_err_t audio_play_tone(int freq_hz)
     }
 
     free(buf);
+    (void)audio_i2s_clear();
     s_playing = false;
     return ESP_OK;
 }

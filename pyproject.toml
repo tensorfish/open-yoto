@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "esptool>=5.3.1",
+    "pyserial>=3.5",
     "zensical>=0.0.55",
 ]
 

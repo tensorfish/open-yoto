@@ -64,6 +64,54 @@ Output binaries (flash offsets):
 
 Flash size is 8 MB (`ESP32-WROVER-E` module).
 
+### Linux UART flash automation
+
+The Yoto wiring does not use Espressif's conventional automatic-reset circuit:
+
+| USB-UART line | ESP32 signal |
+|---------------|--------------|
+| RTS | BOOT/GPIO0 |
+| DTR | RESET/EN |
+
+`firmware/sdkconfig` disables esptool's automatic modem-line sequences:
+
+```ini
+CONFIG_ESPTOOLPY_BEFORE="no_reset"
+CONFIG_ESPTOOLPY_AFTER="no_reset"
+```
+
+`tools/flash_esp32.py` handles the physical sequence instead. It builds, starts
+`idf.py -p /dev/ttyUSB0 flash`, waits until esptool reaches its connection
+stage, drives the manual bootloader sequence, waits for the write to complete,
+then resets the application and saves its UART output to `/tmp/yoto_scan.log`.
+
+```bash
+# Standard ESP-IDF v5.5 installation paths on this Linux setup.
+export PATH="$HOME/.espressif/python_env/idf5.5_py3.12_env/bin:$(dirname "$(uv python find 3.12)"):$PATH"
+. "$HOME/.esp/esp-idf/export.sh"
+
+python3 tools/flash_esp32.py
+```
+
+The script enters bootloader mode by asserting RTS and DTR for one second,
+releasing DTR for one second, then releasing RTS. It keeps esptool's
+connection attempts active until that two-second sequence finishes.
+
+**Do not use pyserial to enter bootloader mode while esptool owns the port.**
+Opening a pyserial `Serial` object reconfigures the shared Linux TTY; its
+defaults changed `/dev/ttyUSB0` from esptool's 460800 baud to 9600 during
+testing, so esptool could no longer synchronize. `tools/bootloader_esp32.py`
+uses Linux `TIOCMBIS`/`TIOCMBIC` modem-control ioctls instead. Those ioctls
+change only DTR and RTS and preserve all terminal settings.
+
+For individual hardware actions:
+
+```bash
+python3 tools/bootloader_esp32.py  # enter ROM bootloader
+python3 tools/reset_esp32.py       # reset into the application
+python3 /tmp/yoto_capture.py 30    # capture a 30-second UART log
+```
+
 !!! note "`make` vs `idf.py`"
     ESP-IDF **v4+ removed the GNU-Make workflow**. The current build command is
     `idf.py` (CMake + Ninja) — there is no `make menuconfig` / `make flash` in

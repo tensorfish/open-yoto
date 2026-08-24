@@ -55,6 +55,28 @@ The build emits `build/bootloader/bootloader.bin` (flashed at `0x1000`),
 `build/partition_table/partition-table.bin` (`0x8000`), and `build/yoto.bin`
 (`0x10000`). Flash size is 8 MB (ESP32-WROVER-E).
 
+### Linux UART automation
+
+The board's USB-UART controls are wired as `RTS -> BOOT/GPIO0` and
+`DTR -> RESET/EN`, rather than the conventional Espressif mapping. The checked
+in `sdkconfig` sets esptool to `--before=no_reset --after=no_reset`; manual
+control is required.
+
+From the repository root, source ESP-IDF and run:
+
+```bash
+export PATH="$HOME/.espressif/python_env/idf5.5_py3.12_env/bin:$(dirname "$(uv python find 3.12)"):$PATH"
+. "$HOME/.esp/esp-idf/export.sh"
+python3 tools/flash_esp32.py
+```
+
+The tool builds, waits for esptool's connection phase, enters the ROM
+bootloader using the RTS/DTR sequence, flashes, resets into the application,
+and writes the UART log to `/tmp/yoto_scan.log`. Do not replace
+`tools/bootloader_esp32.py` with a pyserial script: opening pyserial changes
+the Linux TTY's termios configuration while esptool is connected. The helper
+uses modem-control ioctls only, preserving esptool's settings.
+
 ## Boot test firmware
 
 A minimal bring-up firmware (`main/test_main.c`) that skips NFC / SD / encoder
@@ -144,6 +166,8 @@ firmware/
   source-metadata propagation, and streaming 8–96 kHz resampling. Content
   sniffing selects MP3, standalone ADTS AAC, or streamed M4A/AAC-LC sample
   tables (`stsd`/`stsz`/`stsc`/`stco`/`co64`).
+  TX descriptors auto-clear after transmission; stop/end transitions reset the
+  complete cyclic DMA ring to silence before another playback starts.
 - WROVER-E PSRAM backs allocations larger than 4 KiB, including the
   playback-scoped decoder heaps; 32 KiB of internal memory remains reserved
   for DMA/internal-only use.
@@ -158,14 +182,18 @@ firmware/
   AAC-LC/44.1 kHz/mono MP4 track, decoded, and sent through the shared I2S path
   after the SD mount.
 - CR95HF on UART1, ESP TX=GPIO32, ESP RX=GPIO33, 57600 8-N-2, with the
-  stock control-byte and Echo synchronization sequence.
+  stock control-byte and Echo synchronization sequence. Admin-mode scans
+  capture UID/URL without playback; authenticated writes compare the expected
+  UID and verify URL read-back under one UART transaction.
 - Boot-enabled `openyoto` SoftAP and HTTP server with a random six-character
-  alphanumeric code. Rev #04 uses a mirrored-compensated native 5×7 font fitted
-  inside the verified visible TFT area; authenticated remote sound/image
-  control and SD file/directory CRUD are available at `192.168.4.1`.
+  alphanumeric code. Its responsive UI provides remote player controls,
+  `/sdcard/media`-confined file CRUD, captured-card read/write, mapping
+  inspection, whole-folder track upload with browser-side PNG/JPEG conversion,
+  and a lazy recursive track catalog.
 - Admin memory is request-driven: default-directory listing at login,
-  per-directory streamed JSON, lazy card-index parsing, playback-scoped audio
-  decoder state, a 16 KiB HTTP task stack, and a temporary access-code raster.
+  per-directory streamed JSON, tab-scoped card/track loading, lazy card-index
+  parsing, playback-scoped decoder state, a 16 KiB HTTP task stack, and a
+  temporary access-code raster.
 
 **TODO**:
 

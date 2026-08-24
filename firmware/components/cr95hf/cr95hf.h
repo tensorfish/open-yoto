@@ -14,6 +14,35 @@
 #include <stddef.h>
 #include "esp_err.h"
 
+#define CR95HF_UID_MAX 10
+#define CR95HF_URL_MAX 200
+
+typedef enum
+{
+    CR95HF_CARD_BLANK,
+    CR95HF_CARD_URI,
+    CR95HF_CARD_NON_URI,
+    CR95HF_CARD_LOCKED,
+    CR95HF_CARD_UNREADABLE,
+} cr95hf_card_state_t;
+
+/*
+ * Card data captured during one activation. raw_ndef contains the formatted
+ * Type-2 user area when it could be read; no allocation is performed.
+ */
+typedef struct
+{
+    cr95hf_card_state_t state;
+    uint8_t sak;
+    uint8_t cc[4];
+    uint8_t lock0;
+    uint8_t lock1;
+    size_t capacity;
+    bool writable;
+    size_t raw_ndef_len;
+    uint8_t raw_ndef[256];
+} cr95hf_card_info_t;
+
 /**
  * Bring up the CR95HF UART link (UART1, 57600 8-N-2, ESP TX=GPIO32 and
  * ESP RX=GPIO33), synchronize it with Echo, and select ISO14443A.
@@ -39,15 +68,33 @@ esp_err_t cr95hf_init(void);
 bool cr95hf_poll(uint8_t *uid, uint8_t *uid_len, char *url, size_t url_cap);
 
 /**
- * Write a URL as an NDEF URI record onto a tag already present in the field.
+ * Poll a Type A tag and capture its Type-2/NDEF state for serial diagnostics.
  *
- * The URL is split into a standard URI prefix code (http://, https://, ...)
- * and remainder to keep the record compact, wrapped in an NDEF-message TLV and
- * written as 4-byte pages starting at the user-data page.
+ * A card is blank only when its capability container is all zeroes or when
+ * a valid, writable Type-2 NDEF area contains no NDEF records. Non-URI,
+ * malformed, locked, and unreadable cards are never classified as blank.
  *
- * @param url  NUL-terminated URL to store (non-empty)
- * @return     ESP_OK on success; ESP_ERR_NOT_FOUND if no tag is in the field,
- *             ESP_ERR_INVALID_ARG / ESP_ERR_INVALID_SIZE for a bad/oversized
- *             URL, or ESP_FAIL if the tag NAKs a page write.
+ * @param info optional diagnostics output; may be NULL
+ * @return true if a tag was activated and its UID read, false otherwise
  */
-esp_err_t cr95hf_write_url(const char *url);
+bool cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
+                      size_t url_cap, cr95hf_card_info_t *info);
+
+/**
+ * Write a URL to the expected Type A tag currently present in the field.
+ *
+ * Activation, UID comparison, safe blank-MF0UL11 formatting, page writes, and
+ * URL read-back verification are serialized under the UART mutex. This
+ * prevents replacing the scanned tag with another tag between capture/write.
+ *
+ * @param url          NUL-terminated URL to store (non-empty)
+ * @param expected_uid UID captured by the admin scan
+ * @param expected_uid_len expected UID length
+ * @return                 ESP_OK on verified success; ESP_ERR_NOT_FOUND when
+ *                         no tag is present; ESP_ERR_INVALID_STATE when a
+ *                         different tag is present; ESP_ERR_NOT_SUPPORTED for
+ *                         an unknown blank tag; lock/access, size, transport,
+ *                         NAK, or read-back errors otherwise.
+ */
+esp_err_t cr95hf_write_url(const char *url, const uint8_t *expected_uid,
+                           uint8_t expected_uid_len);

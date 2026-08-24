@@ -74,6 +74,9 @@ static esp_err_t admin_send_oom(httpd_req_t *req, const char *where)
 #define ADMIN_MAX_FILES         64
 #define ADMIN_MANIFEST_MAX      4096
 #define ADMIN_BOUNDARY_MAX      128
+#define ADMIN_CARD_UID_MAX      10
+#define ADMIN_CARD_URL_MAX      200
+#define ADMIN_CARD_BODY_MAX     1024
 
 /* Active-session state. */
 static bool             s_active;
@@ -89,12 +92,15 @@ static admin_path_cb_t  s_play_sound_cb;
 static admin_path_cb_t  s_display_image_cb;
 static admin_action_cb_t s_stop_sound_cb;
 static admin_action_cb_t s_clear_display_cb;
+static admin_card_write_cb_t s_write_card_cb;
 
-/* Most recently scanned non-admin card URL, captured for the web UI. Guarded
- * by s_last_card_lock (main loop writes it; the HTTP task reads it). */
-static char s_last_card_url[ADMIN_URL_MAX];
+/* Most recently captured NFC card, guarded by s_last_card_lock. */
+static char s_last_card_url[ADMIN_CARD_URL_MAX + 1];
 static portMUX_TYPE s_last_card_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_last_card_seq;
+static uint8_t s_last_card_uid[ADMIN_CARD_UID_MAX];
+static uint8_t s_last_card_uid_len;
+static bool s_last_card_captured;
 
 /* ------------------------------------------------------------------ page -- */
 
@@ -1316,6 +1322,67 @@ static esp_err_t admin_send_fs_errno(httpd_req_t *req, const char *operation,
     return httpd_resp_send(req, message, HTTPD_RESP_USE_STRLEN);
 }
 
+static int admin_hex_value(char ch)
+{
+    if (ch >= '0' && ch <= '9')
+    {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f')
+    {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F')
+    {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool admin_parse_uid(const char *hex, uint8_t *uid, uint8_t *uid_len)
+{
+    size_t len = hex == NULL ? 0 : strlen(hex);
+
+    if (len == 0 || (len & 1) != 0 || len / 2 > ADMIN_CARD_UID_MAX)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < len / 2; i++)
+    {
+        int high = admin_hex_value(hex[i * 2]);
+        int low = admin_hex_value(hex[i * 2 + 1]);
+
+        if (high < 0 || low < 0)
+        {
+            return false;
+        }
+        uid[i] = (uint8_t)((high << 4) | low);
+    }
+    *uid_len = (uint8_t)(len / 2);
+    return true;
+}
+
+static void admin_format_uid(const uint8_t *uid, uint8_t uid_len,
+                             char *out, size_t out_len)
+{
+    static const char hex[] = "0123456789ABCDEF";
+
+    if (out_len < (size_t)uid_len * 2 + 1)
+    {
+        if (out_len > 0)
+        {
+            out[0] = '\0';
+        }
+        return;
+    }
+    for (uint8_t i = 0; i < uid_len; i++)
+    {
+        out[i * 2] = hex[uid[i] >> 4];
+        out[i * 2 + 1] = hex[uid[i] & 0x0F];
+    }
+    out[uid_len * 2] = '\0';
+}
+
 static cJSON *admin_read_json(httpd_req_t *req)
 {
     char *body = NULL;
@@ -1420,35 +1487,42 @@ static esp_err_t admin_list_handler(httpd_req_t *req)
     return err;
 }
 
-/* Return the most recently scanned card URL (and whether it is already
- * mapped) so the web UI can pre-fill the add-content form. */
+/* Return the most recently captured card, including blank cards by UID. */
 static esp_err_t admin_last_card_handler(httpd_req_t *req)
 {
-    if (!admin_require_session(req))
-    {
-        return ESP_FAIL;
-    }
-
-    char url[ADMIN_URL_MAX];
+    char url[ADMIN_CARD_URL_MAX + 1];
+    uint8_t uid[ADMIN_CARD_UID_MAX];
+    uint8_t uid_len;
+    char uid_hex[ADMIN_CARD_UID_MAX * 2 + 1];
+    bool captured;
     bool exists;
     cJSON *root;
     char *json;
     uint32_t seq;
 
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
     portENTER_CRITICAL(&s_last_card_lock);
     snprintf(url, sizeof(url), "%s", s_last_card_url);
+    uid_len = s_last_card_uid_len;
+    memcpy(uid, s_last_card_uid, uid_len);
+    captured = s_last_card_captured;
     seq = s_last_card_seq;
     portEXIT_CRITICAL(&s_last_card_lock);
 
-    exists = (url[0] != '\0'
-              && content_lookup(url, NULL, 0, NULL, 0) == ESP_OK);
+    admin_format_uid(uid, uid_len, uid_hex, sizeof(uid_hex));
+    exists = captured && url[0] != '\0'
+          && content_lookup(url, NULL, 0, NULL, 0) == ESP_OK;
 
     root = cJSON_CreateObject();
     if (root == NULL)
     {
         return admin_send_oom(req, "creating last-card response");
     }
-
+    cJSON_AddBoolToObject(root, "captured", captured);
+    cJSON_AddStringToObject(root, "uid", uid_hex);
     cJSON_AddStringToObject(root, "url", url);
     cJSON_AddBoolToObject(root, "exists", exists);
     cJSON_AddNumberToObject(root, "seq", (double)seq);
@@ -1459,11 +1533,111 @@ static esp_err_t admin_last_card_handler(httpd_req_t *req)
     {
         return admin_send_oom(req, "serializing last-card response");
     }
-
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, json);
+    esp_err_t err = httpd_resp_sendstr(req, json);
     cJSON_free(json);
-    return ESP_OK;
+    return err;
+}
+
+static esp_err_t admin_card_write_handler(httpd_req_t *req)
+{
+    cJSON *root;
+    cJSON *seq_item;
+    char url[ADMIN_CARD_URL_MAX + 1];
+    char uid_hex[ADMIN_CARD_UID_MAX * 2 + 1];
+    uint8_t uid[ADMIN_CARD_UID_MAX];
+    uint8_t uid_len;
+    uint32_t result_seq;
+    bool matches;
+    esp_err_t err;
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    if (req->content_len == 0 || req->content_len > ADMIN_CARD_BODY_MAX)
+    {
+        return httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE,
+                                   "card request too large");
+    }
+    root = admin_read_json(req);
+    seq_item = root == NULL ? NULL
+             : cJSON_GetObjectItemCaseSensitive(root, "seq");
+    if (root == NULL
+        || !admin_json_string(root, "url", url, sizeof(url))
+        || !admin_json_string(root, "uid", uid_hex, sizeof(uid_hex))
+        || seq_item == NULL || !cJSON_IsNumber(seq_item)
+        || seq_item->valuedouble < 0
+        || seq_item->valuedouble > UINT32_MAX
+        || !admin_parse_uid(uid_hex, uid, &uid_len))
+    {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "invalid card write request");
+    }
+    cJSON_Delete(root);
+
+    portENTER_CRITICAL(&s_last_card_lock);
+    matches = s_last_card_captured
+           && s_last_card_uid_len == uid_len
+           && memcmp(s_last_card_uid, uid, uid_len) == 0;
+    portEXIT_CRITICAL(&s_last_card_lock);
+    if (!matches)
+    {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "captured card UID changed; scan again");
+    }
+    if (s_write_card_cb == NULL)
+    {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "card writer unavailable");
+    }
+
+    err = s_write_card_cb(url, uid, uid_len);
+    if (err != ESP_OK)
+    {
+        if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_INVALID_STATE)
+        {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_set_type(req, "text/plain");
+            return httpd_resp_sendstr(
+                req, err == ESP_ERR_NOT_FOUND
+                   ? "no card present" : "different card present");
+        }
+        if (err == ESP_ERR_INVALID_SIZE)
+        {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_set_type(req, "text/plain");
+            return httpd_resp_sendstr(req,
+                                      "URL does not fit card user area");
+        }
+        if (err == ESP_ERR_NOT_ALLOWED)
+        {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_set_type(req, "text/plain");
+            return httpd_resp_sendstr(req,
+                                      "target card user page is permanently locked");
+        }
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "card write or verification failed");
+    }
+
+    portENTER_CRITICAL(&s_last_card_lock);
+    if (s_last_card_uid_len == uid_len
+        && memcmp(s_last_card_uid, uid, uid_len) == 0)
+    {
+        snprintf(s_last_card_url, sizeof(s_last_card_url), "%s", url);
+        s_last_card_seq++;
+    }
+    result_seq = s_last_card_seq;
+    portEXIT_CRITICAL(&s_last_card_lock);
+
+    char response[64];
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"seq\":%lu}", (unsigned long)result_seq);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, response);
 }
 
 static esp_err_t admin_add_handler(httpd_req_t *req)
@@ -2068,6 +2242,8 @@ static esp_err_t admin_fs_mkdir_handler(httpd_req_t *req)
     cJSON *root;
     char logical[ADMIN_PATH_MAX];
     char absolute[ADMIN_PATH_MAX];
+    struct stat st;
+    bool created = false;
 
     if (!admin_require_session(req))
     {
@@ -2084,13 +2260,18 @@ static esp_err_t admin_fs_mkdir_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     cJSON_Delete(root);
-    if (mkdir(absolute, 0755) != 0)
+    if (mkdir(absolute, 0755) == 0)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                            "mkdir failed");
-        return ESP_FAIL;
+        created = true;
     }
-    httpd_resp_set_status(req, "201 Created");
+    else if (errno != EEXIST || stat(absolute, &st) != 0
+             || !S_ISDIR(st.st_mode))
+    {
+        int error_number = errno;
+        return admin_send_fs_errno(req, "create directory", absolute,
+                                   error_number);
+    }
+    httpd_resp_set_status(req, created ? "201 Created" : "200 OK");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
@@ -2185,6 +2366,8 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
           .handler = admin_list_handler },
         { .uri = "/api/last-card", .method = HTTP_GET,
           .handler = admin_last_card_handler },
+        { .uri = "/api/card/write", .method = HTTP_POST,
+          .handler = admin_card_write_handler },
         { .uri = "/api/add", .method = HTTP_POST,
           .handler = admin_add_handler },
         { .uri = "/api/delete", .method = HTTP_POST,
@@ -2253,6 +2436,8 @@ static void admin_teardown(void)
     s_session_token[0] = '\0';
     portENTER_CRITICAL(&s_last_card_lock);
     s_last_card_url[0] = '\0';
+    s_last_card_uid_len = 0;
+    s_last_card_captured = false;
     s_last_card_seq = 0;
     portEXIT_CRITICAL(&s_last_card_lock);
     s_active = false;
@@ -2438,29 +2623,54 @@ bool admin_is_active(void)
     return s_active;
 }
 
-void admin_set_last_card(const char *url)
+void admin_set_last_card(const uint8_t *uid, uint8_t uid_len,
+                         const char *url)
 {
+    const char *new_url = url == NULL ? "" : url;
+    bool changed = false;
+
     portENTER_CRITICAL(&s_last_card_lock);
-    if (url == NULL || url[0] == '\0')
+    if (uid == NULL || uid_len == 0 || uid_len > sizeof(s_last_card_uid))
     {
+        changed = s_last_card_captured;
+        s_last_card_uid_len = 0;
         s_last_card_url[0] = '\0';
+        s_last_card_captured = false;
     }
     else
     {
-        snprintf(s_last_card_url, sizeof(s_last_card_url), "%s", url);
-        s_last_card_seq++;
+        changed = !s_last_card_captured
+               || s_last_card_uid_len != uid_len
+               || memcmp(s_last_card_uid, uid, uid_len) != 0
+               || strcmp(s_last_card_url, new_url) != 0;
+        if (changed)
+        {
+            memcpy(s_last_card_uid, uid, uid_len);
+            s_last_card_uid_len = uid_len;
+            snprintf(s_last_card_url, sizeof(s_last_card_url), "%s", new_url);
+            s_last_card_captured = true;
+            s_last_card_seq++;
+        }
     }
     portEXIT_CRITICAL(&s_last_card_lock);
 
-    if (url != NULL && url[0] != '\0')
+    if (changed && uid != NULL && uid_len > 0)
     {
-        ESP_LOGI(TAG, "last scanned card: %s", url);
+        char uid_hex[ADMIN_CARD_UID_MAX * 2 + 1];
+        admin_format_uid(uid, uid_len, uid_hex, sizeof(uid_hex));
+        ESP_LOGI(TAG, "captured card UID=%s URL=%s", uid_hex,
+                 new_url[0] == '\0' ? "(blank)" : new_url);
     }
 }
 
 void admin_set_code_callback(admin_code_cb_t cb)
 {
     s_code_cb = cb;
+}
+
+void admin_set_card_write_callback(admin_card_write_cb_t cb)
+{
+    s_write_card_cb = cb;
 }
 
 void admin_set_path_callbacks(admin_path_cb_t play_sound,

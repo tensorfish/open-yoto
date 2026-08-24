@@ -25,6 +25,10 @@ typedef esp_err_t (*admin_path_cb_t)(const char *absolute_sd_path);
 /** Player-side callback for an authenticated action without a path. */
 typedef esp_err_t (*admin_action_cb_t)(void);
 
+/** Player-side callback for writing a URL to one expected NFC UID. */
+typedef esp_err_t (*admin_card_write_cb_t)(
+    const char *url, const uint8_t *expected_uid, uint8_t uid_len);
+
 /**
  * Start the SoftAP and HTTP server.
  *
@@ -46,15 +50,18 @@ esp_err_t admin_stop(void);
 /** Return true while admin mode is active. */
 bool admin_is_active(void);
 /**
- * Record the most recently scanned non-admin card URL so the web UI can
- * pre-fill the add-content form. Pass NULL or "" to clear it.
- *
- * @param url NUL-terminated URL (may be NULL to clear).
+ * Record the most recently scanned card for the authenticated admin UI.
+ * A valid UID with an empty URL represents a blank/unformatted card.
+ * Pass NULL/zero to clear captured state.
  */
-void admin_set_last_card(const char *url);
+void admin_set_last_card(const uint8_t *uid, uint8_t uid_len,
+                         const char *url);
 
 /** Register the callback used to display the access code (may be NULL). */
 void admin_set_code_callback(admin_code_cb_t cb);
+
+/** Register the NFC URL-write callback (may be NULL). */
+void admin_set_card_write_callback(admin_card_write_cb_t cb);
 
 /** Install player callbacks used by the remote-control HTTP API. */
 void admin_set_path_callbacks(admin_path_cb_t play_sound,

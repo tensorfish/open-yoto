@@ -103,6 +103,12 @@ propagates decoded source metadata, downmixes stereo, and statefully resamples
 8–96 kHz MP3/AAC sources to the fixed 44.1 kHz sink across frame boundaries.
 It also validates I²S lock, power/mute, volume, format, and DSP status.
 
+TX descriptors auto-clear after transmission. Stop and natural-end transitions
+mute the DAC, disable I²S, preload the complete cyclic DMA ring with zeroes,
+and re-enable clocks. An idle transmitter therefore emits silence instead of
+repeating its final millisecond-scale PCM fragment, and the next playback
+starts from a cleared ring.
+
 ## Decoders & stream types
 
 - **Oracle decoders**: Stagefright/pvmp3 (`DEC_MP3`), MP4/ADTS AAC

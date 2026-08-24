@@ -78,8 +78,7 @@ The web server remains in the background while the NFC/encoder main loop runs.
 
 ## The main loop (the state machine)
 
-The loop keeps physical controls and NFC playback active while the web server
-runs:
+The loop keeps physical controls active while the web server runs:
 
 1. **Powered off?** → sleep 200 ms; button events remain active.
 2. **Poll NFC** every ~100 ms.
@@ -90,8 +89,11 @@ poll window):
 
 - **Magic URL** (`https://openyoto.local/admin`) → explicitly toggle the
   otherwise boot-enabled admin server.
-- **Other card** → capture its URL for the web UI and continue normal catalog
-  lookup, image display, and audio playback.
+- **Admin active** → capture UID and URL for `/api/last-card`; do not resolve a
+  mapping, change the screen, or start card playback. Blank cards are captured
+  by UID with an empty URL.
+- **Admin inactive** → perform normal catalog lookup, image display, and audio
+  playback.
 
 Removing the card stops playback; a swap (or rapid remove/re-insert) is
 detected by UID change, not just presence.
@@ -188,25 +190,27 @@ contains only the login form until the six-character alphanumeric code shown
 on the player display is exchanged for an HttpOnly, SameSite session cookie.
 Every API and file read requires that cookie.
 
-The unlocked responsive UI has three areas:
+The unlocked responsive UI has four areas:
 
 - **Remote control** — play or stop MP3, ADTS AAC, and M4A/AAC-LC files;
   display an existing `.img`, clear the physical screen, or convert a PNG/JPEG
   to 16×16 RGB565 for preview, upload, and immediate display. Every
-  asynchronous action reports its in-progress state immediately, then
-  announces success or failure through the page's polite live-status region.
-- **SD files** — starts at an editable `/sdcard/media` path and exposes
-  `/sdcard` explicitly in both browser navigation and filesystem API payloads;
-  upload/download files; create files and
-  directories; rename entries; delete files and empty directories. FatFs uses
-  transient heap-backed long-filename buffers and UTF-8 API names, preserving
-  mixed case and accepting names up to 96 characters. Every path rejects
-  `.`/`..` traversal.
-- **Cards** — inspect/delete mappings, capture the last scanned card URL, and
-  trigger mapped audio or images remotely.
+  asynchronous action reports progress, success, or failure.
+- **Media files** — browse from the fixed `/sdcard/media` root; upload/download
+  files; create directories/files; rename entries; delete files and empty
+  directories. The path field can navigate descendants but rejects any path
+  outside `/sdcard/media` as well as `.`/`..`. FatFs preserves UTF-8, mixed
+  case, and names up to 96 characters.
+- **Tracks** — choose one whole folder containing audio and images. The browser
+  validates paths and collisions, converts PNG/JPEG to 520-byte 16×16 RGB565
+  OYIM files, creates the tree under `/sdcard/media`, uploads sequentially with
+  visible progress/retry state, and lazily lists current playable assets.
+- **Cards** — inspect mappings; manually refresh or poll the last captured card
+  while the URL field is empty; distinguish blank tags by UID; and write a URL
+  back only when the tag in the field matches the captured UID.
 
-NFC scanning, track playback, knobs, and buttons continue operating while the
-web UI is active.
+Remote playback, knobs, and buttons continue operating while the web UI is
+active. Physical card scans are deliberately capture-only during admin mode.
 
 ### Memory-bounded, request-driven loading
 
@@ -216,13 +220,18 @@ The web UI does not preload every subsystem after login:
    (`/api/fs/list?path=/sdcard/media`).
 2. Opening a directory requests that one level only; traversal is never
    recursive.
-3. Card mappings and last-card state load only when the **Cards** tab is
-   selected. Polling also stops while that tab is inactive.
-4. Directory JSON is streamed one entry at a time instead of building a whole
-   cJSON tree and a second response copy.
-5. `mapping.json` is parsed only on the first NFC/card-mapping request.
-6. MP3 and AAC decoder state exists only for the active playback request and
-   is released when that stream closes.
+3. Card mappings and capture state load only when **Cards** is selected.
+   Automatic capture polling runs only while its URL field is empty.
+4. Recursive track discovery runs only while **Tracks** is selected and uses
+   one bounded directory request at a time; switching tabs invalidates stale
+   traversal results.
+5. Directory JSON is streamed one entry at a time rather than building a whole
+   server-side tree and a second response copy.
+6. `mapping.json` is parsed only on the first NFC/card-mapping request.
+7. MP3 and AAC decoder state exists only for active playback and is then freed.
+8. Every web UI file, playback, display, and folder-upload path is confined to
+   `/sdcard/media`; lower-level authenticated filesystem APIs retain explicit
+   `/sdcard/...` paths for non-UI clients.
 
 The HTTP task stack is 16 KiB rather than 32 KiB. The 9.6 KiB native access
 code raster is temporary and released before Wi-Fi starts. Heap checkpoints
@@ -246,6 +255,7 @@ POST /api/fs/rename
 POST /api/fs/delete
 GET  /api/list
 GET  /api/last-card
+POST /api/card/write
 POST /api/add
 POST /api/delete
 GET  /media/*

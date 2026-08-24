@@ -113,16 +113,19 @@ Observed values (raw hex dump of seg2):
 
 Reconstructed from strings + the `FUN_seg4__4010d2ac`/`4010d458` decompilation:
 
-1. **REQA** (`_cr95hf_drv_reqa`) — send `0x26`, expect ATQA. Strings: `_cr95hf_drv_reqa() : REQA failed` (3176–3177), `_cr95hf_drv_reqa() timeout` (3174–3175).
-2. **WUPA** (reset card) — `Wupa error, failed to reset card` (3178).
+1. **RF tuning** — write TimerW (`09 04 3A 00 60 04`) and modulation/gain
+   (`09 04 68 01 01 D0`).
+2. **REQA** (`_cr95hf_drv_reqa`) — send `0x26`, expect ATQA. Strings:
+   `_cr95hf_drv_reqa() : REQA failed` (3176–3177) and
+   `_cr95hf_drv_reqa() timeout` (3174–3175).
 3. **ANTICOLLISION L1** (`_cr95hf_drv_antic1`) — `0x93 0x20`; strings 3181–3186.
-4. **SELECT L1** (`_cr95hf_drv_select1`) — `0x93 0x70` + 4-byte UID + BCC; string 3187.
-5. **ANTICOLLISION L2 / SELECT L2** (`_cr95hf_drv_antic2`/`select2`) — `0x95`; strings 3188–3192.
-6. **Read A0/A3** (`_cr95hf_read_card` `Read A0/A3 failed`, 3193/3206) — reads tag memory blocks.
+4. **SELECT L1** (`_cr95hf_drv_select1`) — `0x93 0x70` + 4-byte UID + BCC.
+5. **ANTICOLLISION L2 / SELECT L2** (`_cr95hf_drv_antic2`/`select2`) — `0x95`.
+6. **Read A0/A3** — reads the tag memory blocks.
 
-Driver tuning calls: `_cr95hf_drv_adjust_timew()` (Set TimerW, 3179),
-`_cr95hf_drv_modulation_gain()` (Set Mod/Gain, 3180), `_cr95hf_drv_calibration()` (3195),
-`_cr95hf_Select_protocol()` (3196–3197).
+The WUPA helper at `0x4010d3c8` sends `0x52 0x07`. UID-only function
+`0x4010e4d0` does not call it during activation; the full NDEF reader
+`0x4010fc24` calls it at `0x4010ffbc` after the read to reset the tag session.
 
 Card presence: `cr95hf_drv_card_present timeout` (3202), `Card in NFC field != 1` (3204),
 `REQA Failed` (3203), `Card is%s present` (3286).
@@ -166,15 +169,16 @@ rodata addresses.
 | `0x4010d020` | 159 | HAL init helper | [INFERENCE] |
 | `0x4010d16c` | 255 | frame send/receive wrapper | `FUN_seg4__4010d270` calls it |
 | `0x4010d270` | 58 | **build SendRecv frame** (cmd `0x04`) | decompiled: `buf[1]=4`, `buf[2]=len` |
-| `0x4010d2ac` | 282 | **`_cr95hf_drv_reqa`** (REQA/WUPA) | logs REQA strings @0x400d5454/545c; checks `0x0E`/`0x87` |
-| `0x4010d3c8` | 47 | short protocol step | returns `0x107` |
-| `0x4010d3f8` | 47 | short protocol step | " |
-| `0x4010d428` | 47 | short protocol step | " |
-| `0x4010d458` | 307 | **ANTICOLLISION / SELECT** (`antic1`/`select1`) | [INFERENCE] |
+| `0x4010d2ac` | 282 | **`_cr95hf_drv_reqa`** | sends `0x26 0x07`; checks `0x0E`/`0x87` |
+| `0x4010d3c8` | 47 | **WUPA session reset** | sends `0x52 0x07`; full NDEF reader calls it on exit |
+| `0x4010d3f8` | 47 | **adjust TimerW** | sends `09 04 3A 00 60 04` |
+| `0x4010d428` | 47 | **set modulation/gain** | sends `09 04 68 01 01 D0` |
+| `0x4010d458` | 307 | **ANTICOLLISION / SELECT L1** | starts with `93 20 08` |
 | `0x4010d598` | 67 | select/read sub-step | [INFERENCE] |
 | `0x4010d5dc` | 243 | select/read sub-step | [INFERENCE] |
-| `0x4010d6d4` | 67 | select/read sub-step | [INFERENCE] |
-| `0x4010d718` | 85 | read-block (CC/TLV) | parses `0xE1 0x10 0x06/0x12` |
+| `0x4010d6d4` | 67 | SELECT cascade level 2 | builds `95 70 <UID/BCC> 28` |
+| `0x4010d718` | 85 | **READ page 3 / split CC+NDEF** | sends `30 03 28`; copies data bytes 0–5 and 6–10 |
+| `0x4010d770` | 78 | **WRITE one Type-2 page** | builds `A2 <page> <data4> 28` |
 | `0x4010db20` | 2477 | **main read-card orchestrator** | largest HAL fn; calls all steps + `0x400f25e0` |
 | `0x4010e4d0` | 356 | **read UID** (`nfc_hal_read_carduid`) | reads 7 bytes; logs UID; calls `0x4010d3f8/428/2ac/458` |
 | `0x4010fc24` | 1373 | **read card + NDEF URI extraction** | parses CC (`0xE1 0x10`) + NDEF record (`0xD1`+`U`+`0x04`) |
@@ -340,8 +344,8 @@ tag: authenticate/read UID, write CC block, write NDEF TLV, read-back verify, re
   sparse. Function roles above are recovered by (a) scanning code segments for 32-bit rodata
   addresses (string literal pools) and (b) matching decompiled constants (`0x04` SendRecv, `0x26`
   REQA, `0x52` WUPA, `0x93/0x95`, `0xE1 0x10` CC magic, `0xD1` NDEF, `0x55 'U'`, `0x04 https://`).
-- The CR95HF low-level driver body (`0x400d5000–0x400d5534`) was not decomposed into functions by
-  Ghidra; its presence/location is evidenced by its literal-pool/data block (`0x400d5400–0x400d550c`)
-  and the function pointer it exports (`0x4024bac4` transport).
-- The write path step-by-step block-level semantics are `[INFERENCE]`; the write strings/step count
-  are exact.
+- The CR95HF low-level driver body is established by its command buffers and
+  callsites. `0x4024bac4`, previously labelled as the transport, is only a
+  context-validity check; the lower UART transport remains unsymbolized.
+- The one-page `A2` write primitive is exact. Higher-level factory policy for
+  choosing pages and formatting generic zero-CC tags remains unresolved.
