@@ -1248,7 +1248,6 @@ static void audio_decode_task(void *arg)
 esp_err_t audio_init(void)
 {
     esp_err_t err;
-    esp_err_t speaker_err;
 
     if (s_tx_chan != NULL)
     {
@@ -1258,11 +1257,12 @@ esp_err_t audio_init(void)
 
     /* Factory order: reset/identify the AW while BCLK/LRCLK are stopped.
      * SmartPA cold start is deferred until the I2S channel is active. */
-    speaker_err = aw88194_init();
-    if (speaker_err != ESP_OK)
+    err = aw88194_init();
+    if (err != ESP_OK)
     {
-        ESP_LOGW(TAG, "AW88194 identification failed: %s",
-                 esp_err_to_name(speaker_err));
+        ESP_LOGE(TAG, "AW88194 identification failed: %s",
+                 esp_err_to_name(err));
+        return err;
     }
 
     err = codec_es8156_init();
@@ -1278,14 +1278,12 @@ esp_err_t audio_init(void)
         return err;
     }
 
-    if (speaker_err == ESP_OK)
+    err = aw88194_start();
+    if (err != ESP_OK)
     {
-        speaker_err = aw88194_start();
-        if (speaker_err != ESP_OK)
-        {
-            ESP_LOGW(TAG, "AW88194 SmartPA start failed: %s",
-                     esp_err_to_name(speaker_err));
-        }
+        ESP_LOGE(TAG, "AW88194 SmartPA start failed: %s",
+                 esp_err_to_name(err));
+        return err;
     }
 
     if (xTaskCreate(audio_decode_task, "audio_dec", AUDIO_DECODE_STACK_BYTES,
@@ -1295,15 +1293,8 @@ esp_err_t audio_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    if (speaker_err == ESP_OK)
-    {
-        ESP_LOGI(TAG, "audio ready (speaker + headphone, APLL 44100 Hz, 16-bit mono-left, I2S %d)",
-                 I2S_PORT);
-    }
-    else
-    {
-        ESP_LOGW(TAG, "audio ready in headphone-only mode; speaker unavailable");
-    }
+    ESP_LOGI(TAG, "audio ready (speaker + headphone, APLL 44100 Hz, 16-bit mono-left, I2S %d)",
+             I2S_PORT);
     return ESP_OK;
 }
 

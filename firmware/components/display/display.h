@@ -50,6 +50,19 @@ void display_flush(void);
 void display_show_rgba(const uint8_t rgba[16 * 16 * 4]);
 
 /**
+ * Render a 16x16 RGBA icon without blanking the panel outside the icon window.
+ * Every pixel of the window is written, so successive animation frames use this
+ * to skip the rev #04 full-panel fill. Use display_show_rgba() whenever the
+ * previous frame may have drawn outside the window.
+ *
+ * @param[in] rgba 1024-byte 16x16 RGBA frame in row-major order.
+ */
+void display_show_rgba_frame(const uint8_t rgba[16 * 16 * 4]);
+
+/** Draw a transient blue-to-green-to-red volume bar over the current frame. */
+void display_draw_volume_overlay(int volume);
+
+/**
  * Render a 16x16 RGB565 icon in ordinary source orientation and RGB order.
  * Rev #04 scales it 12× in color; rev #05 converts it to luminance.
  */

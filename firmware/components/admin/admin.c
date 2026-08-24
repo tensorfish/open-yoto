@@ -1,5 +1,5 @@
 /*
- * admin.c — Boot-time SoftAP, authenticated web UI, remote control, and SD
+ * admin.c — On-demand SoftAP, authenticated web UI, remote control, and SD
  * file management.
  *
  * admin_start() mounts content, starts the open `openyoto` AP and HTTP server,
@@ -67,7 +67,7 @@ static esp_err_t admin_send_oom(httpd_req_t *req, const char *where)
 /* Content store layout owned jointly with the content component. */
 #define ADMIN_MEDIA_DIR         "/sdcard/media"
 #define ADMIN_PATH_MAX          256
-#define ADMIN_NAME_MAX          96
+#define ADMIN_NAME_MAX          128
 #define ADMIN_URL_MAX           512
 #define ADMIN_BODY_MAX          (4 * 1024 * 1024)
 #define ADMIN_MAX_TRACKS        32
@@ -120,8 +120,11 @@ typedef struct
     bool             is_image;
 } admin_file_t;
 
-/* A parsed add request. Single-add and playlist fields may both be populated;
- * the handler picks one path based on manifest_count. */
+/*
+ * A parsed add request. Legacy single-file adds and multipart playlist
+ * uploads retain their wire contracts. JSON playlists reference media already
+ * uploaded through the streaming filesystem API.
+ */
 typedef struct
 {
     char             url[ADMIN_URL_MAX];
@@ -136,13 +139,15 @@ typedef struct
     size_t           image_len;
     char             image_ext[16];
 
-    /* Playlist: ordered manifest entries + collected file parts. */
+    /* Playlist: ordered paths and optional parallel image paths. */
     struct
     {
         char         sound[ADMIN_NAME_MAX];
         char         image[ADMIN_NAME_MAX];
     } manifest[ADMIN_MAX_TRACKS];
     int              manifest_count;
+    bool             playlist_refs;
+    char             cover_image[ADMIN_NAME_MAX];
     admin_file_t     files[ADMIN_MAX_FILES];
     int              file_count;
 
@@ -851,33 +856,105 @@ static esp_err_t admin_parse_multipart(char *body, size_t len,
 
 /* ---------------------------------------------------------------- JSON --- */
 
-/** Parse a raw JSON add request (`url`, `sound`, `image`). */
+/*
+ * Parse the JSON playlist contract:
+ * {"url":"...","tracks":["media/a.mp3"],"track_images":["media/a.img"],
+ *  "image":"media/cover.img"}.
+ *
+ * Legacy JSON {"url","sound","image"} remains supported on /api/add.
+ */
 static esp_err_t admin_parse_json_add(const char *body, admin_add_req_t *out)
 {
     cJSON *root = cJSON_Parse(body);
+    cJSON *tracks;
+    cJSON *images;
     cJSON *item;
+    int count;
+    int i;
 
-    if (root == NULL)
+    if (root == NULL || !cJSON_IsObject(root))
     {
+        cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }
 
-    item = cJSON_GetObjectItem(root, "url");
-    if (item != NULL && cJSON_IsString(item))
+    item = cJSON_GetObjectItemCaseSensitive(root, "url");
+    if (item == NULL || !cJSON_IsString(item) || item->valuestring == NULL
+        || item->valuestring[0] == '\0'
+        || strlen(item->valuestring) >= sizeof(out->url))
     {
-        snprintf(out->url, sizeof(out->url), "%s", item->valuestring);
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
     }
-    item = cJSON_GetObjectItem(root, "sound");
-    if (item != NULL && cJSON_IsString(item))
+    snprintf(out->url, sizeof(out->url), "%s", item->valuestring);
+
+    tracks = cJSON_GetObjectItemCaseSensitive(root, "tracks");
+    if (tracks == NULL)
     {
-        snprintf(out->sound_spec, sizeof(out->sound_spec), "%s", item->valuestring);
-    }
-    item = cJSON_GetObjectItem(root, "image");
-    if (item != NULL && cJSON_IsString(item))
-    {
-        snprintf(out->image_spec, sizeof(out->image_spec), "%s", item->valuestring);
+        item = cJSON_GetObjectItemCaseSensitive(root, "sound");
+        if (item != NULL && cJSON_IsString(item) && item->valuestring != NULL)
+        {
+            snprintf(out->sound_spec, sizeof(out->sound_spec), "%s",
+                     item->valuestring);
+        }
+        item = cJSON_GetObjectItemCaseSensitive(root, "image");
+        if (item != NULL && cJSON_IsString(item) && item->valuestring != NULL)
+        {
+            snprintf(out->image_spec, sizeof(out->image_spec), "%s",
+                     item->valuestring);
+        }
+        cJSON_Delete(root);
+        return ESP_OK;
     }
 
+    images = cJSON_GetObjectItemCaseSensitive(root, "track_images");
+    if (!cJSON_IsArray(tracks) || !cJSON_IsArray(images))
+    {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
+    count = cJSON_GetArraySize(tracks);
+    if (count <= 0 || count > ADMIN_MAX_TRACKS
+        || cJSON_GetArraySize(images) != count)
+    {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (i = 0; i < count; i++)
+    {
+        cJSON *sound = cJSON_GetArrayItem(tracks, i);
+        cJSON *image = cJSON_GetArrayItem(images, i);
+
+        if (sound == NULL || !cJSON_IsString(sound) || sound->valuestring == NULL
+            || sound->valuestring[0] == '\0'
+            || strlen(sound->valuestring) >= sizeof(out->manifest[i].sound)
+            || image == NULL || !cJSON_IsString(image)
+            || image->valuestring == NULL
+            || strlen(image->valuestring) >= sizeof(out->manifest[i].image))
+        {
+            cJSON_Delete(root);
+            return ESP_ERR_INVALID_ARG;
+        }
+        snprintf(out->manifest[i].sound, sizeof(out->manifest[i].sound), "%s",
+                 sound->valuestring);
+        snprintf(out->manifest[i].image, sizeof(out->manifest[i].image), "%s",
+                 image->valuestring);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "image");
+    if (item != NULL)
+    {
+        if (!cJSON_IsString(item) || item->valuestring == NULL
+            || strlen(item->valuestring) >= sizeof(out->cover_image))
+        {
+            cJSON_Delete(root);
+            return ESP_ERR_INVALID_ARG;
+        }
+        snprintf(out->cover_image, sizeof(out->cover_image), "%s",
+                 item->valuestring);
+    }
+    out->manifest_count = count;
+    out->playlist_refs = true;
     cJSON_Delete(root);
     return ESP_OK;
 }
@@ -1412,6 +1489,83 @@ static bool admin_json_string(cJSON *root, const char *key,
         && strlen(item->valuestring) < out_len;
 }
 
+/*
+ * Playlist JSON contains catalog-relative paths. Resolve them against the SD
+ * mount, require a regular uploaded file, and constrain the media type before
+ * the catalog is changed.
+ */
+static bool admin_playlist_media_path(const char *path, bool audio,
+                                      char *absolute, size_t absolute_len)
+{
+    char candidate[ADMIN_PATH_MAX];
+    const char *ext;
+    struct stat st;
+
+    if (path == NULL
+        || strncmp(path, "media/", strlen("media/")) != 0
+        || path[strlen("media/")] == '\0'
+        || snprintf(candidate, sizeof(candidate), "%s/%s",
+                    CONTENT_MOUNT_POINT, path) >= (int)sizeof(candidate)
+        || !admin_resolve_sd_path(candidate, absolute, absolute_len)
+        || stat(absolute, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        return false;
+    }
+    ext = strrchr(path, '.');
+    if (ext == NULL)
+    {
+        return false;
+    }
+    if (audio)
+    {
+        return strcasecmp(ext, ".mp3") == 0 || strcasecmp(ext, ".m4a") == 0
+            || strcasecmp(ext, ".aac") == 0;
+    }
+    return strcasecmp(ext, ".img") == 0;
+}
+
+static esp_err_t admin_register_playlist(const admin_add_req_t *add)
+{
+    const char *tracks[ADMIN_MAX_TRACKS];
+    const char *images[ADMIN_MAX_TRACKS];
+    const char *cover = NULL;
+    char absolute[ADMIN_PATH_MAX];
+    int i;
+
+    if (add->manifest_count <= 0 || add->manifest_count > ADMIN_MAX_TRACKS)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (i = 0; i < add->manifest_count; i++)
+    {
+        if (!admin_playlist_media_path(add->manifest[i].sound, true, absolute,
+                                       sizeof(absolute))
+            || (add->manifest[i].image[0] != '\0'
+                && !admin_playlist_media_path(add->manifest[i].image, false,
+                                              absolute, sizeof(absolute))))
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
+        tracks[i] = add->manifest[i].sound;
+        images[i] = add->manifest[i].image;
+        if (cover == NULL && images[i][0] != '\0')
+        {
+            cover = images[i];
+        }
+    }
+    if (add->cover_image[0] != '\0')
+    {
+        if (!admin_playlist_media_path(add->cover_image, false, absolute,
+                                       sizeof(absolute)))
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
+        cover = add->cover_image;
+    }
+    return content_add_playlist(add->url, tracks, images, add->manifest_count,
+                                cover);
+}
+
 /* ------------------------------------------------------------ handlers -- */
 
 static esp_err_t admin_root_handler(httpd_req_t *req)
@@ -1649,13 +1803,14 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
     char sound_name[ADMIN_NAME_MAX] = { 0 };
     char image_name[ADMIN_NAME_MAX] = { 0 };
 
+    bool playlist_refs;
     if (!admin_session_ok(req))
     {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "unauthorized");
         return ESP_FAIL;
     }
 
-    /* The request struct is ~15 KB (manifest + file tables); keep it off the
+    /* The request struct is ~20 KB (manifest + file tables); keep it off the
      * httpd task's stack. */
     add = calloc(1, sizeof(*add));
     if (add == NULL)
@@ -1685,7 +1840,12 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    if (add->manifest_count > 0)
+    playlist_refs = add->playlist_refs;
+    if (playlist_refs)
+    {
+        err = admin_register_playlist(add);
+    }
+    else if (add->manifest_count > 0)
     {
         err = admin_ingest_playlist(add);
     }
@@ -1703,7 +1863,12 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
 
     if (err != ESP_OK)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "add failed");
+        httpd_resp_send_err(req,
+                            playlist_refs && (err == ESP_ERR_INVALID_ARG
+                                              || err == ESP_ERR_NOT_FOUND)
+                                ? HTTPD_400_BAD_REQUEST
+                                : HTTPD_500_INTERNAL_SERVER_ERROR,
+                            playlist_refs ? "invalid playlist" : "add failed");
         return ESP_FAIL;
     }
 

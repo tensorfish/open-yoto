@@ -36,7 +36,9 @@ flowchart TD
    (legacy or color 16×16; older replacement OYIM 64×64 remains readable).
 4. The two knobs control **volume** (left) and **track skip** (right); pressing
    them **pauses**. Long-pressing the right knob or the power button turns the
-   device **off/on**.
+   device **off/on**. Turning the right knob with no card loaded winks the face;
+   turning the left knob shows a volume bar redrawn at most once per 100 ms
+   with the newest level.
 5. On boot, starts the open `openyoto` hotspot and web UI. A random
    six-character alphanumeric code is shown as two rows of three glyphs. Rev
    #04 renders a native 5×7 font at 9× scale inside the panel's verified
@@ -67,7 +69,10 @@ On power-up, in order:
 1. Initialize settings storage (erase it if it's corrupt).
 2. Start the I²C bus + both I/O expanders.
 3. Battery monitor.
-4. 16×16 display.
+4. 16×16 display, then the boot face animation: `face-01.png`…`face-08.png` at
+   16 fps, resting on `face-08` (the idle face). A depleted battery replaces
+   that resting face with its `battery-*.png` icon as soon as the animation
+   ends.
 5. NFC reader.
 6. Rotary encoders + buttons.
 7. SD card + optional content catalog.
@@ -102,8 +107,8 @@ The knobs/buttons are handled as events (not polled in the loop):
 
 | Input | Action |
 |-------|--------|
-| Left knob turn | volume (5 per click, 0–100) |
-| Right knob turn | skip track (wraps around) |
+| Left knob turn | volume (5 per click, 0–100); bar redraw coalesced to 100 ms |
+| Right knob turn | skip track (wraps around); with no card, winks the face |
 | Either knob press (short) | play / pause |
 | Right knob press (long, ~0.8 s) | power off/on |
 | Power button | power off/on |
@@ -147,6 +152,12 @@ flowchart LR
 - **rev #05 (HT16D35x)**: the hardware is monochrome and physically 16×16, so
   RGB565 is converted to luminance without spatial resampling. Color cannot be
   retained on that display.
+- The volume bar is a 144×12 px band centred in that window (panel x 48…191,
+  y 199…210), drawn as at most four RGB666 rects—three colour bands plus the
+  black remainder that lets the bar shrink. Each `gc9306_fill_rect()` costs
+  IOX I²C round trips for CS/DC, so the previous one-rect-per-column bar made
+  the knob feel unresponsive. rev #05 draws the same bar as two 12-cell rows
+  (logical x 2…13, y 14…15).
 - Legacy 32-byte 16×16 one-bit `.img` masks remain readable on both revisions.
   Previously generated 64×64 OYIM files are also accepted and use their older
   3× rendering path on the GC9306.
@@ -270,6 +281,15 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   80-byte profile, activating the gauge, and waiting for ready state. VCELL and
   SOC are read only after initialization succeeds.
 - **Low battery** = charge < 15% **or** voltage < 3.3 V.
+- The battery screen comes from `firmware/icons/battery-*.png`:
+  `battery-charging.png` while charging, `battery-empty.png` when low or when
+  the reading is unavailable, otherwise the SOC floored to the nearest ten
+  (`battery-10.png`…`battery-100.png`).
+- Battery info never fights the face. Charging is a status glimpse: it is shown
+  at boot and on power-on for 5 s, and the 30 s re-check refreshes the icon only
+  while it still owns the display. A right-knob twist with no card loaded winks
+  and then rests on the face, taking the display back from the charging icon.
+  Only a **low** battery re-asserts itself over whatever is on screen.
 - `IOX_CHG_STAT` is the active-low charging signal even when the SGM41513 I²C
   device does not ACK.
 - "Off" is software standby: audio and the admin server stop and the display

@@ -33,7 +33,7 @@ static const char *TAG = "content";
 #define CONTENT_MEDIA_DIR   CONTENT_MOUNT_POINT "/media"
 #define CONTENT_MEDIA_PREFIX "media"
 
-/* Upper bound for a persisted media path ("media/<name>") built on add. */
+/* Upper bound for a persisted media path ("media/<nested/name>"). */
 #define CONTENT_MEDIA_PATH_MAX 128
 
 /* Values recovered from the stock sd_mount_card path. */
@@ -52,36 +52,69 @@ static bool s_mounted;
 static bool s_index_loaded;
 
 /*
- * Build the persisted media path for a bare file name. A name that already
- * starts with "media" is kept verbatim; otherwise "media/" is prepended.
- *
- * @param name  bare file name (no directory).
- * @param out   output buffer.
- * @param cap   output buffer capacity in bytes.
+ * Normalize a caller-provided media path into the persisted "media/..." form.
+ * Legacy single-file callers may provide a bare filename; playlist callers may
+ * include safe nested paths below media/. The catalog never records paths that
+ * escape the media directory.
  */
-static void content_make_media_path(const char *name, char *out, size_t cap)
+static bool content_make_media_path(const char *name, char *out, size_t cap)
 {
-    size_t prefix_len;
+    const char *relative;
+    const char *p;
+    int written;
 
-    if (out == NULL || cap == 0)
+    if (name == NULL || out == NULL || cap == 0)
     {
-        return;
+        return false;
     }
-    if (name == NULL)
+    if (strncmp(name, CONTENT_MEDIA_PREFIX "/", strlen(CONTENT_MEDIA_PREFIX) + 1) == 0)
     {
-        out[0] = '\0';
-        return;
-    }
-
-    prefix_len = strlen(CONTENT_MEDIA_PREFIX);
-    if (strncmp(name, CONTENT_MEDIA_PREFIX, prefix_len) == 0)
-    {
-        snprintf(out, cap, "%s", name);
+        relative = name + strlen(CONTENT_MEDIA_PREFIX) + 1;
     }
     else
     {
-        snprintf(out, cap, "%s/%s", CONTENT_MEDIA_PREFIX, name);
+        if (strchr(name, '/') != NULL)
+        {
+            return false;
+        }
+        relative = name;
     }
+    if (*relative == '\0')
+    {
+        return false;
+    }
+
+    p = relative;
+    while (*p != '\0')
+    {
+        const char *segment = p;
+        size_t len;
+
+        while (*p == '/')
+        {
+            p++;
+        }
+        segment = p;
+        while (*p != '\0' && *p != '/')
+        {
+            unsigned char ch = (unsigned char)*p;
+
+            if (ch < 0x20 || ch == '\\')
+            {
+                return false;
+            }
+            p++;
+        }
+        len = (size_t)(p - segment);
+        if (len == 0 || (len == 1 && segment[0] == '.')
+            || (len == 2 && segment[0] == '.' && segment[1] == '.'))
+        {
+            return false;
+        }
+    }
+
+    written = snprintf(out, cap, "%s/%s", CONTENT_MEDIA_PREFIX, relative);
+    return written > 0 && (size_t)written < cap;
 }
 
 /*
@@ -109,7 +142,7 @@ static esp_err_t content_save(void)
         return ESP_ERR_NO_MEM;
     }
 
-    f = fopen(CONTENT_MAP_PATH, "w");
+    f = fopen(CONTENT_MAP_PATH ".tmp", "w");
     if (f == NULL)
     {
         cJSON_free(json);
@@ -123,6 +156,12 @@ static esp_err_t content_save(void)
 
     if (written != len || rc != 0)
     {
+        unlink(CONTENT_MAP_PATH ".tmp");
+        return ESP_FAIL;
+    }
+    if (rename(CONTENT_MAP_PATH ".tmp", CONTENT_MAP_PATH) != 0)
+    {
+        unlink(CONTENT_MAP_PATH ".tmp");
         return ESP_FAIL;
     }
     return ESP_OK;
@@ -552,6 +591,14 @@ esp_err_t content_add(const char *url, const char *sound_name,
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (!content_make_media_path(sound_name, sound_media, sizeof(sound_media))
+        || (image_name[0] != '\0'
+            && !content_make_media_path(image_name, image_media,
+                                        sizeof(image_media))))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     /* Locate any existing card with the same URL so adds stay idempotent. */
     idx = -1;
     i = 0;
@@ -577,12 +624,14 @@ esp_err_t content_add(const char *url, const char *sound_name,
         return ESP_ERR_NO_MEM;
     }
 
-    content_make_media_path(sound_name, sound_media, sizeof(sound_media));
-    content_make_media_path(image_name, image_media, sizeof(image_media));
+    /* Paths were normalized and validated before replacing the old mapping. */
 
     cJSON_AddStringToObject(new_card, "url", url);
     cJSON_AddStringToObject(new_card, "sound", sound_media);
-    cJSON_AddStringToObject(new_card, "image", image_media);
+    if (image_name[0] != '\0')
+    {
+        cJSON_AddStringToObject(new_card, "image", image_media);
+    }
 
     cJSON_AddItemToArray(s_cards, new_card);
 
@@ -667,6 +716,23 @@ esp_err_t content_add_playlist(const char *url,
         return index_err;
     }
     if (url == NULL || tracks == NULL || n <= 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (i = 0; i < n; i++)
+    {
+        if (tracks[i] == NULL
+            || !content_make_media_path(tracks[i], media, sizeof(media))
+            || (track_images != NULL && track_images[i] != NULL
+                && track_images[i][0] != '\0'
+                && !content_make_media_path(track_images[i], media, sizeof(media))))
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    if (cover_image != NULL && cover_image[0] != '\0'
+        && !content_make_media_path(cover_image, media, sizeof(media)))
     {
         return ESP_ERR_INVALID_ARG;
     }

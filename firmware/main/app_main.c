@@ -1,19 +1,21 @@
 /*
- * app_main.c — Yoto replacement firmware: state machine.
+ * app_main.c — Yoto replacement firmware: player state machine.
  *
- * Boot initializes the player, mounts SD, starts the `openyoto` SoftAP and
- * authenticated web UI, then continues normal NFC/encoder playback. The
- * six-character admin code is rendered on the player display at startup.
- * A magic NDEF card can still explicitly toggle admin mode.
+ * Boot initializes the player and mounts SD. Normal NFC cards select mapped
+ * playback; the exact admin magic card toggles the `openyoto` SoftAP and its
+ * authenticated web UI. The six-character admin code is displayed only while
+ * that mode is active.
  */
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
-
+#include "esp_system.h"
 #include "board_pins.h"
 #include "iox.h"
 #include "battery.h"
@@ -25,11 +27,12 @@
 #include "audio.h"
 #include "admin.h"
 #include "yoto_vfs.h"
-#include "stock_low_battery_rgba.h"
-#include "requested_factory_asset_rgba.h"
+#include "battery_icons_rgba.h"
+#include "boot_face_rgba.h"
+#include "wink_face_rgba.h"
 static const char *TAG = "main";
 
-/* URL provisioned to an empty Type-2 card for the local admin endpoint. */
+/* Exact NFC URI that toggles the on-demand admin endpoint. */
 #define MAGIC_URL "https://openyoto.com/admin"
 
 /* Number of encoder detents per volume step. */
@@ -42,6 +45,191 @@ static int s_volume = 100;
 #else
 static int s_volume = 70;
 #endif
+
+/* ------------------------------------------------------- boot recovery --- */
+#define BOOT_RECOVERY_NAMESPACE "boot"
+#define BOOT_RECOVERY_KEY "recovery"
+#define BOOT_RECOVERY_MAGIC 0x4f595452u
+#define BOOT_RECOVERY_VERSION 1u
+#define BOOT_RECOVERY_MAX_RESTARTS 3u
+
+typedef enum {
+    BOOT_STAGE_IOX = 1,
+    BOOT_STAGE_BATTERY,
+    BOOT_STAGE_DISPLAY,
+    BOOT_STAGE_AUDIO,
+    BOOT_STAGE_NFC,
+    BOOT_STAGE_ENCODER,
+} boot_stage_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t restart_count;
+    int32_t stage;
+    int32_t error;
+} boot_recovery_record_t;
+
+static boot_recovery_record_t s_boot_recovery;
+static const uint32_t s_boot_recovery_delays_ms[] = { 1000, 2000, 4000 };
+
+static const char *boot_stage_name(boot_stage_t stage)
+{
+    switch (stage)
+    {
+        case BOOT_STAGE_IOX:
+            return "IOX";
+        case BOOT_STAGE_BATTERY:
+            return "battery";
+        case BOOT_STAGE_DISPLAY:
+            return "display";
+        case BOOT_STAGE_AUDIO:
+            return "speaker/audio";
+        case BOOT_STAGE_NFC:
+            return "NFC";
+        case BOOT_STAGE_ENCODER:
+            return "encoder";
+        default:
+            return "unknown";
+    }
+}
+
+static bool boot_recovery_record_valid(const boot_recovery_record_t *record)
+{
+    return record->magic == BOOT_RECOVERY_MAGIC
+           && record->version == BOOT_RECOVERY_VERSION
+           && record->restart_count > 0
+           && record->restart_count <= BOOT_RECOVERY_MAX_RESTARTS
+           && record->stage >= BOOT_STAGE_IOX
+           && record->stage <= BOOT_STAGE_ENCODER;
+}
+
+static esp_err_t boot_recovery_clear(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(BOOT_RECOVERY_NAMESPACE, NVS_READWRITE, &handle);
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    err = nvs_erase_key(handle, BOOT_RECOVERY_KEY);
+    if (err == ESP_ERR_NVS_NOT_FOUND)
+    {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK)
+    {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+static void boot_recovery_prepare(void)
+{
+    nvs_handle_t handle;
+    size_t record_size = sizeof(s_boot_recovery);
+    esp_err_t err;
+
+    memset(&s_boot_recovery, 0, sizeof(s_boot_recovery));
+    if (esp_reset_reason() != ESP_RST_SW)
+    {
+        err = boot_recovery_clear();
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "could not clear boot recovery record: %s",
+                     esp_err_to_name(err));
+        }
+        return;
+    }
+
+    err = nvs_open(BOOT_RECOVERY_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not read boot recovery record: %s",
+                 esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_get_blob(handle, BOOT_RECOVERY_KEY, &s_boot_recovery,
+                       &record_size);
+    nvs_close(handle);
+    if (err != ESP_OK || record_size != sizeof(s_boot_recovery)
+        || !boot_recovery_record_valid(&s_boot_recovery))
+    {
+        memset(&s_boot_recovery, 0, sizeof(s_boot_recovery));
+        err = boot_recovery_clear();
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "could not discard boot recovery record: %s",
+                     esp_err_to_name(err));
+        }
+    }
+}
+
+static void boot_recovery_hold(boot_stage_t stage, esp_err_t err)
+{
+    ESP_LOGE(TAG, "boot recovery exhausted at %s: %s; holding",
+             boot_stage_name(stage), esp_err_to_name(err));
+    while (true)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+static void boot_recovery_restart(boot_stage_t stage, esp_err_t err)
+{
+    nvs_handle_t handle;
+    esp_err_t nvs_err;
+
+    if (s_boot_recovery.restart_count >= BOOT_RECOVERY_MAX_RESTARTS)
+    {
+        boot_recovery_hold(stage, err);
+    }
+
+    s_boot_recovery.magic = BOOT_RECOVERY_MAGIC;
+    s_boot_recovery.version = BOOT_RECOVERY_VERSION;
+    s_boot_recovery.restart_count++;
+    s_boot_recovery.stage = stage;
+    s_boot_recovery.error = err;
+
+    nvs_err = nvs_open(BOOT_RECOVERY_NAMESPACE, NVS_READWRITE, &handle);
+    if (nvs_err == ESP_OK)
+    {
+        nvs_err = nvs_set_blob(handle, BOOT_RECOVERY_KEY, &s_boot_recovery,
+                               sizeof(s_boot_recovery));
+        if (nvs_err == ESP_OK)
+        {
+            nvs_err = nvs_commit(handle);
+        }
+        nvs_close(handle);
+    }
+    if (nvs_err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "cannot persist boot recovery record: %s",
+                 esp_err_to_name(nvs_err));
+        boot_recovery_hold(stage, err);
+    }
+
+    uint16_t attempt = s_boot_recovery.restart_count;
+    ESP_LOGW(TAG, "boot recovery %u/%u at %s: %s; restarting in %u ms",
+             (unsigned)attempt, (unsigned)BOOT_RECOVERY_MAX_RESTARTS,
+             boot_stage_name(stage), esp_err_to_name(err),
+             (unsigned)s_boot_recovery_delays_ms[attempt - 1]);
+    vTaskDelay(pdMS_TO_TICKS(s_boot_recovery_delays_ms[attempt - 1]));
+    esp_restart();
+    boot_recovery_hold(stage, err);
+}
+
+static void boot_require(boot_stage_t stage, esp_err_t err)
+{
+    if (err != ESP_OK)
+    {
+        boot_recovery_restart(stage, err);
+    }
+}
 
 /* ------------------------------------------------------------------ art -- */
 /* 16x16 one-bit bitmaps: 2 bytes per row (32 bytes total). Each byte holds 8
@@ -85,11 +273,7 @@ static void draw_bitmap(const uint8_t bmp[32])
 }
 
 static void show_admin_code(
-    const char code[ADMIN_ACCESS_CODE_LEN + 1])
-{
-    ESP_LOGI(TAG, "admin code: %s", code);
-    display_show_access_code(code);
-}
+    const char code[ADMIN_ACCESS_CODE_LEN + 1]);
 
 /* ------------------------------------------------------------- encoder --- */
 /* Playback/power state, guarded by s_state_mutex (shared by the encoder task
@@ -99,6 +283,34 @@ static char s_current_url[CR95HF_URL_MAX + 1];
 static int s_track_index = 0;
 static int s_track_count = 0;
 static SemaphoreHandle_t s_state_mutex;
+typedef enum {
+    DISPLAY_BASE_OFF,
+    DISPLAY_BASE_IDLE,
+    DISPLAY_BASE_CARD,
+    DISPLAY_BASE_ADMIN,
+    DISPLAY_BASE_BATTERY,
+} display_base_t;
+
+#define POWERED_BATTERY_VISUAL_MS 5000
+/* The panel is refreshed once per coalesce window with the newest volume, never
+ * once per detent. One window is one main-loop pass, so a fast turn still costs
+ * at most one bar draw per pass. */
+#define VOLUME_DRAW_COALESCE_MS      100
+/* The overlay must outlive the coalesce window so the drawn bar is actually
+ * visible. */
+#define VOLUME_OVERLAY_MS           1500
+#define IDLE_WINK_MS                300
+#define BOOT_FACE_FPS                16
+
+static display_base_t s_display_base = DISPLAY_BASE_IDLE;
+static char s_display_image_path[160];
+static char s_admin_code[ADMIN_ACCESS_CODE_LEN + 1];
+static uint32_t s_battery_visual_deadline;
+static uint32_t s_volume_overlay_deadline;
+static uint32_t s_idle_wink_deadline;
+static uint32_t s_volume_draw_due;
+static bool s_volume_dirty;
+static uint8_t s_wink_frame_index;
 
 /* Serialize access to playback/track state across the two tasks. */
 static void state_lock(void)
@@ -109,6 +321,264 @@ static void state_lock(void)
 static void state_unlock(void)
 {
     xSemaphoreGive(s_state_mutex);
+}
+static esp_err_t render_image(const char *path);
+
+static bool display_deadline_reached(uint32_t now, uint32_t deadline)
+{
+    return deadline != 0 && (int32_t)(now - deadline) >= 0;
+}
+
+static void display_set_idle_locked(void)
+{
+    s_display_base = DISPLAY_BASE_IDLE;
+    s_display_image_path[0] = '\0';
+    s_battery_visual_deadline = 0;
+    s_idle_wink_deadline = 0;
+    if (s_volume_overlay_deadline == 0)
+    {
+        display_show_rgba(IDLE_FACE_RGBA);
+    }
+}
+
+/*
+ * Pick the battery icon for a state of charge. Levels floor to the nearest
+ * ten so the icon never overstates the charge, and anything under 10% (or an
+ * unavailable reading) shows the empty icon.
+ *
+ * @param[in] soc state of charge 0..100; negative means unknown.
+ */
+static const uint8_t *battery_icon_for(int soc)
+{
+    int level = soc / 10;
+
+    if (soc < 10)
+    {
+        return BATTERY_ICON_EMPTY;
+    }
+    if (level > 10)
+    {
+        level = 10;
+    }
+    /* Frames 1..10 are battery-10.png through battery-100.png. */
+    return BATTERY_ICON_FRAMES[level];
+}
+
+static void display_render_battery_locked(void)
+{
+    const uint8_t *icon;
+
+    if (battery_is_charging())
+    {
+        icon = BATTERY_ICON_CHARGING;
+    }
+    else if (battery_is_low())
+    {
+        /* battery_is_low() also fires on a sagging cell voltage at a healthy
+         * state of charge, so the warning cannot be derived from the SOC icon
+         * alone. battery-empty.png is the recovered stock low-battery slash. */
+        icon = BATTERY_ICON_EMPTY;
+    }
+    else
+    {
+        icon = battery_icon_for(battery_soc());
+    }
+    display_show_rgba(icon);
+    s_display_base = DISPLAY_BASE_BATTERY;
+}
+
+static void display_show_powered_battery_locked(void)
+{
+    display_render_battery_locked();
+    /* Charging is an initial status, not a persistent base screen. A
+     * sufficiently charged device always returns to its idle face. */
+    if (!battery_is_low())
+    {
+        s_battery_visual_deadline =
+            xTaskGetTickCount() + pdMS_TO_TICKS(POWERED_BATTERY_VISUAL_MS);
+    }
+}
+
+static void display_play_boot_animation_locked(void)
+{
+    TickType_t start = xTaskGetTickCount();
+
+    for (int i = 0; i < BOOT_FACE_FRAME_COUNT; i++)
+    {
+        if (i == 0)
+        {
+            /* Panel content is undefined after reset, so the first frame
+             * blanks it; later frames rewrite every pixel of the icon window
+             * and skip that 230 KB fill to hold the frame budget. */
+            display_show_rgba(BOOT_FACE_FRAMES[i]);
+        }
+        else if (i < BOOT_FACE_FRAME_COUNT - 1)
+        {
+            display_show_rgba_frame(BOOT_FACE_FRAMES[i]);
+        }
+        else
+        {
+            /* The resting frame is face-08, which is also IDLE_FACE_RGBA.
+             * Draw it through display_set_idle_locked() so the animation
+             * ends on DISPLAY_BASE_IDLE with the display deadlines reset,
+             * without drawing the final frame twice. */
+            display_set_idle_locked();
+        }
+
+        TickType_t due =
+            start + ((i + 1) * configTICK_RATE_HZ) / BOOT_FACE_FPS;
+        int32_t remaining = (int32_t)(due - xTaskGetTickCount());
+        if (remaining > 0)
+        {
+            vTaskDelay(remaining);
+        }
+    }
+}
+
+static void display_render_base_locked(void)
+{
+    switch (s_display_base)
+    {
+        case DISPLAY_BASE_OFF:
+            display_clear();
+            display_flush();
+            break;
+        case DISPLAY_BASE_IDLE:
+            display_set_idle_locked();
+            break;
+        case DISPLAY_BASE_CARD:
+            if (s_display_image_path[0] != '\0'
+                && render_image(s_display_image_path) == ESP_OK)
+            {
+                break;
+            }
+            display_set_idle_locked();
+            break;
+        case DISPLAY_BASE_ADMIN:
+            if (s_admin_code[0] != '\0')
+            {
+                display_show_access_code(s_admin_code);
+                break;
+            }
+            display_set_idle_locked();
+            break;
+        case DISPLAY_BASE_BATTERY:
+            display_render_battery_locked();
+            break;
+    }
+}
+
+static esp_err_t display_show_card_image_locked(const char *path)
+{
+    esp_err_t err = render_image(path);
+
+    if (err == ESP_OK)
+    {
+        s_display_base = DISPLAY_BASE_CARD;
+        snprintf(s_display_image_path, sizeof(s_display_image_path), "%s", path);
+    }
+    return err;
+}
+
+/*
+ * Drop a pending coalesced volume draw along with the overlay itself. Every
+ * screen that replaces the overlay must go through this: a draw that fires
+ * after the overlay deadline was cleared would paint a bar that nothing
+ * erases.
+ */
+static void display_cancel_volume_locked(void)
+{
+    s_volume_overlay_deadline = 0;
+    s_volume_draw_due = 0;
+    s_volume_dirty = false;
+}
+
+static void display_show_volume_locked(void)
+{
+    s_idle_wink_deadline = 0;
+    /* Re-arming the draw deadline on every detent would starve the draw for
+     * the whole time the user keeps turning; arm it only when no draw is
+     * already pending. */
+    if (!s_volume_dirty)
+    {
+        s_volume_dirty = true;
+        s_volume_draw_due =
+            xTaskGetTickCount() + pdMS_TO_TICKS(VOLUME_DRAW_COALESCE_MS);
+    }
+    s_volume_overlay_deadline =
+        xTaskGetTickCount() + pdMS_TO_TICKS(VOLUME_OVERLAY_MS);
+}
+
+static void display_show_wink_locked(void)
+{
+    /* A right-knob twist is direct user feedback, so it outranks the battery
+     * screen. Card art, the admin access code and an explicitly cleared screen
+     * still win, as does an on-screen volume bar. */
+    if ((s_display_base != DISPLAY_BASE_IDLE
+         && s_display_base != DISPLAY_BASE_BATTERY)
+        || s_volume_overlay_deadline != 0)
+    {
+        return;
+    }
+    /* Demote the battery screen instead of drawing over it, so the wink hold
+     * expires back to the face rather than snapping to the battery icon. */
+    s_display_base = DISPLAY_BASE_IDLE;
+    s_display_image_path[0] = '\0';
+    s_battery_visual_deadline = 0;
+    display_show_rgba(WINK_FACE_FRAMES[s_wink_frame_index]);
+    /* Alternate so consecutive right-knob turns cycle the two wink frames. */
+    s_wink_frame_index = (uint8_t)(s_wink_frame_index ^ 1u);
+    s_idle_wink_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(IDLE_WINK_MS);
+}
+
+static void display_maintain_locked(void)
+{
+    uint32_t now = xTaskGetTickCount();
+    if (s_volume_dirty && display_deadline_reached(now, s_volume_draw_due))
+    {
+        s_volume_dirty = false;
+        display_draw_volume_overlay(s_volume);
+    }
+
+    if (display_deadline_reached(now, s_volume_overlay_deadline))
+    {
+        display_cancel_volume_locked();
+        display_render_base_locked();
+    }
+    if (s_volume_overlay_deadline != 0)
+    {
+        return;
+    }
+    if (display_deadline_reached(now, s_idle_wink_deadline))
+    {
+        s_idle_wink_deadline = 0;
+        display_render_base_locked();
+    }
+    if (s_idle_wink_deadline != 0)
+    {
+        return;
+    }
+    if (display_deadline_reached(now, s_battery_visual_deadline)
+        && s_display_base == DISPLAY_BASE_BATTERY)
+    {
+        s_battery_visual_deadline = 0;
+        display_set_idle_locked();
+    }
+    /* The original provides named wink resources, but retained artifacts do
+     * not prove an autonomous blink timer. Winks are event-driven only. */
+}
+
+static void show_admin_code(
+    const char code[ADMIN_ACCESS_CODE_LEN + 1])
+{
+    state_lock();
+    snprintf(s_admin_code, sizeof(s_admin_code), "%s", code);
+    s_display_base = DISPLAY_BASE_ADMIN;
+    s_battery_visual_deadline = 0;
+    display_cancel_volume_locked();
+    s_idle_wink_deadline = 0;
+    display_show_access_code(s_admin_code);
+    state_unlock();
 }
 
 /* Toggle play/pause for the currently loaded audio. */
@@ -141,18 +611,21 @@ static void power_toggle(void)
         {
             admin_stop();
         }
-        display_clear();
-        display_flush();
+        s_display_base = DISPLAY_BASE_OFF;
+        s_battery_visual_deadline = 0;
+        display_cancel_volume_locked();
+        s_idle_wink_deadline = 0;
+        display_render_base_locked();
         ESP_LOGI(TAG, "powered off");
     }
     else
     {
+        display_show_powered_battery_locked();
         ESP_LOGI(TAG, "powered on");
     }
     state_unlock();
 }
 
-static esp_err_t render_image(const char *path);
 
 /* Advance/rewind the current card's tracks by delta (wraps around). */
 static void skip_track(int delta)
@@ -179,15 +652,64 @@ static void skip_track(int delta)
         }
 
         if (content_get_track_image(s_current_url, s_track_index,
-                                    image_path, sizeof(image_path)) == ESP_OK)
+                                    image_path, sizeof(image_path)) != ESP_OK
+            || display_show_card_image_locked(image_path) != ESP_OK)
         {
-            render_image(image_path);
+            display_set_idle_locked();
         }
-        else
-        {
-            display_clear();
-            display_flush();
-        }
+    }
+    else if (s_track_count == 0)
+    {
+        /* A right-knob turn with no card loaded is wink feedback. */
+        display_show_wink_locked();
+    }
+    state_unlock();
+}
+
+/* Start the first track for a mapped NFC URI and establish skip-track state. */
+static void play_card(const char *url)
+{
+    char sound_path[128];
+    char image_path[128];
+    int track_count = content_get_track_count(url);
+
+    if (track_count <= 0)
+    {
+        ESP_LOGI(TAG, "card has no mapped tracks: %s",
+                 url[0] == '\0' ? "<none>" : url);
+        state_lock();
+        display_set_idle_locked();
+        state_unlock();
+        return;
+    }
+
+    state_lock();
+    s_track_index = 0;
+    s_track_count = track_count;
+    snprintf(s_current_url, sizeof(s_current_url), "%s", url);
+
+    if (content_get_track(s_current_url, s_track_index,
+                          sound_path, sizeof(sound_path)) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "mapped card track became unavailable: %s", url);
+        s_track_count = 0;
+        s_current_url[0] = '\0';
+        display_set_idle_locked();
+        state_unlock();
+        return;
+    }
+
+    ESP_LOGI(TAG, "track 1/%d: %s", s_track_count, sound_path);
+    if (audio_play(sound_path) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not play card track: %s", sound_path);
+    }
+
+    if (content_get_track_image(s_current_url, s_track_index,
+                                image_path, sizeof(image_path)) != ESP_OK
+        || display_show_card_image_locked(image_path) != ESP_OK)
+    {
+        display_set_idle_locked();
     }
     state_unlock();
 }
@@ -236,6 +758,7 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
     {
         if (encoder_id == ENCODER_ID_0)
         {
+            state_lock();
             s_volume -= delta * VOLUME_DELTA_PER_DETENT;
             if (s_volume < VOLUME_MIN)
             {
@@ -245,8 +768,16 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
             {
                 s_volume = VOLUME_MAX;
             }
-            audio_set_volume(s_volume);
-            ESP_LOGI(TAG, "volume %d", s_volume);
+            if (audio_set_volume(s_volume) == ESP_OK)
+            {
+                display_show_volume_locked();
+                ESP_LOGI(TAG, "volume %d", s_volume);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "could not set volume %d", s_volume);
+            }
+            state_unlock();
         }
         else if (encoder_id == ENCODER_ID_1)
         {
@@ -456,7 +987,7 @@ static esp_err_t remote_play_sound(const char *absolute_sd_path)
 static esp_err_t remote_display_image(const char *absolute_sd_path)
 {
     state_lock();
-    esp_err_t err = render_image(absolute_sd_path);
+    esp_err_t err = display_show_card_image_locked(absolute_sd_path);
     state_unlock();
     return err;
 }
@@ -472,8 +1003,11 @@ static esp_err_t remote_stop_sound(void)
 static esp_err_t remote_clear_display(void)
 {
     state_lock();
-    display_clear();
-    display_flush();
+    s_display_base = DISPLAY_BASE_OFF;
+    s_battery_visual_deadline = 0;
+    display_cancel_volume_locked();
+    s_idle_wink_deadline = 0;
+    display_render_base_locked();
     state_unlock();
     return ESP_OK;
 }
@@ -485,70 +1019,8 @@ static esp_err_t remote_write_card(const char *url,
     return cr95hf_write_url(url, expected_uid, uid_len);
 }
 
-/*
- * Draw a battery level bar (fill proportional to soc) and, when charging, a
- * lightning bolt above it. Used at boot and on each battery-check period.
- *
- * @param[in] soc       state of charge 0..100; -1 draws no fill.
- * @param[in] charging  true to draw the charging bolt.
- */
-static void draw_battery_status(int soc, bool charging)
-{
-    static const uint8_t bolt[][2] = {
-        { 8, 1 }, { 9, 1 }, { 7, 2 }, { 8, 2 }, { 6, 3 }, { 7, 3 }, { 8, 3 },
-        { 7, 4 }, { 8, 4 }, { 9, 4 }, { 8, 5 }, { 9, 5 }, { 10, 5 },
-        { 9, 6 }, { 10, 6 }, { 11, 6 }, { 10, 7 }, { 11, 7 }, { 10, 8 },
-        { 11, 8 },
-    };
-    size_t i;
-
-    display_clear();
-
-    /* Horizontal bar: outline x 0..15, y 11..14; fill left-to-right. */
-    for (int x = 0; x < 16; x++)
-    {
-        display_set_pixel(x, 11, true);
-        display_set_pixel(x, 14, true);
-    }
-    for (int y = 11; y <= 14; y++)
-    {
-        display_set_pixel(0, y, true);
-        display_set_pixel(15, y, true);
-    }
-    if (soc > 0)
-    {
-        int cols = (soc > 100 ? 100 : soc) * 14 / 100;
-        for (int x = 1; x <= cols && x <= 14; x++)
-        {
-            for (int y = 12; y <= 13; y++)
-            {
-                display_set_pixel(x, y, true);
-            }
-        }
-    }
-
-    if (charging)
-    {
-        for (i = 0; i < sizeof(bolt) / sizeof(bolt[0]); i++)
-        {
-            display_set_pixel(bolt[i][0], bolt[i][1], true);
-        }
-    }
-
-    display_flush();
-}
-
-
-/*
- * Check the battery and show the low-battery art when it is depleted.
- */
-#ifdef CONFIG_APP_DISPLAY_TEST_ICON
-static void show_display_test_image(void)
-{
-    display_show_rgba(REQUESTED_FACTORY_ASSET_RGBA);
-}
-#endif
-
+/* Re-check the battery and refresh the battery icon while it is charging or
+ * depleted. */
 static void battery_periodic_check(void)
 {
     uint32_t now = xTaskGetTickCount();
@@ -559,21 +1031,43 @@ static void battery_periodic_check(void)
     }
     s_battery_check_ticks = now;
 
-    if (battery_is_charging())
+    state_lock();
+    if (battery_is_low())
     {
-        ESP_LOGI(TAG, "charging (SOC %d%%)", battery_soc());
-        draw_battery_status(battery_soc(), true);
-    }
-    else if (battery_is_low())
-    {
+        /* A depleted battery is a warning, so it re-asserts itself over
+         * whatever is on screen. */
         ESP_LOGW(TAG, "low battery (%.1f mV, %d%%)",
                  (double)battery_voltage(), battery_soc());
-#ifdef CONFIG_APP_DISPLAY_TEST_ICON
-        show_display_test_image();
-#else
-        display_show_rgba(STOCK_LOW_BATTERY_RGBA);
-#endif
+        s_battery_visual_deadline = 0;
+        s_idle_wink_deadline = 0;
+        if (s_volume_overlay_deadline == 0)
+        {
+            display_render_battery_locked();
+        }
+        else
+        {
+            s_display_base = DISPLAY_BASE_BATTERY;
+        }
     }
+    else if (battery_is_charging())
+    {
+        ESP_LOGI(TAG, "charging (SOC %d%%)", battery_soc());
+        /* Charging is a status glimpse, not a base screen: refresh the icon
+         * only while it already owns the display, so a wink, card art or the
+         * idle face keeps it. */
+        if (s_display_base == DISPLAY_BASE_BATTERY
+            && s_volume_overlay_deadline == 0
+            && s_idle_wink_deadline == 0)
+        {
+            display_render_battery_locked();
+        }
+    }
+    else if (s_display_base == DISPLAY_BASE_BATTERY
+             && s_battery_visual_deadline == 0)
+    {
+        display_set_idle_locked();
+    }
+    state_unlock();
 }
 
 static const char *card_state_name(cr95hf_card_state_t state)
@@ -649,6 +1143,8 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    boot_recovery_prepare();
+
 
     ESP_ERROR_CHECK(yoto_vfs_init());
 
@@ -661,39 +1157,31 @@ void app_main(void)
         return;
     }
 
-    /* I2C bus + IO expanders first. */
-    ESP_ERROR_CHECK(iox_init());
-    ESP_ERROR_CHECK(battery_init());
+    /* IOX powers and connects the shared I2C peripherals, so it must be
+     * healthy before their strict boot checks. */
+    boot_require(BOOT_STAGE_IOX, iox_init());
+    boot_require(BOOT_STAGE_BATTERY, battery_init());
     if (lis2dh12_init() != ESP_OK)
     {
         ESP_LOGW(TAG, "accelerometer unavailable; continuing");
     }
-    ESP_ERROR_CHECK(display_init());
+    boot_require(BOOT_STAGE_DISPLAY, display_init());
 
-    /* Boot-time battery check: render before the remaining peripheral init
-     * so a later driver (UART/PCNT/SDMMC/I2S) can't disturb the panel. */
-#ifdef CONFIG_APP_DISPLAY_TEST_ICON
-    show_display_test_image();
-#else
-    if (battery_is_charging())
+    /* Play the boot face animation and settle on the idle face. */
+    state_lock();
+    display_play_boot_animation_locked();
+    /* Show the battery icon straight after the animation when it carries news:
+     * a charging status clears itself after POWERED_BATTERY_VISUAL_MS, while a
+     * depleted battery stays up. The periodic check only runs 30 s later. */
+    if (battery_is_low() || battery_is_charging())
     {
-        ESP_LOGI(TAG, "charging (SOC %d%%)", battery_soc());
-        draw_battery_status(battery_soc(), true);
+        display_show_powered_battery_locked();
     }
-    else if (battery_is_low())
-    {
-        ESP_LOGW(TAG, "low battery");
-        display_show_rgba(STOCK_LOW_BATTERY_RGBA);
-    }
-#endif
+    state_unlock();
 
-    /* Audio is another recoverable peripheral. A missing amplifier/codec
-     * must remain visible in logs without turning one hardware fault into a
-     * watchdog-like reboot loop. Playback calls report invalid state later. */
-    if (audio_init() != ESP_OK)
-    {
-        ESP_LOGW(TAG, "audio unavailable; continuing without playback");
-    }
+    /* Speaker, codec, I2S, and NFC are required for normal player operation.
+     * A failed boot is retried through the bounded full-system recovery gate. */
+    boot_require(BOOT_STAGE_AUDIO, audio_init());
     audio_set_volume(s_volume);
 
 #ifdef CONFIG_APP_SPEAKER_TEST_TONE
@@ -702,13 +1190,8 @@ void app_main(void)
         ESP_LOGE(TAG, "speaker test tone failed to start");
     }
 #endif
-    /* NFC reader is optional at boot: a missing/unresponsive CR95HF (no
-     * antenna, dead chip, bench rig) must not reboot-loop the device. */
-    if (cr95hf_init() != ESP_OK)
-    {
-        ESP_LOGW(TAG, "NFC reader unavailable; continuing");
-    }
-    ESP_ERROR_CHECK(encoder_init());
+    boot_require(BOOT_STAGE_NFC, cr95hf_init());
+    boot_require(BOOT_STAGE_ENCODER, encoder_init());
     encoder_register_cb(encoder_cb);
     /* Stock user mode treats a successful FatFS mount as SD availability;
      * its optional higher-level indexes do not gate the mount. */
@@ -731,25 +1214,17 @@ void app_main(void)
                      YOTO_WELCOME_PATH, esp_err_to_name(startup_err));
         }
     }
+    /* These registrations remain installed across admin start/stop cycles. */
     admin_set_code_callback(show_admin_code);
     admin_set_path_callbacks(remote_play_sound, remote_display_image,
                              remote_stop_sound, remote_clear_display);
     admin_set_card_write_callback(remote_write_card);
-    {
-        char code[ADMIN_ACCESS_CODE_LEN + 1];
-        esp_err_t admin_err = admin_start(code, sizeof(code));
 
-        if (admin_err == ESP_OK)
-        {
-            ESP_LOGI(TAG,
-                     "admin active at boot (SSID=openyoto, code=%s, http://192.168.4.1/)",
-                     code);
-        }
-        else
-        {
-            ESP_LOGE(TAG, "admin startup failed: %s",
-                     esp_err_to_name(admin_err));
-        }
+    err = boot_recovery_clear();
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not clear boot recovery record: %s",
+                 esp_err_to_name(err));
     }
 
     ESP_LOGI(TAG, "boot complete (battery %d%%, %.1f mV)",
@@ -769,7 +1244,8 @@ void app_main(void)
             continue;
         }
 
-        /* Diagnostic provisioning mode: inspect each detected Type-2 card. */
+        /* A new NFC card either toggles admin, is captured by active admin,
+         * or starts its mapped first track. */
         cr95hf_card_info_t card_info;
         uint8_t uid_len = sizeof(uid);
         bool card = cr95hf_poll_card(uid, &uid_len, url, sizeof(url),
@@ -786,39 +1262,65 @@ void app_main(void)
 
         if (new_card)
         {
-            esp_err_t write_err;
-
             memcpy(last_uid, uid, uid_len);
             last_uid_len = uid_len;
             log_card_diagnostics(uid, uid_len, url, &card_info);
-            admin_set_last_card(uid, uid_len, url);
 
+            /* Replacing a card always stops the previous card before handling
+             * the new card's mode or playback action. */
             state_lock();
             audio_stop();
             s_track_count = 0;
             s_track_index = 0;
             s_current_url[0] = '\0';
             state_unlock();
-            if (card_info.state != CR95HF_CARD_BLANK)
+
+            if (strcmp(url, MAGIC_URL) == 0)
             {
-                ESP_LOGI(TAG, "card: not blank; left unchanged");
-            }
-            else
-            {
-                ESP_LOGI(TAG, "card: blank; provisioning %s", MAGIC_URL);
-                write_err = cr95hf_write_url(MAGIC_URL, uid, uid_len);
-                if (write_err == ESP_OK)
+                if (admin_is_active())
                 {
-                    admin_set_last_card(uid, uid_len, MAGIC_URL);
-                    ESP_LOGI(TAG, "card: provisioned %s", MAGIC_URL);
+                    esp_err_t err = admin_stop();
+                    if (err != ESP_OK)
+                    {
+                        ESP_LOGE(TAG, "admin stop failed: %s",
+                                 esp_err_to_name(err));
+                    }
+                    else
+                    {
+                        state_lock();
+                        s_admin_code[0] = '\0';
+                        display_set_idle_locked();
+                        state_unlock();
+                        ESP_LOGI(TAG, "admin inactive");
+                    }
                 }
                 else
                 {
-                    ESP_LOGE(TAG, "card: provisioning failed: %s",
-                             esp_err_to_name(write_err));
+                    char code[ADMIN_ACCESS_CODE_LEN + 1];
+                    esp_err_t err = admin_start(code, sizeof(code));
+
+                    if (err == ESP_OK)
+                    {
+                        ESP_LOGI(TAG,
+                                 "admin active (SSID=openyoto, code=%s, http://192.168.4.1/)",
+                                 code);
+                    }
+                    else
+                    {
+                        ESP_LOGE(TAG, "admin startup failed: %s",
+                                 esp_err_to_name(err));
+                    }
                 }
             }
-
+            else if (admin_is_active())
+            {
+                admin_set_last_card(uid, uid_len, url);
+                ESP_LOGI(TAG, "admin captured card without playback");
+            }
+            else
+            {
+                play_card(url);
+            }
         }
         else if (!card && card_present)
         {
@@ -832,6 +1334,10 @@ void app_main(void)
                 s_track_index = 0;
                 s_current_url[0] = '\0';
             }
+            if (s_display_base != DISPLAY_BASE_ADMIN)
+            {
+                display_set_idle_locked();
+            }
             state_unlock();
         }
 
@@ -843,6 +1349,10 @@ void app_main(void)
         {
             battery_periodic_check();
         }
+
+        state_lock();
+        display_maintain_locked();
+        state_unlock();
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }

@@ -16,13 +16,6 @@ menu "open-yoto Application"
             Use it to identify the unit's hardware revision before porting
             the full firmware.
 
-    config APP_DISPLAY_TEST_ICON
-        bool "Render requested external PNG at boot"
-        default n
-        help
-            Replace the stock low-SOC asset with the generated 16x16 RGBA
-            frame from the current display test icon. Bring-up only.
-
     config APP_SPEAKER_TEST_TONE
         bool "Play a speaker test tone at boot"
         default n

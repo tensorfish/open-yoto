@@ -15,12 +15,11 @@
 /**
  * Initialize the audio path: reset/identify the speaker amp while clocks are
  * stopped, initialize the ES8156 DAC, install the stock APLL/mono-left I2S TX
- * channel, then load/start the AW88194A SmartPA. Must be
- * called after iox_init() so the I2C bus is available.
+ * channel, then load/start the AW88194A SmartPA. Must be called after
+ * iox_init() so the I2C bus is available.
  *
- * Speaker failure is logged but leaves the ES8156 headphone path operational.
- * return ESP_OK when that usable audio path is ready, otherwise the first I2S
- * or codec error.
+ * @return ESP_OK only when the speaker, codec, I2S channel, and decode task
+ *         are ready; otherwise the corresponding initialization error.
  */
 esp_err_t audio_init(void);
 

@@ -110,12 +110,13 @@ Y=145. Their last set pixels are at Y=207, above the clipping boundary.
 `assets/` contains 115 CRC-checked PNG streams extracted byte-for-byte from
 `output/factory.bin`, with flash offsets and SHA-256 hashes in
 `assets/manifest.json`. Every embedded PNG is 16×16: 67 RGBA, 30 RGB, and 18
-grayscale+alpha. `factory-069-0x06709D-16x16.png` is the current red
-low-battery-slash boot-test source; it is compiled as an RGBA frame only when
-`CONFIG_APP_DISPLAY_TEST_ICON` is enabled.
-
-The ID-10 asset is a segmented semi-transparent white low-SOC visual, not a
-traditional battery-outline PNG. Do not replace it with an unproven mask.
+grayscale+alpha. The ID-10 asset is a segmented semi-transparent white low-SOC
+visual, not a traditional battery-outline PNG, so do not describe it as one.
+`factory-069-0x06709D-16x16.png` is the stock red low-battery slash, and
+`firmware/icons/battery-empty.png` is that exact byte stream (SHA-256
+`b1595cdd…c283e2d`), so it is the one factory asset the replacement firmware
+still compiles in — as the depleted-battery icon. Every other battery state
+comes from the authored `firmware/icons/battery-*.png` set.
 
 ## Rendering model
 

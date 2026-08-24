@@ -172,6 +172,24 @@ void display_flush(void)
     }
 }
 
+void display_show_rgba_frame(const uint8_t rgba[16 * 16 * 4])
+{
+    esp_err_t err;
+
+    if (rgba == NULL)
+    {
+        return;
+    }
+
+    /* gc9306_draw_rgba16() writes every pixel of the 192x192 icon window, so
+     * a caller that already owns the panel needs no clear beforehand. */
+    err = gc9306_draw_rgba16(rgba);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "RGBA frame failed: %s", esp_err_to_name(err));
+    }
+}
+
 void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
 {
     esp_err_t err;
@@ -181,15 +199,15 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
         return;
     }
 
+    /* Blank the whole panel first: an access code or a 240x320 mask leaves
+     * pixels outside the icon window that the icon itself cannot erase. */
     err = gc9306_fill_rect(0, 0, 239, 319, 0x000000);
-    if (err == ESP_OK)
-    {
-        err = gc9306_draw_rgba16(rgba);
-    }
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "RGBA frame failed: %s", esp_err_to_name(err));
+        return;
     }
+    display_show_rgba_frame(rgba);
 }
 
 esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
@@ -337,6 +355,95 @@ void display_show_access_code(
     }
 }
 
+/*
+ * The volume bar is 144 px wide and 12 px tall, centred horizontally in the
+ * 192 px icon window, with its bottom edge on DISPLAY_TFT_OFFSET_Y + 183.
+ * It spans panel x 48..191 and y 199..210, entirely inside the icon window
+ * (panel y 24..215), so gc9306_draw_rgba16() erases it on the next full
+ * frame.
+ *
+ * The bar used to be drawn one 1-px column at a time, but gc9306_fill_rect()
+ * toggles the TFT CS/DC pins through the IOX over I2C around every rect, so
+ * up to 144 rects made the volume feedback lag badly. Drawing at most four
+ * full-height rects (three colour bands plus a black remainder) removes the
+ * I2C chatter.
+ */
+#define VOLUME_BAR_WIDTH  144
+#define VOLUME_BAR_HEIGHT 12
+#define VOLUME_BAR_X0 \
+    (DISPLAY_TFT_OFFSET_X + (16 * DISPLAY_TFT_SCALE - VOLUME_BAR_WIDTH) / 2)
+#define VOLUME_BAR_X1 (VOLUME_BAR_X0 + VOLUME_BAR_WIDTH - 1)
+#define VOLUME_BAR_Y1 (DISPLAY_TFT_OFFSET_Y + 183)
+#define VOLUME_BAR_Y0 (VOLUME_BAR_Y1 - VOLUME_BAR_HEIGHT + 1)
+
+/*
+ * Fill one bar-local span [lo, hi) with a single gc9306_fill_rect(). Logical
+ * bar-local x maps to panel x = VOLUME_BAR_X1 - x, so the bar grows from the
+ * panel's right edge towards its left, matching the original overlay.
+ */
+static void volume_fill_rect(int lo, int hi, uint32_t color)
+{
+    uint16_t x0;
+    uint16_t x1;
+    esp_err_t err;
+
+    if (lo >= hi)
+    {
+        return;
+    }
+    x0 = (uint16_t)(VOLUME_BAR_X1 - (hi - 1));
+    x1 = (uint16_t)(VOLUME_BAR_X1 - lo);
+    err = gc9306_fill_rect(x0, VOLUME_BAR_Y0, x1, VOLUME_BAR_Y1, color);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "volume bar [%d,%d) fill failed: %s",
+                 lo, hi, esp_err_to_name(err));
+    }
+}
+
+void display_draw_volume_overlay(int volume)
+{
+    int filled;
+    static const uint32_t volume_band_color[3] = {
+        0x168BFF, 0x20D060, 0xFF3B30
+    };
+
+    if (volume < 0)
+    {
+        volume = 0;
+    }
+    else if (volume > 100)
+    {
+        volume = 100;
+    }
+    filled = volume * VOLUME_BAR_WIDTH / 100;
+
+    /*
+     * Bands are keyed to bar-local x and split the bar into equal thirds
+     * (48 px each at this width). Intersect each with [0, filled) and emit
+     * only non-empty spans.
+     */
+    for (int i = 0; i < 3; i++)
+    {
+        int lo = i * VOLUME_BAR_WIDTH / 3;
+        int hi = (i + 1) * VOLUME_BAR_WIDTH / 3;
+
+        if (lo >= filled)
+        {
+            continue;
+        }
+        if (hi > filled)
+        {
+            hi = filled;
+        }
+        volume_fill_rect(lo, hi, volume_band_color[i]);
+    }
+
+    /* Black remainder [filled, VOLUME_BAR_WIDTH) so lowering the volume
+     * shrinks the bar. */
+    volume_fill_rect(filled, VOLUME_BAR_WIDTH, 0x000000);
+}
+
 #else /* CONFIG_BOARD_REV_04 */
 
 #include "ht16d35x.h"
@@ -385,6 +492,48 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
 
             display_set_pixel(x, y, alpha_luma >= 96);
         }
+    }
+    display_flush();
+}
+
+void display_show_rgba_frame(const uint8_t rgba[16 * 16 * 4])
+{
+    /* The matrix path rebuilds the whole 16x16 framebuffer for every frame,
+     * so it has no panel-wide fill to skip. */
+    display_show_rgba(rgba);
+}
+
+#define VOLUME_BAR_LOGICAL_X      2
+#define VOLUME_BAR_LOGICAL_WIDTH  12
+#define VOLUME_BAR_LOGICAL_ROW0   14
+#define VOLUME_BAR_LOGICAL_ROW1   15
+
+void display_draw_volume_overlay(int volume)
+{
+    int filled;
+
+    if (volume < 0)
+    {
+        volume = 0;
+    }
+    else if (volume > 100)
+    {
+        volume = 100;
+    }
+    filled = volume * VOLUME_BAR_LOGICAL_WIDTH / 100;
+
+    /*
+     * The bar is two rows thick (y 14 and 15) and 12 cells wide (x 2..13),
+     * already centred in the 16x16 grid. Set the filled cells in both rows,
+     * clear the remainder so a lower volume shrinks the bar, and flush once.
+     */
+    for (int x = VOLUME_BAR_LOGICAL_X;
+         x < VOLUME_BAR_LOGICAL_X + VOLUME_BAR_LOGICAL_WIDTH; x++)
+    {
+        bool on = (x - VOLUME_BAR_LOGICAL_X) < filled;
+
+        display_set_pixel(x, VOLUME_BAR_LOGICAL_ROW0, on);
+        display_set_pixel(x, VOLUME_BAR_LOGICAL_ROW1, on);
     }
     display_flush();
 }

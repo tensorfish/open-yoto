@@ -9,7 +9,7 @@
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(160deg,#111722 0,#0b0d12 45%);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;min-height:100vh}
 .wrap{width:min(920px,100%);margin:auto;padding:24px 16px 56px}header{display:flex;justify-content:space-between;align-items:end;gap:16px;margin-bottom:20px}h1{font-size:24px;margin:0}.sub,.hint{color:var(--muted)}.sub{font-size:13px;margin:4px 0 0}.badge{border:1px solid var(--line);border-radius:999px;padding:6px 10px;color:var(--muted);font-size:12px}
 .card{background:rgba(21,25,34,.96);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px;box-shadow:0 12px 32px #0003}.card h2{font-size:13px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
-label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}input{width:100%;min-height:44px;background:#0d1118;border:1px solid var(--line);border-radius:9px;color:var(--text);padding:9px 11px;font:inherit;margin-bottom:12px}input:focus{outline:2px solid #f4a62a55;border-color:var(--accent)}
+label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}input,select{width:100%;min-height:44px;background:#0d1118;border:1px solid var(--line);border-radius:9px;color:var(--text);padding:9px 11px;font:inherit;margin-bottom:12px}input:focus,select:focus{outline:2px solid #f4a62a55;border-color:var(--accent)}select[multiple]{min-height:160px;padding:4px}.mapping-artwork{display:grid;gap:9px;margin:12px 0}
 button,.button{min-height:40px;border:1px solid transparent;border-radius:9px;background:var(--accent);color:#241600;padding:8px 13px;font:600 14px system-ui;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:hover,.button:hover{filter:brightness(1.08)}button.secondary,.button.secondary{background:#1b2230;color:var(--text);border-color:var(--line)}button.danger{background:transparent;color:var(--danger);border-color:#ef5b6266}button:disabled{opacity:.45;cursor:not-allowed}
 .login{max-width:420px;margin:11vh auto}.code{font:700 26px/1 ui-monospace,SFMono-Regular,monospace;letter-spacing:.22em;text-transform:uppercase;text-align:center}.tabs{display:flex;gap:8px;margin-bottom:16px;overflow:auto}.tab{background:#151922;color:var(--muted);border-color:var(--line);min-width:120px}.tab.active{background:var(--accent);color:#241600}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.row{display:flex;gap:9px;align-items:center}.row>input{margin:0;min-width:0}.row.wrap-actions{flex-wrap:wrap}.status{min-height:22px;margin:10px 2px;color:var(--muted)}.status.ok{color:var(--ok)}.status.err{color:var(--danger)}
 .pathbar{display:flex;gap:8px;align-items:center;margin-bottom:12px}.pathbar input{flex:1;min-width:120px;margin:0;font-family:ui-monospace,SFMono-Regular,monospace}.entries{border-top:1px solid var(--line)}.entry{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}.entry-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.entry-meta{color:var(--muted);font-size:12px}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.actions button,.actions .button{min-height:34px;padding:5px 9px;font-size:12px}.drop{border:1px dashed #465168;border-radius:10px;padding:14px;margin-top:14px}.empty{color:var(--muted);padding:20px 0;text-align:center}
@@ -54,6 +54,7 @@ button,.button{min-height:40px;border:1px solid transparent;border-radius:9px;ba
 </section>
 <section data-panel="cards" hidden>
 <div class="card" id="cardReader"><div class="panel-head"><h2>Card reader</h2><button class="secondary" id="refreshCard">Refresh</button></div><p class="hint" id="lastCard" role="status" aria-live="polite">No card scanned yet.</p><label for="cardUrl">URL to write to the captured card</label><input id="cardUrl" maxlength="200" placeholder="https://example.com/card" autocapitalize="off" spellcheck="false"><button id="writeCard" disabled>Write URL to card</button></div>
+<div class="card"><div class="panel-head"><h2>Create card mapping</h2><button class="secondary" id="refreshMappingAssets">Refresh media</button></div><p class="hint">Select uploaded audio in play order and an image for each track. Save the URI mapping, then use the verified card writer below to put that exact URI on the scanned card.</p><label for="mappingUrl">Card URI</label><input id="mappingUrl" maxlength="200" placeholder="https://example.com/card" autocapitalize="off" spellcheck="false"><label for="mappingTracks">Tracks (hold Ctrl or ⌘ to select multiple)</label><select id="mappingTracks" multiple size="8" disabled></select><div class="mapping-artwork" id="mappingArtwork"><p class="hint">Select tracks to assign their artwork.</p></div><label for="mappingCover">Fallback / card-cover image</label><select id="mappingCover" disabled><option value="">Use the first track image</option></select><button id="saveMapping" disabled>Save URI mapping</button></div>
 <div class="card"><h2>NFC card mappings</h2><div class="entries" id="cards"></div></div>
 </section>
 <section data-panel="tracks" hidden>
@@ -63,14 +64,14 @@ button,.button{min-height:40px;border:1px solid transparent;border-radius:9px;ba
 </main>
 </div>
 <script>
-const $=s=>document.querySelector(s);const MEDIA_ROOT='/sdcard/media';let unlocked=false;let cwd=MEDIA_ROOT;let activeTab='files';let lastCard={captured:false,uid:'',url:'',seq:0};let lastCardBusy=false;let cardUrlDirty=false;let trackQueue=[];let trackRoot='';let tracksLoadSeq=0;
+const $=s=>document.querySelector(s);const MEDIA_ROOT='/sdcard/media';let unlocked=false;let cwd=MEDIA_ROOT;let activeTab='files';let lastCard={captured:false,uid:'',url:'',seq:0};let lastCardBusy=false;let cardUrlDirty=false;let trackQueue=[];let trackRoot='';let tracksLoadSeq=0;let mappingAssets=[];let mappingOrder=[];const mappingImages=new Map();
 function status(text,kind=''){const e=$('#status');e.textContent=text;e.className='status '+kind}
 function lock(){unlocked=false;$('#app').hidden=true;$('#login').hidden=false;$('#connection').textContent='Locked'}
 async function api(url,options={}){options.credentials='same-origin';const r=await fetch(url,options);if(r.status===401){lock();throw new Error('Session expired')}if(!r.ok){throw new Error((await r.text())||('HTTP '+r.status))}return r}
 function jsonPost(url,data){return api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})}
 function sdPath(path){path=path.trim().replace(/\/+/g,'/');if(path.startsWith('media/'))path='/sdcard/'+path;else if(path==='/media'||path.startsWith('/media/'))path='/sdcard'+path;else if(!path.startsWith('/'))path=MEDIA_ROOT+'/'+path;if(path!==MEDIA_ROOT&&!path.startsWith(MEDIA_ROOT+'/'))throw new Error('Web UI paths must stay under '+MEDIA_ROOT);return path}
 async function unlock(){const pin=$('#pin').value.trim().toUpperCase();if(!/^[A-Z0-9]{6}$/.test(pin)){status('Enter all six letters and numbers.','err');return}status('Checking access code...');try{const r=await fetch('/api/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})});if(r.status===401){status('Invalid access code.','err');$('#pin').focus();$('#pin').select();return}if(!r.ok){status('Login service error ('+r.status+').','err');return}unlocked=true;$('#login').hidden=true;$('#app').hidden=false;$('#connection').textContent='Connected to openyoto';status('Admin unlocked.','ok');await loadFiles()}catch(e){status('Unable to contact the player: '+e.message,'err')}}
-async function selectTab(name){activeTab=name;if(name!=='tracks')tracksLoadSeq++;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('[data-panel]').forEach(p=>p.hidden=p.dataset.panel!==name);if(name==='files')await loadFiles();if(name==='cards'){await Promise.all([loadCards(),pollLastCard(false)])}if(name==='tracks')await loadTracks()}
+async function selectTab(name){activeTab=name;if(name!=='tracks')tracksLoadSeq++;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('[data-panel]').forEach(p=>p.hidden=p.dataset.panel!==name);if(name==='files')await loadFiles();if(name==='cards'){await Promise.all([loadCards(),pollLastCard(false),loadMappingAssets()])}if(name==='tracks')await loadTracks()}
 async function remote(endpoint,path,label){try{path=sdPath(path);status(label+' '+path+'...');await jsonPost(endpoint,{path});status(label+' '+path,'ok')}catch(e){status(label+' failed: '+e.message,'err')}}
 async function remoteAction(endpoint,busyLabel,doneLabel){status(busyLabel);try{await api(endpoint,{method:'POST'});status(doneLabel,'ok')}catch(e){status(doneLabel+' failed: '+e.message,'err')}}
 let convertedImage=null;
@@ -117,7 +118,7 @@ async function makeDir(){const name=prompt('Directory name');if(!name)return;sta
 async function makeFile(){const name=prompt('Empty file name');if(!name)return;status('Creating file '+name+'...');try{await jsonPost('/api/fs/create',{path:join(cwd,name)});status('File created.','ok');loadFiles()}catch(e){status('Create failed: '+e.message,'err')}}
 async function renamePath(from){const name=prompt('New name',from.split('/').pop());if(!name)return;status('Renaming '+from+'...');try{await jsonPost('/api/fs/rename',{from,to:join(parent(from),name)});status('Renamed.','ok');loadFiles()}catch(e){status('Rename failed: '+e.message,'err')}}
 async function deletePath(path){if(!confirm('Delete '+path+'?'))return;status('Deleting '+path+'...');try{await jsonPost('/api/fs/delete',{path});status('Deleted.','ok');loadFiles()}catch(e){status('Delete failed: '+e.message,'err')}}
-async function loadCards(){if(!unlocked)return;const box=$('#cards');box.innerHTML='<p class="empty">Loading...</p>';try{const r=await api('/api/list');const items=await r.json();box.innerHTML='';if(!items.length)box.innerHTML='<p class="empty">No card mappings.</p>';items.forEach(it=>{const row=document.createElement('div');row.className='entry';const info=document.createElement('div');info.className='entry-name';info.textContent=it.url;const acts=document.createElement('div');acts.className='actions';const sound=it.tracks&&it.tracks.length?it.tracks[0]:it.sound;if(sound)acts.append(action('Play',()=>remote('/api/control/play',sound,'Playing')));if(it.image)acts.append(action('Display',()=>remote('/api/control/display',it.image,'Displaying')));acts.append(action('Delete mapping',()=>deleteCard(it.url),'danger'));row.append(info,acts);box.append(row)})}catch(e){box.innerHTML='<p class="empty">Unable to load mappings.</p>';status(e.message,'err')}}
+async function loadCards(){if(!unlocked)return;const box=$('#cards');box.innerHTML='<p class="empty">Loading...</p>';try{const r=await api('/api/list');const items=await r.json();box.innerHTML='';if(!items.length)box.innerHTML='<p class="empty">No card mappings.</p>';items.forEach(it=>{const tracks=Array.isArray(it.tracks)&&it.tracks.length?it.tracks:[it.sound].filter(Boolean);const images=Array.isArray(it.track_images)?it.track_images:[];const row=document.createElement('div');row.className='entry';const info=document.createElement('div');const name=document.createElement('div');name.className='entry-name';name.textContent=it.url;const meta=document.createElement('div');meta.className='entry-meta';meta.textContent=tracks.length+' track'+(tracks.length===1?'':'s')+(tracks.length?' · '+tracks.map((track,i)=>track+(images[i]?' + '+images[i]:'')).join(' · '):'');info.append(name,meta);const acts=document.createElement('div');acts.className='actions';if(tracks[0])acts.append(action('Play',()=>remote('/api/control/play',tracks[0],'Playing')));if(it.image)acts.append(action('Display cover',()=>remote('/api/control/display',it.image,'Displaying')));acts.append(action('Delete',()=>deleteCard(it.url),'danger'));row.append(info,acts);box.append(row)});status('Loaded '+items.length+' card mapping(s).','ok')}catch(e){box.innerHTML='<p class="empty">Unable to load mappings.</p>';status('Cards failed: '+e.message,'err')}}
 async function deleteCard(url){if(!confirm('Delete mapping for '+url+'?'))return;status('Deleting card mapping...');try{await jsonPost('/api/delete',{url});status('Mapping deleted.','ok');loadCards()}catch(e){status('Delete failed: '+e.message,'err')}}
 function showLastCard(d){
  lastCard=d;
@@ -131,6 +132,8 @@ function showLastCard(d){
   label.textContent='Last scanned UID '+d.uid+': blank card';
  }
  if(d.url&&!cardUrlDirty&&!input.value.trim())input.value=d.url;
+ const mapping=$('#mappingUrl');
+ if(d.url&&!mapping.value.trim())mapping.value=d.url;
  $('#writeCard').disabled=!d.captured;
 }
 async function pollLastCard(force=false){
@@ -246,8 +249,73 @@ async function loadTracks(){
   status('Loaded '+items.length+' track assets.','ok');
  }catch(e){if(token===tracksLoadSeq){box.innerHTML='<p class="empty">Unable to load tracks.</p>';status('Tracks failed: '+e.message,'err')}}
 }
+async function collectMappingAssets(path,out,depth=0){
+ if(depth>8||out.length>=512)return;
+ const items=await listDirectory(path);
+ for(const item of items){
+  if(out.length>=512)return;
+  if(item.type==='directory')await collectMappingAssets(item.path,out,depth+1);
+  else if(isSound(item.path)||isImage(item.path))out.push(item);
+ }
+}
+function mappingRef(path){
+ if(!path.startsWith('/sdcard/media/'))throw new Error('Selected media must stay under /sdcard/media');
+ const ref=path.slice('/sdcard/'.length);
+ if(ref.length>=128)throw new Error('Selected media path is too long: '+path);
+ return ref;
+}
+function updateMappingOrder(){
+ const chosen=mappingSelected();const selected=new Set(chosen);
+ mappingOrder=mappingOrder.filter(path=>selected.has(path));
+ mappingOrder.push(...chosen.filter(path=>!mappingOrder.includes(path)));
+ $('#saveMapping').disabled=!mappingOrder.length;
+ renderMappingArtwork();
+}
+function renderMappingArtwork(){
+ const box=$('#mappingArtwork');box.innerHTML='';
+ const images=mappingAssets.filter(item=>isImage(item.path));
+ if(!mappingOrder.length){box.innerHTML='<p class="hint">Select tracks to assign their artwork.</p>';return}
+ mappingOrder.forEach((track,index)=>{
+  const row=document.createElement('div');row.className='row wrap-actions';
+  const select=document.createElement('select');select.setAttribute('aria-label','Artwork for '+track);select.append(new Option('Use card cover', ''));
+  images.forEach(item=>select.append(new Option(item.path.slice(MEDIA_ROOT.length+1),item.path)));
+  select.value=mappingImages.get(track)||'';select.onchange=()=>mappingImages.set(track,select.value);
+  const label=document.createElement('label');label.textContent=(index+1)+'. '+track.slice(MEDIA_ROOT.length+1);label.style.flex='1';label.append(select);
+  const up=action('Up',()=>moveMappingTrack(index,-1));up.disabled=index===0;
+  const down=action('Down',()=>moveMappingTrack(index,1));down.disabled=index===mappingOrder.length-1;
+  row.append(label,up,down);box.append(row);
+ });
+}
+function moveMappingTrack(index,offset){
+ const target=index+offset;if(target<0||target>=mappingOrder.length)return;
+ [mappingOrder[index],mappingOrder[target]]=[mappingOrder[target],mappingOrder[index]];renderMappingArtwork();
+}
+async function loadMappingAssets(){
+ if(!unlocked||activeTab!=='cards')return;
+ const tracks=$('#mappingTracks'),cover=$('#mappingCover');tracks.disabled=true;cover.disabled=true;$('#saveMapping').disabled=true;
+ try{
+  const assets=[];await collectMappingAssets(MEDIA_ROOT,assets);assets.sort((a,b)=>a.path.localeCompare(b.path));mappingAssets=assets;
+  const sounds=assets.filter(item=>isSound(item.path));const images=assets.filter(item=>isImage(item.path));const selected=new Set(mappingOrder);
+  tracks.innerHTML='';sounds.forEach(item=>{const option=new Option(item.path.slice(MEDIA_ROOT.length+1),item.path);option.selected=selected.has(item.path);tracks.append(option)});
+  mappingOrder=mappingOrder.filter(path=>sounds.some(item=>item.path===path));
+  cover.innerHTML='';cover.append(new Option('Use the first track image',''));images.forEach(item=>cover.append(new Option(item.path.slice(MEDIA_ROOT.length+1),item.path)));
+  tracks.disabled=!sounds.length;cover.disabled=!images.length;$('#saveMapping').disabled=!mappingOrder.length;renderMappingArtwork();
+ }catch(e){mappingAssets=[];tracks.innerHTML='';cover.innerHTML='';renderMappingArtwork();status('Media selection failed: '+e.message,'err')}
+}
+async function saveMapping(){
+ const url=$('#mappingUrl').value.trim();const tracks=[...mappingOrder];
+ if(!url||url.length>200){status('Enter a card URI of 200 characters or fewer.','err');return}
+ if(!tracks.length){status('Select at least one track.','err');return}
+ if(tracks.length>32){status('A card mapping can contain at most 32 tracks.','err');return}
+ const button=$('#saveMapping');button.disabled=true;button.textContent='Saving…';
+ try{
+  const payload={url,tracks:tracks.map(mappingRef),track_images:tracks.map(track=>{const image=mappingImages.get(track)||'';return image?mappingRef(image):''}),image:$('#mappingCover').value?mappingRef($('#mappingCover').value):''};
+  await jsonPost('/api/add',payload);$('#cardUrl').value=url;cardUrlDirty=true;status('Mapping saved. Write this URI to the captured card to use it.','ok');await loadCards();
+ }catch(e){status('Mapping save failed: '+e.message,'err')}
+ finally{button.textContent='Save URI mapping';button.disabled=!mappingOrder.length}
+}
 $('#unlock').onclick=unlock;$('#pin').onkeydown=e=>{if(e.key==='Enter')unlock()};$('#pin').oninput=e=>e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'');document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>selectTab(b.dataset.tab));
-$('#playSound').onclick=()=>remote('/api/control/play',$('#soundPath').value,'Playing');$('#stopSound').onclick=()=>remoteAction('/api/control/stop','Stopping playback...','Playback stopped.');$('#showImage').onclick=()=>remote('/api/control/display',$('#imagePath').value,'Displaying');$('#clearDisplay').onclick=()=>remoteAction('/api/control/clear','Clearing screen...','Screen cleared.');$('#imageSource').onchange=prepareBrowserImage;$('#convertImage').onclick=uploadAndDisplayImage;$('#cwd').onkeydown=e=>{if(e.key==='Enter')browsePath()};$('#goFiles').onclick=browsePath;$('#up').onclick=()=>{cwd=parent(cwd);loadFiles()};$('#refreshFiles').onclick=loadFiles;$('#upload').onclick=uploadFiles;$('#newFolder').onclick=makeDir;$('#newFile').onclick=makeFile;$('#refreshCard').onclick=()=>Promise.all([loadCards(),pollLastCard(true)]);$('#cardUrl').oninput=()=>{cardUrlDirty=true};$('#writeCard').onclick=writeCard;$('#trackFolder').onchange=prepareTrackFolder;$('#uploadTrackFolder').onclick=uploadTrackFolder;$('#refreshTracks').onclick=loadTracks;setInterval(()=>{if(activeTab==='cards'&&!$('#cardUrl').value.trim())pollLastCard(false)},2500);
+$('#playSound').onclick=()=>remote('/api/control/play',$('#soundPath').value,'Playing');$('#stopSound').onclick=()=>remoteAction('/api/control/stop','Stopping playback...','Playback stopped.');$('#showImage').onclick=()=>remote('/api/control/display',$('#imagePath').value,'Displaying');$('#clearDisplay').onclick=()=>remoteAction('/api/control/clear','Clearing screen...','Screen cleared.');$('#imageSource').onchange=prepareBrowserImage;$('#convertImage').onclick=uploadAndDisplayImage;$('#cwd').onkeydown=e=>{if(e.key==='Enter')browsePath()};$('#goFiles').onclick=browsePath;$('#up').onclick=()=>{cwd=parent(cwd);loadFiles()};$('#refreshFiles').onclick=loadFiles;$('#upload').onclick=uploadFiles;$('#newFolder').onclick=makeDir;$('#newFile').onclick=makeFile;$('#refreshCard').onclick=()=>Promise.all([loadCards(),pollLastCard(true)]);$('#cardUrl').oninput=()=>{cardUrlDirty=true};$('#writeCard').onclick=writeCard;$('#mappingTracks').onchange=updateMappingOrder;$('#refreshMappingAssets').onclick=loadMappingAssets;$('#saveMapping').onclick=saveMapping;$('#trackFolder').onchange=prepareTrackFolder;$('#uploadTrackFolder').onclick=uploadTrackFolder;$('#refreshTracks').onclick=loadTracks;setInterval(()=>{if(activeTab==='cards'&&!$('#cardUrl').value.trim())pollLastCard(false)},2500);
 </script>
 </body>
 </html>

@@ -1,9 +1,9 @@
 /*
- * admin.h — Always-available SoftAP web administration and remote control.
+ * admin.h — On-demand SoftAP web administration and remote control.
  *
- * The open `openyoto` hotspot serves the UI at 192.168.4.1. A random
- * six-character alphanumeric code is exchanged for an HttpOnly session cookie;
- * every API and file read is authenticated.
+ * While admin mode is active, the open `openyoto` hotspot serves the UI at
+ * 192.168.4.1. A random six-character alphanumeric code is exchanged for an
+ * HttpOnly session cookie; every API and file read is authenticated.
  */
 #pragma once
 
@@ -30,7 +30,7 @@ typedef esp_err_t (*admin_card_write_cb_t)(
     const char *url, const uint8_t *expected_uid, uint8_t uid_len);
 
 /**
- * Start the SoftAP and HTTP server.
+ * Enter admin mode by starting the SoftAP and HTTP server.
  *
  * content_init() is called idempotently so SD file and remote-control APIs are
  * available before the server accepts requests.

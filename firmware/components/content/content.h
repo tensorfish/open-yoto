@@ -1,11 +1,14 @@
 /*
  * content.h — SD-card content store: mapping.json index + media directory.
  *
- * Owns the FatFS SDMMC (1-bit) mount at /sdcard and the mapping.json index
- * that ties a URL (read from an NFC tag) to a sound file and an image file
- * stored under /sdcard/media/. The mapping file has the shape:
+ * Owns the FatFS SDMMC (1-bit) mount at /sdcard and mapping.json, which ties
+ * an NFC URI to media stored under /sdcard/media/. Playlist entries use:
  *
- *     {"cards":[{"url":"...","sound":"media/a.mp3","image":"media/a.png"}]}
+ *     {"cards":[{"url":"...","tracks":["media/a.mp3"],
+ *       "track_images":["media/a.img"],"image":"media/cover.img"}]}
+ *
+ * `track_images` is parallel to `tracks`; an empty item uses the optional
+ * card-cover image. Legacy {"url","sound","image"} entries remain readable.
  */
 #pragma once
 
@@ -66,29 +69,31 @@ esp_err_t content_get_track(const char *url, int index,
                             char *sound_path, size_t sp);
 
 /**
- * Add or replace a mapping entry. sound_name and image_name are media file
- * names (no directory) stored under /sdcard/media/; they are persisted as
- * "media/<name>". A card already carrying url is replaced.
+ * Add or replace a legacy single-track mapping. Names may be bare media file
+ * names or safe content-relative "media/..." paths. A card already carrying
+ * url is replaced.
  *
  * @param url         URL key.
- * @param sound_name  sound file name (no path).
- * @param image_name  image file name (no path).
+ * @param sound_name  sound media name/path.
+ * @param image_name  image media name/path, or "" for no image.
  * @return ESP_OK on success, or an esp_err_t from the IO layer.
  */
 esp_err_t content_add(const char *url, const char *sound_name,
                       const char *image_name);
 /**
  * Add or replace a playlist card: an ordered list of audio tracks, each with
- * an optional per-track image, plus an optional cover image.
+ * an optional per-track image, plus an optional cover image. Entries may be
+ * bare media names or safe content-relative "media/..." paths, including
+ * nested media folders; persisted entries always use "media/...".
  *
  * @param url          URL key.
- * @param tracks       array of n bare sound file names (no directory).
- * @param track_images array of n bare image file names (no directory); each
- *                     entry may be "" for a track with no image.
+ * @param tracks       array of n sound media names/paths.
+ * @param track_images array of n image media names/paths; each entry may be
+ *                     "" for a track that falls back to the cover.
  * @param n            number of tracks (and track_images entries).
- * @param cover_image  bare cover file name, or NULL/"" for none.
- * @return ESP_OK on success, ESP_ERR_NO_MEM on allocation failure,
- *         ESP_FAIL on any file IO error.
+ * @param cover_image  cover media name/path, or NULL/"" for none.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG for an unsafe/oversize path,
+ *         ESP_ERR_NO_MEM on allocation failure, or ESP_FAIL on file IO.
  */
 esp_err_t content_add_playlist(const char *url,
                                const char *const tracks[],

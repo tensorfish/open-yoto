@@ -326,6 +326,14 @@ static bool i2c_device_probe(uint8_t addr)
 
 esp_err_t battery_init(void)
 {
+    esp_err_t init_err = ESP_OK;
+
+    /* The fuel gauge is required for player boot. Reset cached state before
+     * probing so a retry after a partial initialization cannot use stale data. */
+    s_gauge_present = false;
+    s_gauge_data_valid = false;
+    s_charger_present = false;
+
     /* CW2215B fuel gauge over I2C: detect, load the board-specific stock
      * profile when needed, activate the IC, then read VCELL and SOC. */
     s_gauge_present = cw2215b_detect();
@@ -373,14 +381,19 @@ esp_err_t battery_init(void)
         if (!s_gauge_data_valid)
         {
             ESP_LOGW(TAG, "CW2215B data inactive; voltage and SOC unavailable");
+            init_err = gauge_err == ESP_OK ? ESP_ERR_INVALID_STATE : gauge_err;
         }
     }
     else
     {
         ESP_LOGW(TAG, "CW2215B fuel gauge (0x%02x) not found / chip id mismatch",
                  (unsigned)I2C_ADDR_FUEL_GAUGE);
+        init_err = ESP_ERR_NOT_FOUND;
     }
 
+    /* The SGM41513 and its status lines are informational: charging remains
+     * observable from IOX, but an absent charger does not make the gauge
+     * unusable. */
     s_charger_present = i2c_device_probe(I2C_ADDR_CHARGER);
     ESP_LOGI(TAG, "SGM41513 charger (0x%02x): %s",
              (unsigned)I2C_ADDR_CHARGER,
@@ -398,7 +411,7 @@ esp_err_t battery_init(void)
     ESP_LOGI(TAG, "battery alert (IOX_BAT_ALERT) = %s",
              bat_alert ? "HIGH" : "LOW");
 
-    return ESP_OK;
+    return init_err;
 }
 
 float battery_voltage(void)

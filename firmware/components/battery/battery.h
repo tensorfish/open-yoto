@@ -12,8 +12,13 @@
 #include "esp_err.h"
 
 /**
- * Read the CW2215B chip ID, VCELL, and SOC, probe the SGM41513 charger, and
- * read charger + battery-alert status from the IO expander. Logs each state.
+ * Initialize and validate the CW2215B fuel gauge, then probe the optional
+ * SGM41513 charger and read charger + battery-alert status from IOX.
+ *
+ * @return ESP_OK only when the expected gauge is ready and its initial VCELL
+ *         and SOC readings are valid; ESP_ERR_NOT_FOUND when the gauge is
+ *         absent or mismatched; ESP_ERR_INVALID_STATE for invalid readings;
+ *         otherwise the gauge initialization error.
  */
 esp_err_t battery_init(void);
 
