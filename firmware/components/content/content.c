@@ -18,7 +18,7 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -50,6 +50,23 @@ static cJSON *s_cards;
 
 static bool s_mounted;
 static bool s_index_loaded;
+static SemaphoreHandle_t s_mutex;
+
+static bool content_lock(void)
+{
+    return s_mutex != NULL && xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE;
+}
+
+static void content_unlock(void)
+{
+    xSemaphoreGive(s_mutex);
+}
+
+/*
+ * Catalog operations call these helpers only while content_lock() is held.
+ * Keeping the cJSON tree locked through content_save() prevents readers from
+ * traversing it while a mutation is being persisted.
+ */
 
 /*
  * Normalize a caller-provided media path into the persisted "media/..." form.
@@ -351,6 +368,16 @@ esp_err_t content_init(void)
     {
         return ESP_OK;
     }
+    if (s_mutex == NULL)
+    {
+        s_mutex = xSemaphoreCreateMutex();
+        if (s_mutex == NULL)
+        {
+            ESP_LOGE(TAG, "could not create content mutex");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
 
     /* Stock firmware drives SD_CLK at the ESP32's maximum 40 mA and clocks
      * SDMMC at 40 MHz. The stronger clock edge is required on the Yoto PCB. */
@@ -426,8 +453,8 @@ esp_err_t content_init(void)
     return ESP_OK;
 }
 
-esp_err_t content_lookup(const char *url, char *sound_path, size_t sp,
-                         char *image_path, size_t ip)
+static esp_err_t content_lookup_locked(const char *url, char *sound_path,
+                                       size_t sp, char *image_path, size_t ip)
 {
     cJSON *card;
     cJSON *u;
@@ -490,6 +517,20 @@ esp_err_t content_lookup(const char *url, char *sound_path, size_t sp,
     return ESP_ERR_NOT_FOUND;
 }
 
+esp_err_t content_lookup(const char *url, char *sound_path, size_t sp,
+                         char *image_path, size_t ip)
+{
+    esp_err_t err;
+
+    if (!content_lock())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = content_lookup_locked(url, sound_path, sp, image_path, ip);
+    content_unlock();
+    return err;
+}
+
 /*
  * Find the mapping card whose "url" matches url, or NULL if absent.
  *
@@ -523,7 +564,7 @@ static cJSON *content_find_card(const char *url)
     return NULL;
 }
 
-int content_get_track_count(const char *url)
+static int content_get_track_count_locked(const char *url)
 {
     cJSON *card;
     cJSON *tracks;
@@ -550,8 +591,21 @@ int content_get_track_count(const char *url)
     return 0;
 }
 
-esp_err_t content_get_track(const char *url, int index,
-                            char *sound_path, size_t sp)
+int content_get_track_count(const char *url)
+{
+    int count;
+
+    if (!content_lock())
+    {
+        return -1;
+    }
+    count = content_get_track_count_locked(url);
+    content_unlock();
+    return count;
+}
+
+static esp_err_t content_get_track_locked(const char *url, int index,
+                                          char *sound_path, size_t sp)
 {
     cJSON *card;
     cJSON *tracks;
@@ -602,8 +656,22 @@ esp_err_t content_get_track(const char *url, int index,
     return ESP_OK;
 }
 
-esp_err_t content_add(const char *url, const char *sound_name,
-                      const char *image_name)
+esp_err_t content_get_track(const char *url, int index,
+                            char *sound_path, size_t sp)
+{
+    esp_err_t err;
+
+    if (!content_lock())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = content_get_track_locked(url, index, sound_path, sp);
+    content_unlock();
+    return err;
+}
+
+static esp_err_t content_add_locked(const char *url, const char *sound_name,
+                                    const char *image_name)
 {
     cJSON *card;
     cJSON *new_card;
@@ -669,7 +737,21 @@ esp_err_t content_add(const char *url, const char *sound_name,
     return content_save();
 }
 
-esp_err_t content_delete(const char *url)
+esp_err_t content_add(const char *url, const char *sound_name,
+                      const char *image_name)
+{
+    esp_err_t err;
+
+    if (!content_lock())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = content_add_locked(url, sound_name, image_name);
+    content_unlock();
+    return err;
+}
+
+static esp_err_t content_delete_locked(const char *url)
 {
     cJSON *card;
     cJSON *detached;
@@ -721,7 +803,20 @@ esp_err_t content_delete(const char *url)
     return ESP_OK;
 }
 
-esp_err_t content_delete_all(void)
+esp_err_t content_delete(const char *url)
+{
+    esp_err_t err;
+
+    if (!content_lock())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = content_delete_locked(url);
+    content_unlock();
+    return err;
+}
+
+static esp_err_t content_delete_all_locked(void)
 {
     cJSON *old_cards;
     cJSON *empty_cards;
@@ -764,7 +859,20 @@ esp_err_t content_delete_all(void)
     return ESP_OK;
 }
 
-esp_err_t content_list_json(char **out)
+esp_err_t content_delete_all(void)
+{
+    esp_err_t err;
+
+    if (!content_lock())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = content_delete_all_locked();
+    content_unlock();
+    return err;
+}
+
+static esp_err_t content_list_json_locked(char **out)
 {
     esp_err_t err;
 
@@ -782,12 +890,31 @@ esp_err_t content_list_json(char **out)
     return *out == NULL ? ESP_ERR_NO_MEM : ESP_OK;
 }
 
-esp_err_t content_add_playlist(const char *url,
-                               const char *name,
-                               const char *const tracks[],
-                               const char *const track_images[],
-                               int n,
-                               const char *cover_image)
+esp_err_t content_list_json(char **out)
+{
+    esp_err_t err;
+
+    if (out == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!content_lock())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = content_list_json_locked(out);
+    content_unlock();
+    return err;
+}
+
+static esp_err_t content_add_playlist_locked(
+    const char *url,
+    const char *name,
+    const char *const tracks[],
+    const char *const track_images[],
+    int n,
+    const char *cover_image)
 {
     cJSON *card;
     cJSON *new_card;
@@ -889,8 +1016,27 @@ esp_err_t content_add_playlist(const char *url,
     return content_save();
 }
 
-esp_err_t content_get_track_image(const char *url, int index,
-                                  char *image_path, size_t ip)
+esp_err_t content_add_playlist(const char *url,
+                               const char *name,
+                               const char *const tracks[],
+                               const char *const track_images[],
+                               int n,
+                               const char *cover_image)
+{
+    esp_err_t err;
+
+    if (!content_lock())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = content_add_playlist_locked(url, name, tracks, track_images, n,
+                                      cover_image);
+    content_unlock();
+    return err;
+}
+
+static esp_err_t content_get_track_image_locked(const char *url, int index,
+                                                char *image_path, size_t ip)
 {
     cJSON *card;
     cJSON *images;
@@ -940,4 +1086,18 @@ esp_err_t content_get_track_image(const char *url, int index,
         snprintf(image_path, ip, "%s", val);
     }
     return ESP_OK;
+}
+
+esp_err_t content_get_track_image(const char *url, int index,
+                                  char *image_path, size_t ip)
+{
+    esp_err_t err;
+
+    if (!content_lock())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = content_get_track_image_locked(url, index, image_path, ip);
+    content_unlock();
+    return err;
 }
