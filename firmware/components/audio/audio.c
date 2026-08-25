@@ -20,6 +20,7 @@
 #include "esp_aac_dec.h"
 #include "esp_mp3_dec.h"
 #include "esp_audio_dec.h"
+#include <math.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -56,6 +57,13 @@ static const char *TAG = "audio";
 #define AUDIO_TONE_STACK_BYTES      3072
 #define AUDIO_TONE_PRIORITY         4
 #define AUDIO_TONE_AMPLITUDE       16000
+
+/* A volume blip is feedback, not playback: quieter than the test tone, short
+ * enough to feel like a click, and ramped so the square wave cannot crack the
+ * speaker. */
+#define AUDIO_BLIP_AMPLITUDE        9000
+#define AUDIO_BLIP_MAX_MS            250
+#define AUDIO_BLIP_FADE_MS             4
 
 /* Path handed from audio_play() to the decode task. */
 #define AUDIO_PATH_MAX          128
@@ -1399,6 +1407,73 @@ bool audio_is_playing(void)
 bool audio_is_paused(void)
 {
     return s_paused;
+}
+
+esp_err_t audio_play_blip(int freq_hz, int duration_ms)
+{
+    const int sample_rate = 44100;
+    int frames;
+    int fade;
+    float step;
+    int16_t *buf;
+
+    if (s_tx_chan == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (freq_hz < 50 || freq_hz > 8000
+        || duration_ms <= 0 || duration_ms > AUDIO_BLIP_MAX_MS)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Content always wins: this path owns the DMA ring and clears it on the way
+     * out, so it must never run against a live or paused stream. */
+    if (s_playing)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    frames = sample_rate * duration_ms / 1000;
+    fade = sample_rate * AUDIO_BLIP_FADE_MS / 1000;
+    if (fade > frames / 2)
+    {
+        fade = frames / 2;
+    }
+
+    buf = calloc((size_t)frames, sizeof(int16_t));
+    if (buf == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+    /* Sine, matching the stock firmware's tone generator (a theta-accumulating
+     * sine at 44.1 kHz, recovered at 0x401d8a28) rather than a square wave: a
+     * square blip repeated per detent buzzes. */
+    step = 2.0f * (float)M_PI * (float)freq_hz / (float)sample_rate;
+    for (int i = 0; i < frames; i++)
+    {
+        float sample = sinf(step * (float)i) * (float)AUDIO_BLIP_AMPLITUDE;
+
+        if (fade > 0 && i < fade)
+        {
+            sample = sample * (float)i / (float)fade;
+        }
+        else if (fade > 0 && i >= frames - fade)
+        {
+            sample = sample * (float)(frames - 1 - i) / (float)fade;
+        }
+        buf[i] = (int16_t)sample;
+    }
+
+    /* audio_write_pcm() applies the current volume as PCM gain, which is the
+     * whole point: the blip is exactly as loud as content would be. */
+    s_playing = true;
+    s_stop_req = false;
+    s_paused = false;
+    (void)audio_write_pcm(buf, (size_t)frames);
+    free(buf);
+    (void)audio_i2s_clear();
+    s_playing = false;
+    return ESP_OK;
 }
 
 esp_err_t audio_play_tone(int freq_hz)

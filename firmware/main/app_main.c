@@ -303,6 +303,14 @@ typedef enum {
 #define VOLUME_OVERLAY_MS           1500
 #define IDLE_WINK_MS                300
 #define BOOT_FACE_FPS                16
+/* With nothing playing, a volume change makes no sound at all, so a short blip
+ * at the new level is the only feedback the user can hear. One blip per detent
+ * gives continuous feedback while the knob turns; a dedicated task plays them so
+ * the encoder never waits on I2S. */
+#define VOLUME_BLIP_HZ              880
+#define VOLUME_BLIP_MS               45
+#define VOLUME_BLIP_STACK_BYTES    2560
+#define VOLUME_BLIP_PRIORITY          3
 
 static display_base_t s_display_base = DISPLAY_BASE_IDLE;
 static char s_display_image_path[160];
@@ -311,6 +319,9 @@ static uint32_t s_battery_visual_deadline;
 static uint32_t s_volume_overlay_deadline;
 static uint32_t s_idle_wink_deadline;
 static uint32_t s_volume_draw_due;
+/* Signalled once per volume detent; the feedback task plays one blip per take,
+ * and extra gives collapse into one pending blip. */
+static SemaphoreHandle_t s_volume_blip_signal;
 static bool s_volume_dirty;
 static uint8_t s_wink_frame_index;
 /* Last sampled charger state; the not-charging -> charging edge is news. */
@@ -372,48 +383,45 @@ static void display_set_idle_locked(void)
 }
 
 /*
- * Pick the battery icon for a state of charge. Levels floor to the nearest
- * ten so the icon never overstates the charge, and anything under 10% (or an
- * unavailable reading) shows the empty icon.
+ * Pick the battery icon for a state of charge. Each icon covers the ten points
+ * up to its label: battery-10.png is 0..10%, battery-20.png is 11..20%, and so
+ * on to battery-100.png for 91..100%. Only an unavailable reading falls back to
+ * the empty icon.
  *
  * @param[in] soc state of charge 0..100; negative means unknown.
  */
 static const uint8_t *battery_icon_for(int soc)
 {
-    int level = soc / 10;
+    int level;
 
-    if (soc < 10)
+    if (soc < 0)
     {
         return BATTERY_ICON_EMPTY;
     }
-    if (level > 10)
+    if (soc > 100)
     {
-        level = 10;
+        soc = 100;
+    }
+    level = (soc + 9) / 10;
+    if (level < 1)
+    {
+        level = 1;
     }
     /* Frames 1..10 are battery-10.png through battery-100.png. */
     return BATTERY_ICON_FRAMES[level];
 }
 
+/* The icon the battery currently warrants: the charging bolt while charging,
+ * otherwise the icon covering the state of charge. */
+static const uint8_t *battery_icon_now(void)
+{
+    return battery_is_charging() ? BATTERY_ICON_CHARGING
+                                 : battery_icon_for(battery_soc());
+}
+
 static void display_render_battery_locked(void)
 {
-    const uint8_t *icon;
-
-    if (battery_is_charging())
-    {
-        icon = BATTERY_ICON_CHARGING;
-    }
-    else if (battery_is_low())
-    {
-        /* battery_is_low() also fires on a sagging cell voltage at a healthy
-         * state of charge, so the warning cannot be derived from the SOC icon
-         * alone. battery-empty.png is the recovered stock low-battery slash. */
-        icon = BATTERY_ICON_EMPTY;
-    }
-    else
-    {
-        icon = battery_icon_for(battery_soc());
-    }
-    display_show_rgba(icon);
+    display_show_rgba(battery_icon_now());
     display_apply_volume_overlay_locked();
     s_display_base = DISPLAY_BASE_BATTERY;
 }
@@ -434,8 +442,7 @@ static void display_show_battery_glimpse_locked(void)
     /* The glimpse replaces a wink rather than racing its deadline, but a volume
      * bar still composes on top. */
     s_idle_wink_deadline = 0;
-    display_show_rgba(battery_is_charging() ? BATTERY_ICON_CHARGING
-                                           : battery_icon_for(battery_soc()));
+    display_show_rgba(battery_icon_now());
     display_apply_volume_overlay_locked();
     s_battery_visual_deadline =
         xTaskGetTickCount() + pdMS_TO_TICKS(BATTERY_GLIMPSE_MS);
@@ -547,6 +554,7 @@ static void display_show_wink_locked(void)
     if (s_display_base != DISPLAY_BASE_IDLE
         && s_display_base != DISPLAY_BASE_BATTERY)
     {
+        ESP_LOGI(TAG, "wink suppressed (base %d)", (int)s_display_base);
         return;
     }
     /* Demote the battery screen instead of drawing over it, so the wink hold
@@ -556,6 +564,7 @@ static void display_show_wink_locked(void)
     s_battery_visual_deadline = 0;
     display_show_rgba(WINK_FACE_FRAMES[s_wink_frame_index]);
     display_apply_volume_overlay_locked();
+    ESP_LOGI(TAG, "wink frame %u", (unsigned)s_wink_frame_index);
     /* Alternate so consecutive right-knob turns cycle the two wink frames. */
     s_wink_frame_index = (uint8_t)(s_wink_frame_index ^ 1u);
     s_idle_wink_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(IDLE_WINK_MS);
@@ -803,6 +812,10 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
             if (audio_set_volume(s_volume) == ESP_OK)
             {
                 display_show_volume_locked();
+                if (s_volume_blip_signal != NULL)
+                {
+                    xSemaphoreGive(s_volume_blip_signal);
+                }
                 ESP_LOGI(TAG, "volume %d", s_volume);
             }
             else
@@ -1095,14 +1108,72 @@ static void battery_periodic_check(void)
     state_unlock();
 }
 
-/* Charge state is edge-polled on this period so a plug-in shows its glimpse
- * promptly instead of waiting for the 30 s battery period. */
-#define CHARGE_EDGE_POLL_MS 500
-static uint32_t s_charge_poll_ticks;
 
 /*
- * Announce the not-charging -> charging edge with a battery glimpse. Unplugging
- * needs no announcement: the glimpse already expires back to the base screen.
+ * Volume feedback task: one blip per detent, so turning the knob gives
+ * continuous sound instead of a single tone once it stops. It runs outside the
+ * state mutex because audio_play_blip() blocks for the length of the blip, and
+ * the binary semaphore collapses a burst of detents into at most one pending
+ * blip so the queue can never run away from the knob.
+ */
+static void volume_blip_task(void *arg)
+{
+    (void)arg;
+
+    while (true)
+    {
+        int volume;
+        bool powered_off;
+        esp_err_t err;
+
+        if (xSemaphoreTake(s_volume_blip_signal, portMAX_DELAY) != pdTRUE)
+        {
+            continue;
+        }
+
+        state_lock();
+        volume = s_volume;
+        powered_off = s_powered_off;
+        state_unlock();
+
+        /* Silence needs no blip, and content is its own volume feedback. */
+        if (powered_off || volume <= VOLUME_MIN || audio_is_playing())
+        {
+            continue;
+        }
+        err = audio_play_blip(VOLUME_BLIP_HZ, VOLUME_BLIP_MS);
+        /* A stream that started between the checks refuses the blip; that is
+         * the intended precedence, not a fault. */
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+        {
+            ESP_LOGW(TAG, "volume blip failed: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+/*
+ * Charge state is edge-polled on this period so a plug-in shows its glimpse
+ * promptly instead of waiting for the 30 s battery period.
+ *
+ * The charger's STAT line is open-drain and this unit's SGM41513 never ACKs on
+ * I2C, so the level is all we have — and a charger that blinks STAT (fault or
+ * end-of-charge indication) would otherwise re-arm the glimpse forever and keep
+ * the face off the panel. Two defences: a transition counts only after the new
+ * level holds for CHARGE_EDGE_STABLE_POLLS consecutive samples, and a glimpse
+ * is never shown more often than CHARGE_GLIMPSE_MIN_GAP_MS.
+ */
+#define CHARGE_EDGE_POLL_MS          500
+#define CHARGE_EDGE_STABLE_POLLS       4
+#define CHARGE_GLIMPSE_MIN_GAP_MS  30000
+static uint32_t s_charge_poll_ticks;
+static uint32_t s_charge_glimpse_ticks;
+static bool s_charge_sample;
+static uint8_t s_charge_agree;
+
+/*
+ * Announce a debounced not-charging -> charging edge with a battery glimpse.
+ * Unplugging needs no announcement: the glimpse expires back to the base screen
+ * on its own.
  */
 static void charge_edge_check(void)
 {
@@ -1115,17 +1186,41 @@ static void charge_edge_check(void)
         return;
     }
     s_charge_poll_ticks = now;
+
     charging = battery_is_charging();
+    if (charging != s_charge_sample)
+    {
+        s_charge_sample = charging;
+        s_charge_agree = 1;
+        return;
+    }
+    if (s_charge_agree < CHARGE_EDGE_STABLE_POLLS)
+    {
+        s_charge_agree++;
+        if (s_charge_agree < CHARGE_EDGE_STABLE_POLLS)
+        {
+            return;
+        }
+    }
     if (charging == s_charging_latched)
     {
         return;
     }
     s_charging_latched = charging;
+    ESP_LOGI(TAG, "charger %s (SOC %d%%)",
+             charging ? "connected" : "disconnected", battery_soc());
     if (!charging)
     {
         return;
     }
-    ESP_LOGI(TAG, "charger connected (SOC %d%%)", battery_soc());
+    if (s_charge_glimpse_ticks != 0
+        && (int32_t)(now - s_charge_glimpse_ticks)
+               < pdMS_TO_TICKS(CHARGE_GLIMPSE_MIN_GAP_MS))
+    {
+        ESP_LOGW(TAG, "charger STAT is flapping; skipping the glimpse");
+        return;
+    }
+    s_charge_glimpse_ticks = now;
     state_lock();
     /* The admin access code must stay readable; every other screen yields. */
     if (s_display_base != DISPLAY_BASE_ADMIN)
@@ -1259,6 +1354,17 @@ void app_main(void)
     boot_require(BOOT_STAGE_NFC, cr95hf_init());
     boot_require(BOOT_STAGE_ENCODER, encoder_init());
     encoder_register_cb(encoder_cb);
+
+    /* Audible volume feedback runs on its own task so a detent never waits for
+     * I2S. Losing it costs feedback only, so a failure is not fatal. */
+    s_volume_blip_signal = xSemaphoreCreateBinary();
+    if (s_volume_blip_signal == NULL
+        || xTaskCreate(volume_blip_task, "volume_blip", VOLUME_BLIP_STACK_BYTES,
+                       NULL, VOLUME_BLIP_PRIORITY, NULL) != pdPASS)
+    {
+        ESP_LOGW(TAG, "volume feedback task unavailable; knob stays silent");
+        s_volume_blip_signal = NULL;
+    }
     /* Stock user mode treats a successful FatFS mount as SD availability;
      * its optional higher-level indexes do not gate the mount. */
     esp_err_t content_err = content_init();

@@ -101,3 +101,16 @@ esp_err_t audio_play_tone(int freq_hz);
  * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE, or ESP_ERR_NO_MEM.
  */
 esp_err_t audio_start_tone(int freq_hz);
+
+/**
+ * Play one short square-wave blip at the current volume. This is the audible
+ * half of volume feedback: with nothing playing, a volume change is otherwise
+ * silent. Blocks the calling task for roughly duration_ms, and is refused with
+ * ESP_ERR_INVALID_STATE while a stream is loaded (playing or paused) because it
+ * owns and then clears the I2S DMA ring.
+ *
+ * @param[in] freq_hz     Blip frequency (50..8000).
+ * @param[in] duration_ms Blip length in ms (1..250).
+ * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE, or ESP_ERR_NO_MEM.
+ */
+esp_err_t audio_play_blip(int freq_hz, int duration_ms);

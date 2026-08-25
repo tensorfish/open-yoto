@@ -114,6 +114,47 @@ real board — do not use it for one board's pins.
 - `8117` `EQUALIZER` · `732` `Equalizer Preset "%s" found in NVS APP settings` · `733` `Equalizer has been set to off` · `7610-7611` `"APP_EQ_PRESET"` (NVS key, default `"default"`) · `7791` `APP_EQ_PRESET`
 - `810` `Speaker vol curve [%02d] = %d` · `811` `Headphone vol curve [%02d] = %d` · `812` `Volume table entries must all be in range 0 to 100` · `813` `Volume table does not contain 17 entries`
 
+### Volume knob: the stock firmware plays no sound (recovered 2026-08, factory.bin)
+
+The stock volume knob is silent. Recovered by disassembling seg4 of
+`output/factory.bin` (IROM `0x400D0020` @ file `0xB0020`):
+
+- `0x400e3cf4` is the `volume_control` apply function (it logs string `817`
+  `UI volume set to: %d (spkr vol %d%%, hp vol %d%%)`). Its complete callee set is
+  settings/mutex/gain/power/log/Bluetooth-volume/timer: `0x400e405c` (settings +
+  current volume), `0x40115454` (mutex take), `0x400e43f0`, `0x400e3b40`
+  (`_ui_clicks_to_volume`), `0x401d4f30` (`audio_hal_set_volume` — a codec **gain**
+  register write), `0x400e47bc` (es8388 register 25), `0x400dc5c8`
+  (`btHndl_setvolume`). Nothing reaches a tone generator, an I2S sample write, an
+  ADF pipeline start, or the system-sound player (`0x400e2ed4` /
+  `play_startup_audio` `0x400f6890`).
+- Volume is applied **synchronously per click** (`0x400e3e01` up, `0x400e3e7b`
+  down, both `call8 0x400e3cf4`).
+- `volume_timer` is created in `0x400e39ec` (esp_timer, name literal
+  `0x3f4076c5`), one-shot, 1,500,000 µs (`0x16e360`), callback `0x400e3ab8`. The
+  callback clears a dirty flag and posts a walkman redraw (`wm_redraw`
+  `0x400efa44`) — it coalesces the **display**, not audio, and does not touch NVS.
+- The sine tone generator is `play_tone` `0x401d8c78` (single tone `0x401d8a28`,
+  sweep `0x401d87e8`, sine helper `0x401d8688`; 44.1 kHz literal `0x401c7504`,
+  16-bit mono, 2048-sample buffer, ADF `i2s_stream_init` `0x401d5408`, volume
+  applied downstream by `0x401d4f30`). Its only callers are the `audiobeep`
+  console command (`call8` @ `0x401ddb7c`), `monitor_inspection_card_removal`
+  (`0x401dca70`, sweep mode), and a `prodtestchecks` function pointer stored at
+  literal `0x400d2f84`. No UI/knob caller exists.
+- Embedded audio is exactly ten M4A/AAC-LC 44.1 kHz mono system sounds, mapped by
+  a strcmp chain in the YOTO_VFS open path (`0x400db924`, chain
+  `0x400db9fd`-`0x400dbb2e`, start/end pointer pairs in literal pool
+  `0x400d087c`-`0x400d0924`), with an 11-entry name array at RAM `0x3ffbdef4`.
+  `test_no_sound` is not audio — it maps to a 34-byte text file at `0x3f4026d1`.
+  No asset is a volume click; the shortest is `setup_fail` (2,584 B) and the only
+  "beep" is `battery_fault_beep` (3,684 B). The ADPCM path
+  (`failed to allocate out_adpcm_buf`) belongs to the ADF WAV decoder, fed only
+  from SD/network.
+
+Consequence for the replacement: audible volume feedback has no stock original to
+copy. `components/audio`'s `audio_play_blip()` is this project's own addition and
+matches only stock's waveform choice (sine at 44.1 kHz).
+
 ### Sleep timer / volume fade
 - `1707` `Sleep timer not initialised` · `1710` `Dropping volume` · `1712` `could not restore user volume after sleep timer expired` · `1713` `_step_down_volume` · `1714` `stimer_process` · `1715` `stimer_stop`
 

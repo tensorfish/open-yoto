@@ -108,7 +108,7 @@ The knobs/buttons are handled as events (not polled in the loop):
 
 | Input | Action |
 |-------|--------|
-| Left knob turn | volume (5 per click, 0–100); bar redraw coalesced to 100 ms |
+| Left knob turn | volume (5 per click, 0–100); bar redraw coalesced to 100 ms, plus one 45 ms 880 Hz blip per detent when nothing is playing |
 | Right knob turn | skip track (wraps around); with no card, winks the face |
 | Either knob press (short) | play / pause |
 | Right knob press (long, ~0.8 s) | power off/on |
@@ -122,6 +122,22 @@ low-battery warning) plus **transients** that expire back onto it: the wink
 (300 ms), the volume bar (1.5 s after the last detent), and the battery glimpse
 (5 s). Transients compose rather than pre-empt each other — every icon frame
 re-applies a live volume bar — and each expiry repaints the base underneath.
+
+Volume feedback is audible as well as visual. With nothing playing, a volume
+change makes no sound at all, so a dedicated task plays one short sine blip per
+detent at the new level — continuous feedback while the knob turns, and the blip
+goes through the same PCM gain as content, so it *is* the new loudness. Content
+always wins: `audio_play_blip()` refuses while a stream is loaded, playing or
+paused.
+
+For the record, the stock firmware makes **no** sound when its volume knob is
+turned: `_ui_clicks_to_volume` applies the level synchronously and its only timer
+(`volume_timer`, 1.5 s one-shot) just coalesces a display redraw. Stock's sine
+tone generator is reachable only from the `audiobeep` console command, the
+factory inspection self-test, and `prodtestchecks`, and none of the ten embedded
+M4A `/system/sounds/*` assets is a volume click. The blip is therefore this
+firmware's own addition, matching stock's *waveform* (sine at 44.1 kHz) rather
+than copying a stock sound that does not exist.
 
 ## Card → playback flow
 
@@ -288,17 +304,21 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   80-byte profile, activating the gauge, and waiting for ready state. VCELL and
   SOC are read only after initialization succeeds.
 - **Low battery** = charge < 15% **or** voltage < 3.3 V.
-- The battery screen comes from `firmware/icons/battery-*.png`:
-  `battery-charging.png` while charging, `battery-empty.png` when low or when
-  the reading is unavailable, otherwise the SOC floored to the nearest ten
-  (`battery-10.png`…`battery-100.png`).
+- The battery screen comes from `firmware/icons/battery-*.png`. Each icon covers
+  the ten points up to its label — `battery-10.png` is 0–10%, `battery-20.png`
+  is 11–20%, through `battery-100.png` for 91–100% — `battery-charging.png`
+  replaces all of them while charging, and `battery-empty.png` appears only when
+  the gauge reading is unavailable.
 - Battery info never fights the face. Charging is announced as a glimpse on the
-  not-charging → charging **edge** (polled every 500 ms), at boot, and on
-  power-on; it covers the base screen for 5 s and then hands it back. The 30 s
-  re-check only logs while charging. A right-knob twist with no card loaded winks
-  and rests on the face, taking the display back from the charging icon. Only a
-  **low** battery re-asserts itself over whatever is on screen.
+  not-charging → charging **edge**, at boot, and on power-on; it covers the base
+  screen for 5 s and then hands it back. The 30 s re-check only logs while
+  charging. A right-knob twist with no card loaded winks and rests on the face,
+  taking the display back from the charging icon. Only a **low** battery
+  re-asserts itself over whatever is on screen.
 - `IOX_CHG_STAT` is the active-low charging signal even when the SGM41513 I²C
-  device does not ACK.
+  device does not ACK. Because that line is open-drain and can blink, a
+  transition counts only after four consecutive 500 ms samples agree, and a
+  charging glimpse is shown at most once every 30 s — a blinking STAT must never
+  hold the face off the panel.
 - "Off" is software standby: audio and the admin server stop and the display
   blanks. True deep sleep is not implemented yet.
