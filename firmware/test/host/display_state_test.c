@@ -1068,6 +1068,16 @@ int main(void)
         CHECK(last_frame() != WINK_FACE_FRAMES[0]
               && last_frame() != WINK_FACE_FRAMES[1],
               "admin: a wink must not cover the access code");
+        /* Remote image/clear actions must also be rejected while admin owns
+         * the password; otherwise the browser can hide the code directly. */
+        codes = s_access_code_count;
+        CHECK(remote_display_image("/sdcard/media/cover.img")
+              == ESP_ERR_INVALID_STATE && s_access_code_count == codes + 1,
+              "admin: remote image must not replace the access code");
+        codes = s_access_code_count;
+        CHECK(remote_clear_display() == ESP_ERR_INVALID_STATE
+              && s_access_code_count == codes + 1,
+              "admin: remote clear must not blank the access code");
 
         /* And once admin stops, the face comes back. */
         s_admin_active = false;

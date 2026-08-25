@@ -1191,6 +1191,15 @@ static esp_err_t remote_play_sound(const char *absolute_sd_path)
 static esp_err_t remote_display_image(const char *absolute_sd_path)
 {
     state_lock();
+    if (admin_is_active() && s_admin_code[0] != '\0')
+    {
+        /* Admin mode must keep the access code visible; remote image display
+         * is intentionally unavailable while the password owns the panel. */
+        s_display_base = DISPLAY_BASE_ADMIN;
+        display_show_access_code(s_admin_code);
+        state_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t err = display_show_card_image_locked(absolute_sd_path);
     state_unlock();
     return err;
@@ -1207,6 +1216,14 @@ static esp_err_t remote_stop_sound(void)
 static esp_err_t remote_clear_display(void)
 {
     state_lock();
+    if (admin_is_active() && s_admin_code[0] != '\0')
+    {
+        /* Clearing the panel cannot hide the admin password. */
+        s_display_base = DISPLAY_BASE_ADMIN;
+        display_show_access_code(s_admin_code);
+        state_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
     s_display_base = DISPLAY_BASE_OFF;
     s_battery_visual_deadline = 0;
     display_cancel_volume_locked();

@@ -70,6 +70,7 @@ static esp_err_t admin_send_oom(httpd_req_t *req, const char *where)
 #define ADMIN_NAME_MAX          128
 #define ADMIN_URL_MAX           512
 #define ADMIN_BODY_MAX          (4 * 1024 * 1024)
+#define ADMIN_UPLOAD_MAX_BYTES  (50 * 1024 * 1024)
 #define ADMIN_MAX_TRACKS        32
 #define ADMIN_MAX_FILES         64
 #define ADMIN_MANIFEST_MAX      4096
@@ -2359,12 +2360,18 @@ static esp_err_t admin_fs_upload_handler(httpd_req_t *req)
     {
         return ESP_FAIL;
     }
-    if (remaining > ADMIN_BODY_MAX
-        || !admin_query_path(req, "path", logical, sizeof(logical))
+    if (remaining > ADMIN_UPLOAD_MAX_BYTES)
+    {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE,
+                            "upload too large (maximum 50 MiB)");
+        return ESP_FAIL;
+    }
+    if (!admin_query_path(req, "path", logical, sizeof(logical))
         || !admin_resolve_sd_path(logical, absolute, sizeof(absolute))
         || strcmp(absolute, CONTENT_MOUNT_POINT) == 0)
     {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid upload");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "invalid upload path");
         return ESP_FAIL;
     }
     fp = fopen(absolute, "wb");
@@ -2383,7 +2390,7 @@ static esp_err_t admin_fs_upload_handler(httpd_req_t *req)
             fclose(fp);
             unlink(absolute);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                "upload failed");
+                                "upload failed while writing");
             return ESP_FAIL;
         }
         remaining -= (size_t)got;
@@ -2393,7 +2400,7 @@ static esp_err_t admin_fs_upload_handler(httpd_req_t *req)
     {
         unlink(absolute);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                            "upload failed");
+                            "upload failed while closing");
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "uploaded %s (%u bytes)", absolute, (unsigned)written_total);
