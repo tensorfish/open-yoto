@@ -1003,6 +1003,26 @@ int main(void)
         encoder_actions_pump();
         CHECK(s_powered_off,
               "encoder: the pump must apply the deferred power toggle");
+
+        /* A skip captured for one card must not be applied to a different card
+         * that arrived in between: the turn belonged to the old story. */
+        reset_state();
+        s_track_count = 3;
+        s_track_index = 0;
+        snprintf(s_current_url, sizeof(s_current_url), "%s",
+                 "https://example.com/first");
+        encoder_event(ENCODER_ID_1, 1, ENCODER_EVT_TURN);
+        CHECK(s_pending_skip == 1, "encoder: skip must be recorded for the card");
+        /* The main loop swaps the card before the gesture task runs. */
+        snprintf(s_current_url, sizeof(s_current_url), "%s",
+                 "https://example.com/second");
+        s_content_lookups = 0;
+        encoder_actions_pump();
+        CHECK(s_track_index == 0 && s_content_lookups == 0,
+              "encoder: a skip captured for another card must be dropped "
+              "(track_index %d, lookups %d)", s_track_index, s_content_lookups);
+        CHECK(s_pending_skip == 0,
+              "encoder: the dropped skip must still be cleared");
     }
 
     /* ------------------------------ 11. ADMIN CODE STAYS ON THE PANEL ----- */

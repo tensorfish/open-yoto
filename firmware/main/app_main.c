@@ -324,13 +324,19 @@ static uint32_t s_volume_draw_due;
 static SemaphoreHandle_t s_volume_blip_signal;
 static bool s_volume_dirty;
 static uint8_t s_wink_frame_index;
-/* Gestures the encoder task recorded for the main loop to perform. */
+/* Gestures the encoder task recorded for the gesture task to perform. */
 static int s_pending_skip;
 static bool s_pending_power;
+/* The card a pending skip was captured for; a swap invalidates the turn. */
+static char s_pending_skip_url[CR95HF_URL_MAX + 1];
+/* Wakes the gesture task the moment a gesture is recorded. */
+static SemaphoreHandle_t s_gesture_signal;
+#define GESTURE_TASK_STACK_BYTES 6144
+#define GESTURE_TASK_PRIORITY       4
 /* Last sampled charger state; the not-charging -> charging edge is news. */
 static bool s_charging_latched;
 
-/* Serialize access to playback/track state across the two tasks. */
+/* Serialize access to playback/track state across the tasks. */
 static void state_lock(void)
 {
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
@@ -339,6 +345,15 @@ static void state_lock(void)
 static void state_unlock(void)
 {
     xSemaphoreGive(s_state_mutex);
+}
+
+/* Wake the gesture task; safe to call with the state mutex held. */
+static void gesture_signal(void)
+{
+    if (s_gesture_signal != NULL)
+    {
+        xSemaphoreGive(s_gesture_signal);
+    }
 }
 static esp_err_t render_image(const char *path);
 
@@ -860,8 +875,12 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
                 /* Skipping a track reads mapping.json off the SD card and
                  * renders card art, which needs far more stack than the 4 KB
                  * encoder task has — doing it here overflows and panics. Record
-                 * the intent and let the main loop perform it. */
+                 * the intent, tagged with the card it belongs to, and let the
+                 * gesture task perform it. */
                 s_pending_skip += delta;
+                snprintf(s_pending_skip_url, sizeof(s_pending_skip_url), "%s",
+                         s_current_url);
+                gesture_signal();
             }
             else if (s_track_count == 0)
             {
@@ -890,6 +909,7 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
                  * too stack-hungry for this task. */
                 state_lock();
                 s_pending_power = true;
+                gesture_signal();
                 state_unlock();
             }
         }
@@ -902,6 +922,7 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
             {
                 state_lock();
                 s_pending_power = true;
+                gesture_signal();
                 state_unlock();
             }
         }
@@ -911,27 +932,55 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
 /*
  * Perform the gestures the encoder task deferred. The encoder callback runs on a
  * 4 KB task, so anything touching the SD card, the admin server or the image
- * renderer is recorded as intent and executed here, on the main loop's stack.
+ * renderer is recorded as intent and executed here, off that stack.
+ *
+ * Called from the gesture task (immediately, so a knob turn or power tap is not
+ * left waiting behind the main loop's ~400 ms NFC poll) and once per main-loop
+ * pass as a safety net if that task could not be created. Draining under the
+ * lock makes the two callers idempotent.
  */
 static void encoder_actions_pump(void)
 {
     int skip;
     bool power;
+    bool stale;
 
     state_lock();
     skip = s_pending_skip;
     s_pending_skip = 0;
     power = s_pending_power;
     s_pending_power = false;
+    /* A skip belongs to the card that was loaded when the knob turned. The card
+     * can be removed or swapped in between, and applying the turn to whatever
+     * card arrived next would skip the wrong story. */
+    stale = skip != 0 && strcmp(s_pending_skip_url, s_current_url) != 0;
+    s_pending_skip_url[0] = '\0';
     state_unlock();
 
     if (power)
     {
         power_toggle();
     }
-    if (skip != 0)
+    if (skip != 0 && !stale)
     {
         skip_track(skip);
+    }
+}
+
+/*
+ * Deferred gestures run here rather than on the main loop, which can be inside a
+ * blocking NFC poll when the knob turns.
+ */
+static void gesture_task(void *arg)
+{
+    (void)arg;
+
+    while (true)
+    {
+        if (xSemaphoreTake(s_gesture_signal, portMAX_DELAY) == pdTRUE)
+        {
+            encoder_actions_pump();
+        }
     }
 }
 
@@ -1474,6 +1523,18 @@ void app_main(void)
     {
         ESP_LOGW(TAG, "volume feedback task unavailable; knob stays silent");
         s_volume_blip_signal = NULL;
+    }
+
+    /* Deferred knob/power gestures run on their own task so they are not stuck
+     * behind the main loop's NFC poll. If it cannot start, the main loop still
+     * pumps them once per pass — slower, but nothing is lost. */
+    s_gesture_signal = xSemaphoreCreateBinary();
+    if (s_gesture_signal == NULL
+        || xTaskCreate(gesture_task, "gesture", GESTURE_TASK_STACK_BYTES,
+                       NULL, GESTURE_TASK_PRIORITY, NULL) != pdPASS)
+    {
+        ESP_LOGW(TAG, "gesture task unavailable; gestures apply on the main loop");
+        s_gesture_signal = NULL;
     }
     /* Stock user mode treats a successful FatFS mount as SD availability;
      * its optional higher-level indexes do not gate the mount. */

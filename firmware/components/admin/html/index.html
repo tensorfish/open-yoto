@@ -6,104 +6,97 @@
 <title>openyoto control</title>
 <style>
 :root{color-scheme:dark;--bg:#0b0d12;--panel:#151922;--line:#2a3140;--muted:#929bad;--text:#f2f4f8;--accent:#f4a62a;--danger:#ef5b62;--ok:#43c985}
-*{box-sizing:border-box}body{margin:0;background:linear-gradient(160deg,#111722 0,#0b0d12 45%);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;min-height:100vh}
-.wrap{width:min(920px,100%);margin:auto;padding:24px 16px 56px}header{display:flex;justify-content:space-between;align-items:end;gap:16px;margin-bottom:20px}h1{font-size:24px;margin:0}.sub,.hint{color:var(--muted)}.sub{font-size:13px;margin:4px 0 0}.badge{border:1px solid var(--line);border-radius:999px;padding:6px 10px;color:var(--muted);font-size:12px}
-.card{background:rgba(21,25,34,.96);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px;box-shadow:0 12px 32px #0003}.card h2{font-size:13px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
-label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}input,select{width:100%;min-height:44px;background:#0d1118;border:1px solid var(--line);border-radius:9px;color:var(--text);padding:9px 11px;font:inherit;margin-bottom:12px}input:focus,select:focus{outline:2px solid #f4a62a55;border-color:var(--accent)}select[multiple]{min-height:160px;padding:4px}.mapping-artwork{display:grid;gap:9px;margin:12px 0}
-button,.button{min-height:40px;border:1px solid transparent;border-radius:9px;background:var(--accent);color:#241600;padding:8px 13px;font:600 14px system-ui;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:hover,.button:hover{filter:brightness(1.08)}button.secondary,.button.secondary{background:#1b2230;color:var(--text);border-color:var(--line)}button.danger{background:transparent;color:var(--danger);border-color:#ef5b6266}button:disabled{opacity:.45;cursor:not-allowed}
-.login{max-width:420px;margin:11vh auto}.code{font:700 26px/1 ui-monospace,SFMono-Regular,monospace;letter-spacing:.22em;text-transform:uppercase;text-align:center}.tabs{display:flex;gap:8px;margin-bottom:16px;overflow:auto}.tab{background:#151922;color:var(--muted);border-color:var(--line);min-width:120px}.tab.active{background:var(--accent);color:#241600}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.row{display:flex;gap:9px;align-items:center}.row>input{margin:0;min-width:0}.row.wrap-actions{flex-wrap:wrap}.status{min-height:22px;margin:10px 2px;color:var(--muted)}.status.ok{color:var(--ok)}.status.err{color:var(--danger)}
-.pathbar{display:flex;gap:8px;align-items:center;margin-bottom:12px}.pathbar input{flex:1;min-width:120px;margin:0;font-family:ui-monospace,SFMono-Regular,monospace}.entries{border-top:1px solid var(--line)}.entry{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}.entry-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.entry-meta{color:var(--muted);font-size:12px}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.actions button,.actions .button{min-height:34px;padding:5px 9px;font-size:12px}.drop{border:1px dashed #465168;border-radius:10px;padding:14px;margin-top:14px}.empty{color:var(--muted);padding:20px 0;text-align:center}
-.image-converter{display:flex;align-items:center;gap:14px;margin:2px 0 12px}.image-preview{width:128px;height:128px;flex:0 0 128px;background:#000;border:1px solid var(--line);border-radius:8px;image-rendering:pixelated}.image-converter .hint{margin:0}.separator{border:0;border-top:1px solid var(--line);margin:18px 0}
-.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.panel-head h2{margin-bottom:0}.progress-wrap{margin-top:12px}.progress-wrap progress{width:100%;height:10px;accent-color:var(--accent)}.progress-wrap .hint{margin:6px 0 0}
-@media(max-width:680px){.grid{grid-template-columns:1fr}.entry{grid-template-columns:1fr}.actions{justify-content:flex-start}header{align-items:start;flex-direction:column}}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(160deg,#111722,#0b0d12);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;min-height:100vh}
+.wrap{width:min(920px,100%);margin:0 auto;padding:16px 12px 76px}header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}h1{font-size:20px;margin:0}.sub{color:var(--muted);font-size:13px;margin:2px 0 0}.badge{flex:0 0 auto;border:1px solid var(--line);border-radius:999px;padding:5px 10px;color:var(--muted);font-size:12px}
+.card{background:rgba(21,25,34,.96);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}.card h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 12px}
+label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}input,select{width:100%;min-height:44px;background:#0d1118;border:1px solid var(--line);border-radius:9px;color:var(--text);padding:9px 11px;font:inherit;margin-bottom:12px}input:focus,select:focus{outline:2px solid #f4a62a55;border-color:var(--accent)}
+button,.button{min-height:44px;border:1px solid transparent;border-radius:9px;background:var(--accent);color:#241600;padding:8px 14px;font:600 14px system-ui;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:hover,.button:hover{filter:brightness(1.08)}button.secondary,.button.secondary{background:#1b2230;color:var(--text);border-color:var(--line)}button.danger,.button.danger{background:transparent;color:var(--danger);border-color:#ef5b6266}button:disabled{opacity:.45;cursor:not-allowed}
+.login{max-width:420px;margin:8vh auto 0}.code{font:700 24px/1 ui-monospace,SFMono-Regular,monospace;letter-spacing:.2em;text-transform:uppercase;text-align:center}.hint{color:var(--muted);font-size:12px;margin:0 0 10px}
+.status{min-height:22px;margin:8px 2px;color:var(--muted)}.status.ok{color:var(--ok)}.status.err{color:var(--danger)}
+.tabs{position:fixed;bottom:0;left:0;right:0;z-index:20;display:flex;gap:6px;overflow-x:auto;background:rgba(21,25,34,.98);border-top:1px solid var(--line);padding:6px;-webkit-overflow-scrolling:touch;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.tab{flex:1 0 auto;white-space:nowrap;background:#151922;color:var(--muted);border-color:var(--line);padding:10px 14px}.tab.active{background:var(--accent);color:#241600}
+.grid{display:grid;grid-template-columns:1fr;gap:14px}.row{display:flex;gap:8px;align-items:center}.row.wrap-actions{flex-wrap:wrap}
+.pathbar{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}.pathbar input{margin:0;font-family:ui-monospace,SFMono-Regular,monospace}
+.entries{border-top:1px solid var(--line)}.entry{display:flex;flex-direction:column;gap:5px;padding:12px 0;border-bottom:1px solid var(--line)}.entry-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.entry-meta{color:var(--muted);font-size:12px;overflow-wrap:anywhere}.actions{display:flex;gap:6px;flex-wrap:wrap}.actions button,.actions .button{min-height:44px;padding:6px 12px;font-size:13px}
+.drop{border:1px dashed #465168;border-radius:10px;padding:14px;margin-top:14px}.empty{color:var(--muted);padding:16px 0;text-align:center}
+.image-converter{display:flex;flex-direction:column;align-items:flex-start;gap:12px;margin:2px 0 12px}.image-preview{width:128px;height:128px;background:#000;border:1px solid var(--line);border-radius:8px;image-rendering:pixelated}.separator{border:0;border-top:1px solid var(--line);margin:16px 0}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.panel-head h2{margin-bottom:0}.progress-wrap{margin-top:12px}.progress-wrap progress{width:100%;height:10px;accent-color:var(--accent)}.progress-wrap .hint{margin:6px 0 0}
+.track-list{margin-bottom:12px}.track-choice{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:9px;padding:12px;margin-bottom:8px;background:#0d1118;cursor:pointer}.track-choice:has(input:checked){border-color:var(--accent);background:#1b2230}.track-choice input{flex:0 0 auto;width:18px;height:18px;min-height:0;margin:0;padding:0;border:0;background:transparent;accent-color:var(--accent)}.track-choice .track-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mapping-artwork{display:grid;gap:9px;margin:12px 0}.mapping-artwork .row{border:1px solid var(--line);border-radius:9px;padding:10px}.mapping-artwork .row label{min-width:0}.mapping-artwork .row select{width:100%;margin:0}
+.entry-head{display:flex;align-items:center;gap:8px;min-width:0}.entry-head .entry-name{flex:1}
+.thumb{width:32px;height:32px;image-rendering:pixelated;border:1px solid var(--line);border-radius:5px;background:#0d1118;flex:0 0 auto}
+.chip{flex:0 0 auto;border:1px solid var(--line);color:var(--muted);border-radius:999px;padding:1px 8px;font-size:11px;line-height:1.6;margin-left:6px}.chip.saved{border-color:var(--ok);color:var(--ok)}.chip.partly{border-color:var(--accent);color:var(--accent)}.chip.missing{border-color:var(--danger);color:var(--danger)}
+.cover-thumb{display:flex;align-items:center;gap:8px;margin-bottom:12px}.cover-thumb select{flex:1;width:auto;margin:0}
+@media(min-width:700px){.wrap{padding:28px 24px 56px}.grid{grid-template-columns:1fr 1fr}.tabs{position:static;border:1px solid var(--line);border-radius:12px;margin-bottom:16px;padding:4px;background:#151922}.image-converter{flex-direction:row;align-items:center}}
 </style>
 </head>
 <body>
 <div class="wrap">
-<header><div><h1>openyoto control</h1><p class="sub">Hotspot administration at 192.168.4.1</p></div><span class="badge" id="connection">Locked</span></header>
+<header><div><h1>openyoto</h1><p class="sub">Admin · 192.168.4.1</p></div><span class="badge" id="connection">Locked</span></header>
 <section class="card login" id="login">
 <h2>Access code</h2>
-<p class="hint">Enter the six-character code shown on the player.</p>
+<p class="hint">Enter the six-character code from the player.</p>
 <input class="code" id="pin" maxlength="6" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="A1B2C3">
-<button id="unlock">Unlock admin</button>
+<button id="unlock">Unlock</button>
 </section>
 <p class="status" id="status" role="status" aria-live="polite"></p>
 <main id="app" hidden>
 <nav class="tabs">
-<button class="tab" data-tab="remote">Remote control</button>
-<button class="tab active" data-tab="files">Media files</button>
+<button class="tab" data-tab="remote">Remote</button>
+<button class="tab active" data-tab="files">Files</button>
 <button class="tab" data-tab="tracks">Tracks</button>
 <button class="tab" data-tab="cards">Cards</button>
 </nav>
 <section data-panel="remote" hidden>
 <div class="grid">
-<div class="card"><h2>Play sound on player</h2><label for="soundPath">Absolute media path</label><input id="soundPath" placeholder="/sdcard/media/track.mp3"><div class="row wrap-actions"><button id="playSound">Play sound</button><button class="secondary" id="stopSound">Stop playback</button></div></div>
-<div class="card"><h2>Display image on player</h2><label for="imagePath">Saved player image path</label><input id="imagePath" placeholder="/sdcard/media/card.img"><div class="row wrap-actions"><button class="secondary" id="showImage">Display saved .img</button><button class="secondary" id="clearDisplay">Clear screen</button></div><hr class="separator"><label for="imageSource">Convert a PNG or JPEG</label><input id="imageSource" type="file" accept="image/png,image/jpeg"><div class="image-converter"><canvas class="image-preview" id="imagePreview" width="16" height="16" hidden></canvas><p class="hint" id="imageConversionHint">The browser will stretch the image to the player's centered 16×16 RGB565 color frame.</p></div><button id="convertImage" disabled>Upload and display</button></div>
+<div class="card"><h2>Play sound</h2><label for="soundPath">Media path</label><input id="soundPath" placeholder="/sdcard/media/track.mp3"><div class="row wrap-actions"><button id="playSound">Play</button><button class="secondary" id="stopSound">Stop</button></div></div>
+<div class="card"><h2>Display image</h2><label for="imagePath">Player image path</label><input id="imagePath" placeholder="/sdcard/media/card.img"><div class="row wrap-actions"><button class="secondary" id="showImage">Display</button><button class="secondary" id="clearDisplay">Clear</button></div><hr class="separator"><label for="imageSource">Convert PNG/JPEG</label><input id="imageSource" type="file" accept="image/png,image/jpeg"><div class="image-converter"><canvas class="image-preview" id="imagePreview" width="16" height="16" hidden></canvas><p class="hint" id="imageConversionHint">Stretched to the player's centered 16×16 RGB565 frame.</p></div><button id="convertImage" disabled>Upload &amp; display</button></div>
 </div>
 </section>
 <section data-panel="files">
 <div class="card">
-<h2>SD media manager</h2>
-<div class="pathbar"><button class="secondary" id="up">Up</button><input id="cwd" value="/sdcard/media" aria-label="Current SD card path" autocapitalize="off" spellcheck="false"><button class="secondary" id="goFiles">Go</button><button class="secondary" id="refreshFiles">Refresh</button></div>
+<h2>SD media</h2>
+<div class="pathbar"><input id="cwd" value="/sdcard/media" aria-label="Current SD card path" autocapitalize="off" spellcheck="false"><div class="row wrap-actions"><button class="secondary" id="up">Up</button><button class="secondary" id="goFiles">Go</button><button class="secondary" id="refreshFiles">Refresh</button></div></div>
 <div class="entries" id="entries"></div>
 <div class="drop">
-<label for="uploads">Upload files into this directory</label><input id="uploads" type="file" multiple>
-<div class="row wrap-actions"><button id="upload">Upload selected</button><button class="secondary" id="newFolder">New directory</button><button class="secondary" id="newFile">New empty file</button></div>
+<label for="uploads">Upload files</label><input id="uploads" type="file" multiple>
+<div class="row wrap-actions"><button id="upload">Upload</button><button class="secondary" id="newFolder">New folder</button><button class="secondary" id="newFile">New file</button></div>
+<hr class="separator">
+<label for="folderUploads">Upload a folder into this directory</label><input id="folderUploads" type="file" webkitdirectory directory multiple>
+<p class="hint" id="folderSelection">No folder selected.</p>
+<div class="row wrap-actions"><button id="uploadFolder" disabled>Upload folder</button></div>
+<div class="progress-wrap" id="folderProgressWrap" hidden><progress id="folderProgress" value="0" max="1"></progress><p class="hint" id="folderProgressText" role="status" aria-live="polite"></p></div>
 </div>
 </div>
 </section>
 <section data-panel="cards" hidden>
-<div class="card" id="cardReader"><div class="panel-head"><h2>Card reader</h2><button class="secondary" id="refreshCard">Refresh</button></div><p class="hint" id="lastCard" role="status" aria-live="polite">No card scanned yet.</p><label for="cardUrl">URL to write to the captured card</label><input id="cardUrl" maxlength="200" placeholder="https://example.com/card" autocapitalize="off" spellcheck="false"><button id="writeCard" disabled>Write URL to card</button></div>
-<div class="card"><div class="panel-head"><h2>Create card mapping</h2><button class="secondary" id="refreshMappingAssets">Refresh media</button></div><p class="hint">Select uploaded audio in play order and an image for each track. Save the URI mapping, then use the verified card writer below to put that exact URI on the scanned card.</p><label for="mappingUrl">Card URI</label><input id="mappingUrl" maxlength="200" placeholder="https://example.com/card" autocapitalize="off" spellcheck="false"><label for="mappingTracks">Tracks (hold Ctrl or ⌘ to select multiple)</label><select id="mappingTracks" multiple size="8" disabled></select><div class="mapping-artwork" id="mappingArtwork"><p class="hint">Select tracks to assign their artwork.</p></div><label for="mappingCover">Fallback / card-cover image</label><select id="mappingCover" disabled><option value="">Use the first track image</option></select><button id="saveMapping" disabled>Save URI mapping</button></div>
-<div class="card"><h2>NFC card mappings</h2><div class="entries" id="cards"></div></div>
+<div class="card" id="cardReader"><div class="panel-head"><h2>Card reader</h2><button class="secondary" id="refreshCard">Refresh</button></div><p class="hint" id="lastCard" role="status" aria-live="polite">No card scanned yet.</p><label for="cardUrl">Card URL</label><input id="cardUrl" maxlength="200" placeholder="https://example.com/card" autocapitalize="off" spellcheck="false"><button id="writeCard" disabled>Write</button></div>
+<div class="card"><div class="panel-head"><h2>Create mapping</h2><button class="secondary" id="refreshMappingAssets">Refresh</button></div><p class="hint">Tap tracks in order, then assign artwork below.</p><label for="mappingUrl">Card URI</label><input id="mappingUrl" maxlength="200" placeholder="https://example.com/card" autocapitalize="off" spellcheck="false"><label>Tracks</label><div class="track-list" id="mappingTracks"></div><div class="mapping-artwork" id="mappingArtwork"><p class="hint">Select tracks to assign their artwork.</p></div><label for="mappingCover">Cover image (fallback)</label><div class="cover-thumb"><canvas class="thumb" id="mappingCoverThumb" width="16" height="16"></canvas><select id="mappingCover" disabled><option value="">Use the first track image</option></select></div><button id="saveMapping" disabled>Save mapping</button></div>
+<div class="card"><div class="panel-head"><h2>Make a card from a folder</h2><button class="secondary" id="refreshFolders">Refresh</button></div><p class="hint">Pick a first-level folder to pre-fill the editor above.</p><div class="entries" id="folderChooser"></div></div>
+<div class="card"><h2>Mappings</h2><div class="entries" id="cards"></div></div>
 </section>
 <section data-panel="tracks" hidden>
-<div class="card"><h2>Add track folder</h2><p class="hint">Choose one folder containing supported audio and images. Its structure is preserved under <code>/sdcard/media</code>; PNG/JPEG files become 16×16 color <code>.img</code> files.</p><label for="trackFolder">Track folder</label><input id="trackFolder" type="file" webkitdirectory directory multiple accept=".mp3,.m4a,.aac,.img,.png,.jpg,.jpeg,audio/mpeg,audio/mp4,audio/aac,image/png,image/jpeg"><p class="hint" id="trackSelection">No folder selected.</p><button id="uploadTrackFolder" disabled>Upload folder</button><div class="progress-wrap" id="trackProgressWrap" hidden><progress id="trackProgress" value="0" max="1"></progress><p class="hint" id="trackProgressText" role="status" aria-live="polite"></p></div></div>
-<div class="card"><div class="panel-head"><h2>Current tracks</h2><button class="secondary" id="refreshTracks">Refresh</button></div><div class="entries" id="tracks"></div></div>
+<div class="card"><h2>Add tracks</h2><p class="hint">One folder; PNG/JPEG become 16×16 <code>.img</code> files.</p><label for="trackFolder">Folder</label><input id="trackFolder" type="file" webkitdirectory directory multiple accept=".mp3,.m4a,.aac,.img,.png,.jpg,.jpeg,audio/mpeg,audio/mp4,audio/aac,image/png,image/jpeg"><p class="hint" id="trackSelection">No folder selected.</p><button id="uploadTrackFolder" disabled>Upload</button><div class="progress-wrap" id="trackProgressWrap" hidden><progress id="trackProgress" value="0" max="1"></progress><p class="hint" id="trackProgressText" role="status" aria-live="polite"></p></div></div>
+<div class="card"><div class="panel-head"><h2>Track list</h2><button class="secondary" id="refreshTracks">Refresh</button></div><div class="entries" id="tracks"></div></div>
 </section>
 </main>
 </div>
 <script>
-const $=s=>document.querySelector(s);const MEDIA_ROOT='/sdcard/media';let unlocked=false;let cwd=MEDIA_ROOT;let activeTab='files';let lastCard={captured:false,uid:'',url:'',seq:0};let lastCardBusy=false;let cardUrlDirty=false;let trackQueue=[];let trackRoot='';let tracksLoadSeq=0;let mappingAssets=[];let mappingOrder=[];const mappingImages=new Map();
+const $=s=>document.querySelector(s);const MEDIA_ROOT='/sdcard/media';let unlocked=false;let cwd=MEDIA_ROOT;let activeTab='files';let lastCard={captured:false,uid:'',url:'',seq:0};let lastCardBusy=false;let cardUrlDirty=false;let trackQueue=[];let trackRoot='';let tracksLoadSeq=0;let mappingAssets=[];let mappingOrder=[];let savedMedia=null;let mediaPaths=new Set();const mappingImages=new Map();const mediaOwner=new Map();const thumbCache=new Map();let folderQueue=[];let folderDest='';
 function status(text,kind=''){const e=$('#status');e.textContent=text;e.className='status '+kind}
 function lock(){unlocked=false;$('#app').hidden=true;$('#login').hidden=false;$('#connection').textContent='Locked'}
 async function api(url,options={}){options.credentials='same-origin';const r=await fetch(url,options);if(r.status===401){lock();throw new Error('Session expired')}if(!r.ok){throw new Error((await r.text())||('HTTP '+r.status))}return r}
 function jsonPost(url,data){return api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})}
 function sdPath(path){path=path.trim().replace(/\/+/g,'/');if(path.startsWith('media/'))path='/sdcard/'+path;else if(path==='/media'||path.startsWith('/media/'))path='/sdcard'+path;else if(!path.startsWith('/'))path=MEDIA_ROOT+'/'+path;if(path!==MEDIA_ROOT&&!path.startsWith(MEDIA_ROOT+'/'))throw new Error('Web UI paths must stay under '+MEDIA_ROOT);return path}
 async function unlock(){const pin=$('#pin').value.trim().toUpperCase();if(!/^[A-Z0-9]{6}$/.test(pin)){status('Enter all six letters and numbers.','err');return}status('Checking access code...');try{const r=await fetch('/api/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})});if(r.status===401){status('Invalid access code.','err');$('#pin').focus();$('#pin').select();return}if(!r.ok){status('Login service error ('+r.status+').','err');return}unlocked=true;$('#login').hidden=true;$('#app').hidden=false;$('#connection').textContent='Connected to openyoto';status('Admin unlocked.','ok');await loadFiles()}catch(e){status('Unable to contact the player: '+e.message,'err')}}
-async function selectTab(name){activeTab=name;if(name!=='tracks')tracksLoadSeq++;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('[data-panel]').forEach(p=>p.hidden=p.dataset.panel!==name);if(name==='files')await loadFiles();if(name==='cards'){await Promise.all([loadCards(),pollLastCard(false),loadMappingAssets()])}if(name==='tracks')await loadTracks()}
+async function selectTab(name){activeTab=name;if(name!=='tracks')tracksLoadSeq++;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('[data-panel]').forEach(p=>p.hidden=p.dataset.panel!==name);if(name==='files')await loadFiles();if(name==='cards'){await loadMappingAssets();await Promise.all([loadCards(),pollLastCard(false),loadFolderChooser()])}if(name==='tracks')await loadTracks()}
 async function remote(endpoint,path,label){try{path=sdPath(path);status(label+' '+path+'...');await jsonPost(endpoint,{path});status(label+' '+path,'ok')}catch(e){status(label+' failed: '+e.message,'err')}}
 async function remoteAction(endpoint,busyLabel,doneLabel){status(busyLabel);try{await api(endpoint,{method:'POST'});status(doneLabel,'ok')}catch(e){status(doneLabel+' failed: '+e.message,'err')}}
 let convertedImage=null;
 function defaultImagePath(file){const stem=file.name.replace(/\.[^.]*$/,'').replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').trim().slice(0,80)||'image';return '/sdcard/media/'+stem+'.img'}
 function decodeBrowserImage(file){return new Promise((resolve,reject)=>{const url=URL.createObjectURL(file);const image=new Image();image.onload=()=>{URL.revokeObjectURL(url);resolve(image)};image.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('The selected image could not be decoded'))};image.src=url})}
-async function convertBrowserImage(file,showPreview=true){
- const size=16;
- const image=await decodeBrowserImage(file);
- const source=document.createElement('canvas');
- source.width=size;source.height=size;
- const ctx=source.getContext('2d',{willReadFrequently:true});
- ctx.fillStyle='#000';ctx.fillRect(0,0,size,size);
- ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
- ctx.drawImage(image,0,0,size,size);
- const imageData=ctx.getImageData(0,0,size,size);
- const rgba=imageData.data;
- const bytes=new Uint8Array(8+size*size*2);
- bytes.set([0x4f,0x59,0x49,0x4d,1,1,size,size]);
- const view=new DataView(bytes.buffer);
- for(let i=0;i<size*size;i++){
-  const red=rgba[i*4],green=rgba[i*4+1],blue=rgba[i*4+2];
-  const rgb565=((red>>3)<<11)|((green>>2)<<5)|(blue>>3);
-  view.setUint16(8+i*2,rgb565,true);
- }
- if(showPreview){
-  const preview=$('#imagePreview');
-  preview.getContext('2d').putImageData(imageData,0,0);
-  preview.hidden=false;
- }
- return new Blob([bytes],{type:'application/octet-stream'});
+async function convertBrowserImage(file,showPreview=true){ const size=16; const image=await decodeBrowserImage(file); const source=document.createElement('canvas'); source.width=size;source.height=size; const ctx=source.getContext('2d',{willReadFrequently:true}); ctx.fillStyle='#000';ctx.fillRect(0,0,size,size); ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high'; ctx.drawImage(image,0,0,size,size); const imageData=ctx.getImageData(0,0,size,size); const rgba=imageData.data; const bytes=new Uint8Array(8+size*size*2); bytes.set([0x4f,0x59,0x49,0x4d,1,1,size,size]); const view=new DataView(bytes.buffer); for(let i=0;i<size*size;i++){ const red=rgba[i*4],green=rgba[i*4+1],blue=rgba[i*4+2]; const rgb565=((red>>3)<<11)|((green>>2)<<5)|(blue>>3); view.setUint16(8+i*2,rgb565,true); } if(showPreview){ const preview=$('#imagePreview'); preview.getContext('2d').putImageData(imageData,0,0); preview.hidden=false; } return new Blob([bytes],{type:'application/octet-stream'});
 }
-async function prepareBrowserImage(){const file=$('#imageSource').files[0];const button=$('#convertImage');convertedImage=null;button.disabled=true;if(!file){$('#imagePreview').hidden=true;$('#imageConversionHint').textContent="The browser will stretch the image to the player's centered 16×16 RGB565 color frame.";return}status('Converting image...');$('#imageConversionHint').textContent='Converting preview…';try{const blob=await convertBrowserImage(file);convertedImage={file,blob};$('#imagePath').value=defaultImagePath(file);$('#imageConversionHint').textContent='Preview of the exact stretched 16×16 RGB565 frame that will be stored on the SD card.';status('Image preview ready.','ok');button.disabled=false}catch(e){$('#imagePreview').hidden=true;$('#imageConversionHint').textContent=e.message;status('Image conversion failed: '+e.message,'err')}}
+async function prepareBrowserImage(){const file=$('#imageSource').files[0];const button=$('#convertImage');convertedImage=null;button.disabled=true;if(!file){$('#imagePreview').hidden=true;$('#imageConversionHint').textContent="Stretched to the player's centered 16×16 RGB565 frame.";return}status('Converting image...');$('#imageConversionHint').textContent='Converting preview…';try{const blob=await convertBrowserImage(file);convertedImage={file,blob};$('#imagePath').value=defaultImagePath(file);$('#imageConversionHint').textContent='16×16 RGB565 preview to be stored as .img.';status('Image preview ready.','ok');button.disabled=false}catch(e){$('#imagePreview').hidden=true;$('#imageConversionHint').textContent=e.message;status('Image conversion failed: '+e.message,'err')}}
 async function uploadAndDisplayImage(){const file=$('#imageSource').files[0];if(!file){status('Choose a PNG or JPEG first.','err');return}const button=$('#convertImage');button.disabled=true;status('Uploading and displaying image...');try{if(!convertedImage||convertedImage.file!==file)convertedImage={file,blob:await convertBrowserImage(file)};let path=$('#imagePath').value.trim()||defaultImagePath(file);if(!/\.img$/i.test(path))path+='.img';path=sdPath(path);$('#imagePath').value=path;await api('/api/fs/upload?path='+encodeURIComponent(path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:convertedImage.blob});await jsonPost('/api/control/display',{path});status('Uploaded and displayed '+path,'ok')}catch(e){status('Image upload failed: '+e.message,'err')}finally{button.disabled=false}}
 function humanSize(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KiB';return (n/1048576).toFixed(1)+' MiB'}
 function join(base,name){return base==='/'?'/'+name:base+'/'+name}
@@ -112,211 +105,69 @@ function normalizeBrowserPath(path){path=path.trim();if(path===''||path==='/')re
 async function browsePath(){try{const next=normalizeBrowserPath($('#cwd').value);if(next.split('/').some(segment=>segment==='.'||segment==='..'))throw new Error('Path cannot contain . or .. segments');cwd=next;$('#cwd').value=cwd;await loadFiles()}catch(e){$('#cwd').value=cwd;status(e.message,'err')}}
 function isSound(path){return /\.(mp3|m4a|aac)$/i.test(path)}function isImage(path){return /\.img$/i.test(path)}
 function action(text,fn,cls='secondary'){const b=document.createElement('button');b.textContent=text;b.className=cls;b.onclick=fn;return b}
-async function loadFiles(){if(!unlocked)return;$('#cwd').value=cwd;const box=$('#entries');box.innerHTML='<p class="empty">Loading...</p>';try{const r=await api('/api/fs/list?path='+encodeURIComponent(cwd));const items=await r.json();items.sort((a,b)=>a.type===b.type?a.name.localeCompare(b.name):(a.type==='directory'?-1:1));box.innerHTML='';if(!items.length)box.innerHTML='<p class="empty">Directory is empty.</p>';items.forEach(it=>{const row=document.createElement('div');row.className='entry';const info=document.createElement('div');const name=document.createElement('div');name.className='entry-name';name.textContent=(it.type==='directory'?'[DIR] ':'')+it.name;const meta=document.createElement('div');meta.className='entry-meta';meta.textContent=it.type==='directory'?'Directory':humanSize(it.size);info.append(name,meta);const acts=document.createElement('div');acts.className='actions';if(it.type==='directory')acts.append(action('Open',()=>{cwd=it.path;loadFiles()}));else{if(isSound(it.path))acts.append(action('Play',()=>remote('/api/control/play',it.path,'Playing')));if(isImage(it.path))acts.append(action('Display',()=>remote('/api/control/display',it.path,'Displaying')));const dl=document.createElement('a');dl.className='button secondary';dl.textContent='Download';dl.href='/api/fs/file?path='+encodeURIComponent(it.path);acts.append(dl)}acts.append(action('Rename',()=>renamePath(it.path)));acts.append(action('Delete',()=>deletePath(it.path),'danger'));row.append(info,acts);box.append(row)})}catch(e){box.innerHTML='<p class="empty">Could not load directory.</p>';status('Directory failed: '+e.message,'err')}}
+function naturalCompare(a,b){return String(a).localeCompare(String(b),undefined,{numeric:true,sensitivity:'base'})}
+function mediaToAbs(p){p=String(p||'').trim();if(p.startsWith('media/'))return '/sdcard/'+p;if(p.startsWith('/sdcard/'))return p;return p}
+async function loadSavedMedia(){const items=await(await api('/api/list')).json();const set=new Set();mediaOwner.clear();for(const it of items){const refs=[...(Array.isArray(it.tracks)?it.tracks:[]),...(Array.isArray(it.track_images)?it.track_images:[]),it.image].filter(Boolean);for(const p of refs){const abs=mediaToAbs(p);set.add(abs);mediaOwner.set(abs,it.url)}}savedMedia=set;return items}
+async function ensureSavedMedia(){if(savedMedia)return;try{await loadSavedMedia()}catch(e){savedMedia=new Set()}}
+function decodePlayerImage(b){let w,h,rgba;if(b.length===32){w=16;h=16;rgba=new Uint8Array(w*h*4);for(let y=0;y<16;y++){for(let x=0;x<16;x++){const bit=(b[y*2+(x>>3)]>>(7-(x&7)))&1;const o=(y*16+x)*4;rgba[o]=rgba[o+1]=rgba[o+2]=255;rgba[o+3]=bit?255:0}}return{w,h,rgba}}if(b.length===520||b.length===8200){if(b[0]!==0x4f||b[1]!==0x59||b[2]!==0x49||b[3]!==0x4d||b[4]!==1||b[5]!==1)return null;w=b[6];h=b[7];if(w!==h||b.length!==8+w*h*2)return null;rgba=new Uint8Array(w*h*4);const view=new DataView(b.buffer,b.byteOffset,b.byteLength);for(let i=0;i<w*h;i++){const v=view.getUint16(8+i*2,true);const r=(v>>11)&0x1f,g=(v>>5)&0x3f,bl=v&0x1f;const o=i*4;rgba[o]=(r<<3)|(r>>2);rgba[o+1]=(g<<2)|(g>>4);rgba[o+2]=(bl<<3)|(bl>>2);rgba[o+3]=255}return{w,h,rgba}}return null}
+function thumbCanvas(){const c=document.createElement('canvas');c.className='thumb';c.width=16;c.height=16;return c}
+function placeholderThumb(c){const ctx=c.getContext('2d');c.width=16;c.height=16;ctx.fillStyle='#1b2230';ctx.fillRect(0,0,16,16)}
+function drawDecoded(c,img){c.width=img.w;c.height=img.h;const ctx=c.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.putImageData(new ImageData(new Uint8ClampedArray(img.rgba),img.w,img.h),0,0)}
+async function renderThumb(c,absPath){c.dataset.path=absPath||'';if(!absPath){placeholderThumb(c);return}let img=thumbCache.get(absPath);if(img===undefined){try{const buf=await(await api('/api/fs/file?path='+encodeURIComponent(absPath))).arrayBuffer();img=decodePlayerImage(new Uint8Array(buf));if(!img)img=null}catch(e){img=null}thumbCache.set(absPath,img)}if(img)drawDecoded(c,img);else placeholderThumb(c)}
+function chip(text,cls){const s=document.createElement('span');s.className='chip '+cls;s.textContent=text;return s}
+async function dirBadge(path){let items;try{items=await listDirectory(path)}catch(e){return null}const audio=items.filter(i=>i.type==='file'&&isSound(i.path));if(!audio.length)return null;const n=audio.filter(i=>savedMedia&&savedMedia.has(i.path)).length;if(n===audio.length)return{text:'on a card',cls:'saved'};if(n>0)return{text:'partly',cls:'partly'};return null}
+function renderMappingTracks(){const box=$('#mappingTracks');const sounds=mappingAssets.filter(i=>isSound(i.path));const selected=new Set(mappingOrder);box.innerHTML='';if(!sounds.length){box.innerHTML='<p class="empty">No audio tracks found.</p>';return}sounds.forEach(item=>{const row=document.createElement('label');row.className='track-choice';const input=document.createElement('input');input.type='checkbox';input.value=item.path;input.checked=selected.has(item.path);const name=document.createElement('span');name.className='track-name';name.textContent=item.path.slice(MEDIA_ROOT.length+1);row.append(input,name);box.append(row)})}
+function renderMappingCover(){const cover=$('#mappingCover');const images=mappingAssets.filter(i=>isImage(i.path));cover.innerHTML='';cover.append(new Option('Use the first track image',''));images.forEach(item=>cover.append(new Option(item.path.slice(MEDIA_ROOT.length+1),item.path)));cover.disabled=!images.length}
+function coverThumbSource(){const v=$('#mappingCover').value;if(v)return v;const first=mappingOrder[0];return first&&mappingImages.get(first)||''}
+function renderCoverThumb(){const c=$('#mappingCoverThumb');renderThumb(c,coverThumbSource()||null)}
+function artForTrack(track){return mappingImages.get(track)||coverThumbSource()||''}
+function editCard(card){const tracks=(Array.isArray(card.tracks)&&card.tracks.length?card.tracks:[card.sound].filter(Boolean));const images=Array.isArray(card.track_images)?card.track_images:[];mappingOrder=tracks.map(mediaToAbs);mappingImages.clear();tracks.forEach((t,i)=>{if(images[i])mappingImages.set(mediaToAbs(t),mediaToAbs(images[i]))});$('#mappingUrl').value=card.url||'';renderMappingTracks();renderMappingCover();$('#mappingCover').value=card.image?mediaToAbs(card.image):'';renderCoverThumb();renderMappingArtwork();$('#saveMapping').disabled=!mappingOrder.length;status('Loaded "'+card.url+'" into the editor — adjust and press Save.','ok')}
+async function autoPopulateCard(dirPath){let items;try{items=await listDirectory(dirPath)}catch(e){status('Folder list failed: '+e.message,'err');return}const audio=items.filter(i=>i.type==='file'&&isSound(i.path)).sort((a,b)=>naturalCompare(a.name,b.name));const imgs=items.filter(i=>i.type==='file'&&isImage(i.path));const nested=items.filter(i=>i.type==='directory').length;if(!audio.length){status('This folder has no audio files at the first level — nothing to make a card from.','err');return}const capped=audio.slice(0,32);const byBase=new Map(imgs.map(i=>[i.name.replace(/\.img$/i,''),i.path]));const singleImg=imgs.length===1?imgs[0].path:'';const trackImages=capped.map(a=>byBase.get(a.name.replace(/\.[^.]+$/,''))||singleImg||'');const cover=byBase.get('cover')||byBase.get('folder')||trackImages[0]||'';let url='';if(lastCard.captured&&lastCard.url)url=lastCard.url;else if(lastCard.captured){const u=$('#cardUrl').value.trim();if(u)url=u}mappingOrder=capped.map(a=>a.path);mappingImages.clear();capped.forEach((a,i)=>{if(trackImages[i])mappingImages.set(a.path,trackImages[i])});$('#mappingUrl').value=url;renderMappingTracks();renderMappingCover();$('#mappingCover').value=cover;renderCoverThumb();renderMappingArtwork();$('#saveMapping').disabled=!mappingOrder.length;let msg='Loaded '+capped.length+' track'+(capped.length===1?'':'s')+' from '+dirPath.slice(MEDIA_ROOT.length+1)+'.';if(audio.length>32)msg+=' Folder had '+audio.length+' audio files; using the first 32.';if(nested)msg+=' Only the first level is used.';status(msg,'ok')}
+async function loadFolderChooser(){if(!unlocked||activeTab!=='cards')return;const box=$('#folderChooser');box.innerHTML='<p class="empty">Loading folders...</p>';try{const items=await listDirectory(MEDIA_ROOT);const dirs=items.filter(i=>i.type==='directory').sort((a,b)=>naturalCompare(a.name,b.name));box.innerHTML='';if(!dirs.length){box.innerHTML='<p class="empty">No folders under /sdcard/media.</p>';return}dirs.forEach(d=>{const row=document.createElement('div');row.className='entry';const name=document.createElement('div');name.className='entry-name';name.textContent=d.name;const acts=document.createElement('div');acts.className='actions';acts.append(action('Make card',()=>autoPopulateCard(d.path)));row.append(name,acts);box.append(row)})}catch(e){box.innerHTML='<p class="empty">Could not list folders.</p>';status('Folder list failed: '+e.message,'err')}}
+async function scanFolder(files,requireImage,forbidExistingRoot){if(files.length>64)throw new Error('A folder may contain at most 64 files');let root='';let audioCount=0,imageCount=0,total=0;const targets=new Set();const queue=[];for(const file of files){const relative=(file.webkitRelativePath||file.name).replace(/\\/g,'/');const parts=relative.split('/');if(parts.length<2||parts.some(part=>!safeTrackSegment(part)))throw new Error('Folder contains an invalid path: '+relative);if(!root)root=parts[0];if(parts[0]!==root)throw new Error('Choose one folder at a time');const kind=trackKind(parts.at(-1));if(!kind)continue;if(kind==='audio'&&file.size>4*1024*1024)throw new Error(file.name+' exceeds the 4 MiB upload limit');if(kind==='convert'&&file.size>16*1024*1024)throw new Error(file.name+' is too large to convert');if(kind==='image'&&!await validPlayerImage(file))throw new Error(file.name+' is not a supported player image');if(kind==='audio')audioCount++;else imageCount++;let targetParts=parts.slice(1);if(kind==='convert')targetParts[targetParts.length-1]=targetParts.at(-1).replace(/\.[^.]+$/,'.img');const target=targetParts.join('/');const key=target.toLocaleLowerCase();if(targets.has(key))throw new Error('Folder has colliding output names: '+target);targets.add(key);total+=file.size;queue.push({file,kind,target,done:false})}if(!audioCount)throw new Error('Folder must contain at least one supported audio file');if(requireImage&&!imageCount)throw new Error('Folder must contain at least one image');if(total>64*1024*1024)throw new Error('Folder exceeds the 64 MiB selection limit');if(forbidExistingRoot){const existing=await listDirectory('/sdcard/media');if(existing.some(item=>item.name.toLocaleLowerCase()===root.toLocaleLowerCase()))throw new Error('/sdcard/media/'+root+' already exists')}return{queue,root,audioCount,imageCount,total}}
+async function uploadFolderQueue(queue,destDir,ui){if(!queue.length||!destDir)return;ui.button.disabled=true;ui.wrap.hidden=false;const directories=new Set([destDir]);for(const item of queue){const parts=item.target.split('/');for(let i=1;i<parts.length;i++)directories.add(destDir+'/'+parts.slice(0,i).join('/'))}try{for(const path of [...directories].sort((a,b)=>a.length-b.length)){status('Creating '+path+'...');await jsonPost('/api/fs/mkdir',{path})}let complete=queue.filter(item=>item.done).length;ui.progress.max=queue.length;ui.progress.value=complete;for(const item of queue){if(item.done)continue;ui.text.textContent='Uploading '+(complete+1)+' of '+queue.length+': '+item.target;status(ui.text.textContent+'...');const body=item.kind==='convert'?await convertBrowserImage(item.file,false):item.file;const path=destDir+'/'+item.target;await api('/api/fs/upload?path='+encodeURIComponent(path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body});item.done=true;complete++;ui.progress.value=complete}ui.text.textContent='Uploaded '+queue.length+' files to '+destDir;status(ui.text.textContent,'ok');thumbCache.clear();if(ui.onDone)await ui.onDone()}catch(e){ui.text.textContent='Upload stopped: '+e.message;status(ui.text.textContent,'err');ui.button.textContent='Retry remaining files';ui.button.disabled=false}}
+async function prepareFolderUpload(){const files=[...$('#folderUploads').files];const button=$('#uploadFolder');folderQueue=[];folderDest='';button.disabled=true;button.textContent='Upload folder';$('#folderProgressWrap').hidden=true;if(!files.length){$('#folderSelection').textContent='No folder selected.';return}status('Checking folder...');try{const s=await scanFolder(files,false,false);folderQueue=s.queue;folderDest=cwd;$('#folderSelection').textContent='Into '+cwd+' · '+s.queue.length+' files · '+s.audioCount+' audio · '+s.imageCount+' images · '+humanSize(s.total);button.disabled=false;status('Folder ready to upload into '+cwd+'.','ok')}catch(e){$('#folderSelection').textContent=e.message;status('Folder rejected: '+e.message,'err')}}
+async function uploadFolder(){if(!folderQueue.length||!folderDest)return;const ui={button:$('#uploadFolder'),wrap:$('#folderProgressWrap'),progress:$('#folderProgress'),text:$('#folderProgressText'),onDone:()=>{folderQueue=[];folderDest='';$('#folderUploads').value='';ui.button.textContent='Upload folder';ui.button.disabled=true;loadFiles()}};await uploadFolderQueue(folderQueue,folderDest,ui)}
+async function loadFiles(){if(!unlocked)return;await ensureSavedMedia();$('#cwd').value=cwd;const box=$('#entries');box.innerHTML='<p class="empty">Loading...</p>';try{const r=await api('/api/fs/list?path='+encodeURIComponent(cwd));const items=await r.json();items.sort((a,b)=>a.type===b.type?naturalCompare(a.name,b.name):(a.type==='directory'?-1:1));box.innerHTML='';if(!items.length)box.innerHTML='<p class="empty">Directory is empty.</p>';for(const it of items){const row=document.createElement('div');row.className='entry';const head=document.createElement('div');head.className='entry-head';const name=document.createElement('div');name.className='entry-name';name.textContent=(it.type==='directory'?'[DIR] ':'')+it.name;const badge=document.createElement('span');badge.className='chip';badge.hidden=true;head.append(name,badge);if(it.type==='file'&&isImage(it.path)){const t=thumbCanvas();head.prepend(t);renderThumb(t,it.path)}const meta=document.createElement('div');meta.className='entry-meta';meta.textContent=it.type==='directory'?'Directory':humanSize(it.size);const acts=document.createElement('div');acts.className='actions';if(it.type==='directory'){acts.append(action('Open',()=>{cwd=it.path;loadFiles()}));if(cwd===MEDIA_ROOT){const b=await dirBadge(it.path);if(b){badge.textContent=b.text;badge.className='chip '+b.cls;badge.hidden=false}}}else{if(savedMedia&&savedMedia.has(it.path)){badge.textContent='on a card';badge.className='chip saved';badge.hidden=false;badge.title=mediaOwner.get(it.path)||''}if(isSound(it.path))acts.append(action('Play',()=>remote('/api/control/play',it.path,'Playing')));if(isImage(it.path))acts.append(action('Display',()=>remote('/api/control/display',it.path,'Displaying')));const dl=document.createElement('a');dl.className='button secondary';dl.textContent='Download';dl.href='/api/fs/file?path='+encodeURIComponent(it.path);acts.append(dl)}acts.append(action('Rename',()=>renamePath(it.path)));acts.append(action('Delete',()=>deletePath(it.path),'danger'));row.append(head,meta,acts);box.append(row)}}catch(e){box.innerHTML='<p class="empty">Could not load directory.</p>';status('Directory failed: '+e.message,'err')}}
 async function uploadFiles(){const files=[...$('#uploads').files];if(!files.length){status('Select one or more files.','err');return}try{for(let i=0;i<files.length;i++){const file=files[i];const path=join(cwd,file.name);status('Uploading '+(i+1)+' of '+files.length+': '+file.name+'...');await api('/api/fs/upload?path='+encodeURIComponent(path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file})}$('#uploads').value='';status('Uploaded '+files.length+' file(s).','ok');loadFiles()}catch(e){status('Upload failed: '+e.message,'err')}}
 async function makeDir(){const name=prompt('Directory name');if(!name)return;status('Creating directory '+name+'...');try{await jsonPost('/api/fs/mkdir',{path:join(cwd,name)});status('Directory created.','ok');loadFiles()}catch(e){status('Create failed: '+e.message,'err')}}
 async function makeFile(){const name=prompt('Empty file name');if(!name)return;status('Creating file '+name+'...');try{await jsonPost('/api/fs/create',{path:join(cwd,name)});status('File created.','ok');loadFiles()}catch(e){status('Create failed: '+e.message,'err')}}
 async function renamePath(from){const name=prompt('New name',from.split('/').pop());if(!name)return;status('Renaming '+from+'...');try{await jsonPost('/api/fs/rename',{from,to:join(parent(from),name)});status('Renamed.','ok');loadFiles()}catch(e){status('Rename failed: '+e.message,'err')}}
 async function deletePath(path){if(!confirm('Delete '+path+'?'))return;status('Deleting '+path+'...');try{await jsonPost('/api/fs/delete',{path});status('Deleted.','ok');loadFiles()}catch(e){status('Delete failed: '+e.message,'err')}}
-async function loadCards(){if(!unlocked)return;const box=$('#cards');box.innerHTML='<p class="empty">Loading...</p>';try{const r=await api('/api/list');const items=await r.json();box.innerHTML='';if(!items.length)box.innerHTML='<p class="empty">No card mappings.</p>';items.forEach(it=>{const tracks=Array.isArray(it.tracks)&&it.tracks.length?it.tracks:[it.sound].filter(Boolean);const images=Array.isArray(it.track_images)?it.track_images:[];const row=document.createElement('div');row.className='entry';const info=document.createElement('div');const name=document.createElement('div');name.className='entry-name';name.textContent=it.url;const meta=document.createElement('div');meta.className='entry-meta';meta.textContent=tracks.length+' track'+(tracks.length===1?'':'s')+(tracks.length?' · '+tracks.map((track,i)=>track+(images[i]?' + '+images[i]:'')).join(' · '):'');info.append(name,meta);const acts=document.createElement('div');acts.className='actions';if(tracks[0])acts.append(action('Play',()=>remote('/api/control/play',tracks[0],'Playing')));if(it.image)acts.append(action('Display cover',()=>remote('/api/control/display',it.image,'Displaying')));acts.append(action('Delete',()=>deleteCard(it.url),'danger'));row.append(info,acts);box.append(row)});status('Loaded '+items.length+' card mapping(s).','ok')}catch(e){box.innerHTML='<p class="empty">Unable to load mappings.</p>';status('Cards failed: '+e.message,'err')}}
+async function loadCards(){if(!unlocked)return;const box=$('#cards');box.innerHTML='<p class="empty">Loading...</p>';let items;try{items=await loadSavedMedia()}catch(e){box.innerHTML='<p class="empty">Unable to load mappings.</p>';status('Cards failed: '+e.message,'err');return}box.innerHTML='';if(!items.length)box.innerHTML='<p class="empty">No card mappings.</p>';items.forEach(it=>{const tracks=Array.isArray(it.tracks)&&it.tracks.length?it.tracks:[it.sound].filter(Boolean);const row=document.createElement('div');row.className='entry';const head=document.createElement('div');head.className='entry-head';const name=document.createElement('div');name.className='entry-name';name.textContent=it.url;head.append(name);if(it.image){const t=thumbCanvas();head.prepend(t);renderThumb(t,mediaToAbs(it.image))}const meta=document.createElement('div');meta.className='entry-meta';let missing=0;for(const p of [...(it.tracks||[]),...(it.track_images||[]),it.image].filter(Boolean)){if(mediaPaths.size&&!mediaPaths.has(mediaToAbs(p)))missing++}meta.textContent=tracks.length+' track'+(tracks.length===1?'':'s');if(missing)meta.append(chip(missing+' missing','missing'));const acts=document.createElement('div');acts.className='actions';if(tracks[0])acts.append(action('Play',()=>remote('/api/control/play',tracks[0],'Playing')));if(it.image)acts.append(action('Display cover',()=>remote('/api/control/display',it.image,'Displaying')));acts.append(action('Edit',()=>editCard(it)));acts.append(action('Delete',()=>deleteCard(it.url),'danger'));row.append(head,meta,acts);box.append(row)});status('Loaded '+items.length+' card mapping(s).','ok')}
 async function deleteCard(url){if(!confirm('Delete mapping for '+url+'?'))return;status('Deleting card mapping...');try{await jsonPost('/api/delete',{url});status('Mapping deleted.','ok');loadCards()}catch(e){status('Delete failed: '+e.message,'err')}}
-function showLastCard(d){
- lastCard=d;
- const input=$('#cardUrl');
- const label=$('#lastCard');
- if(!d.captured){
-  label.textContent='No card scanned yet.';
- }else if(d.url){
-  label.textContent='Last scanned UID '+d.uid+': '+d.url+(d.exists?' (mapped)':' (unmapped)');
- }else{
-  label.textContent='Last scanned UID '+d.uid+': blank card';
- }
- if(d.url&&!cardUrlDirty&&!input.value.trim())input.value=d.url;
- const mapping=$('#mappingUrl');
- if(d.url&&!mapping.value.trim())mapping.value=d.url;
- $('#writeCard').disabled=!d.captured;
+function showLastCard(d){ lastCard=d; const input=$('#cardUrl'); const label=$('#lastCard'); if(!d.captured){ label.textContent='No card scanned yet.'; }else if(d.url){ label.textContent='Last scanned UID '+d.uid+': '+d.url+(d.exists?' (mapped)':' (unmapped)'); }else{ label.textContent='Last scanned UID '+d.uid+': blank card'; } if(d.url&&!cardUrlDirty&&!input.value.trim())input.value=d.url; const mapping=$('#mappingUrl'); if(d.url&&!mapping.value.trim())mapping.value=d.url; $('#writeCard').disabled=!d.captured;
 }
-async function pollLastCard(force=false){
- if(!unlocked||(activeTab!=='cards'&&!force)||lastCardBusy)return;
- if(!force&&$('#cardUrl').value.trim())return;
- lastCardBusy=true;$('#refreshCard').disabled=true;
- if(force)status('Checking for the last scanned card...');
- try{
-  const r=await api('/api/last-card');const d=await r.json();
-  if(force||d.seq!==lastCard.seq||d.captured!==lastCard.captured)showLastCard(d);
-  if(force)status(d.captured?'Captured card refreshed.':'No card has been scanned.','ok');
- }catch(e){if(force)status('Card refresh failed: '+e.message,'err')}
- finally{lastCardBusy=false;$('#refreshCard').disabled=false}
+async function pollLastCard(force=false){ if(!unlocked||(activeTab!=='cards'&&!force)||lastCardBusy)return; if(!force&&$('#cardUrl').value.trim())return; lastCardBusy=true;$('#refreshCard').disabled=true; if(force)status('Checking for the last scanned card...'); try{ const r=await api('/api/last-card');const d=await r.json(); if(force||d.seq!==lastCard.seq||d.captured!==lastCard.captured)showLastCard(d); if(force)status(d.captured?'Captured card refreshed.':'No card has been scanned.','ok'); }catch(e){if(force)status('Card refresh failed: '+e.message,'err')} finally{lastCardBusy=false;$('#refreshCard').disabled=false}
 }
-async function writeCard(){
- const button=$('#writeCard');const url=$('#cardUrl').value.trim();
- if(!lastCard.captured||!lastCard.uid){status('Scan the card to write first.','err');return}
- if(!url||url.length>200){status('Enter a URL of 200 characters or fewer.','err');return}
- button.disabled=true;button.textContent='Writing…';$('#cardReader').setAttribute('aria-busy','true');status('Writing URL to captured card...');
- try{
-  const r=await jsonPost('/api/card/write',{url,uid:lastCard.uid,seq:lastCard.seq});
-  const result=await r.json();lastCard={...lastCard,url,seq:result.seq};cardUrlDirty=false;showLastCard(lastCard);status('Card written and verified.','ok');
- }catch(e){status('Card write failed: '+e.message,'err')}
- finally{button.textContent='Write URL to card';button.disabled=!lastCard.captured;$('#cardReader').removeAttribute('aria-busy')}
+async function writeCard(){ const button=$('#writeCard');const url=$('#cardUrl').value.trim(); if(!lastCard.captured||!lastCard.uid){status('Scan the card to write first.','err');return} if(!url||url.length>200){status('Enter a URL of 200 characters or fewer.','err');return} button.disabled=true;button.textContent='Writing…';$('#cardReader').setAttribute('aria-busy','true');status('Writing URL to captured card...'); try{ const r=await jsonPost('/api/card/write',{url,uid:lastCard.uid,seq:lastCard.seq}); const result=await r.json();lastCard={...lastCard,url,seq:result.seq};cardUrlDirty=false;showLastCard(lastCard);status('Card written and verified.','ok'); }catch(e){status('Card write failed: '+e.message,'err')} finally{button.textContent='Write';button.disabled=!lastCard.captured;$('#cardReader').removeAttribute('aria-busy')}
 }
-function trackKind(name){
- if(/\.(mp3|m4a|aac)$/i.test(name))return'audio';
- if(/\.img$/i.test(name))return'image';
- if(/\.(png|jpe?g)$/i.test(name))return'convert';
- return'';
+function trackKind(name){ if(/\.(mp3|m4a|aac)$/i.test(name))return'audio'; if(/\.img$/i.test(name))return'image'; if(/\.(png|jpe?g)$/i.test(name))return'convert'; return'';
 }
 function safeTrackSegment(segment){return segment&&segment!=='.'&&segment!=='..'&&!/[\\/:*?"<>|\x00-\x1f]/.test(segment)&&!/[. ]$/.test(segment)}
-async function validPlayerImage(file){
- if(file.size===32)return true;
- if(file.size!==520&&file.size!==8200)return false;
- const h=new Uint8Array(await file.slice(0,8).arrayBuffer());
- const width=file.size===520?16:64;
- return h[0]===0x4f&&h[1]===0x59&&h[2]===0x49&&h[3]===0x4d&&h[4]===1&&h[5]===1&&h[6]===width&&h[7]===width;
+async function validPlayerImage(file){ if(file.size===32)return true; if(file.size!==520&&file.size!==8200)return false; const h=new Uint8Array(await file.slice(0,8).arrayBuffer()); const width=file.size===520?16:64; return h[0]===0x4f&&h[1]===0x59&&h[2]===0x49&&h[3]===0x4d&&h[4]===1&&h[5]===1&&h[6]===width&&h[7]===width;
 }
 async function listDirectory(path){const r=await api('/api/fs/list?path='+encodeURIComponent(path));return r.json()}
-async function prepareTrackFolder(){
- const files=[...$('#trackFolder').files];const button=$('#uploadTrackFolder');trackQueue=[];trackRoot='';button.disabled=true;button.textContent='Upload folder';$('#trackProgressWrap').hidden=true;
- if(!files.length){$('#trackSelection').textContent='No folder selected.';return}
- status('Checking track folder...');
- try{
-  if(files.length>64)throw new Error('A track folder may contain at most 64 files');
-  let root='';let audioCount=0,imageCount=0,total=0;const targets=new Set();const queue=[];
-  for(const file of files){
-   const relative=(file.webkitRelativePath||file.name).replace(/\\/g,'/');
-   const parts=relative.split('/');
-   if(parts.length<2||parts.some(part=>!safeTrackSegment(part)))throw new Error('Folder contains an invalid path: '+relative);
-   if(!root)root=parts[0];if(parts[0]!==root)throw new Error('Choose one folder at a time');
-   const kind=trackKind(parts.at(-1));if(!kind)continue;
-   if(kind==='audio'&&file.size>4*1024*1024)throw new Error(file.name+' exceeds the 4 MiB upload limit');
-   if(kind==='convert'&&file.size>16*1024*1024)throw new Error(file.name+' is too large to convert');
-   if(kind==='image'&&!await validPlayerImage(file))throw new Error(file.name+' is not a supported player image');
-   if(kind==='audio')audioCount++;else imageCount++;
-   let targetParts=parts.slice(1);
-   if(kind==='convert')targetParts[targetParts.length-1]=targetParts.at(-1).replace(/\.[^.]+$/,'.img');
-   const target=targetParts.join('/');const key=target.toLocaleLowerCase();
-   if(targets.has(key))throw new Error('Folder has colliding output names: '+target);
-   targets.add(key);total+=file.size;queue.push({file,kind,target,done:false});
-  }
-  if(!audioCount||!imageCount)throw new Error('Folder must contain at least one supported audio file and one image');
-  if(total>64*1024*1024)throw new Error('Folder exceeds the 64 MiB selection limit');
-  const existing=await listDirectory('/sdcard/media');
-  if(existing.some(item=>item.name.toLocaleLowerCase()===root.toLocaleLowerCase()))throw new Error('/sdcard/media/'+root+' already exists');
-  trackQueue=queue;trackRoot='/sdcard/media/'+root;
-  $('#trackSelection').textContent=root+' · '+queue.length+' files · '+audioCount+' audio · '+imageCount+' images · '+humanSize(total);
-  button.disabled=false;status('Track folder ready to upload.','ok');
- }catch(e){$('#trackSelection').textContent=e.message;status('Track folder rejected: '+e.message,'err')}
+async function prepareTrackFolder(){const files=[...$('#trackFolder').files];const button=$('#uploadTrackFolder');trackQueue=[];trackRoot='';button.disabled=true;button.textContent='Upload';$('#trackProgressWrap').hidden=true;if(!files.length){$('#trackSelection').textContent='No folder selected.';return}status('Checking track folder...');try{const s=await scanFolder(files,true,true);trackQueue=s.queue;trackRoot='/sdcard/media/'+s.root;$('#trackSelection').textContent=s.root+' · '+s.queue.length+' files · '+s.audioCount+' audio · '+s.imageCount+' images · '+humanSize(s.total);button.disabled=false;status('Track folder ready to upload.','ok')}catch(e){$('#trackSelection').textContent=e.message;status('Track folder rejected: '+e.message,'err')}}
+async function uploadTrackFolder(){if(!trackQueue.length||!trackRoot)return;const ui={button:$('#uploadTrackFolder'),wrap:$('#trackProgressWrap'),progress:$('#trackProgress'),text:$('#trackProgressText'),onDone:()=>{trackQueue=[];trackRoot='';$('#trackFolder').value='';ui.button.textContent='Upload';ui.button.disabled=true;if(activeTab==='tracks')loadTracks()}};await uploadFolderQueue(trackQueue,trackRoot,ui)}
+async function collectTracks(path,out,token,depth=0){ if(token!==tracksLoadSeq||activeTab!=='tracks'||depth>8||out.length>=512)return; const items=await listDirectory(path); for(const item of items){ if(token!==tracksLoadSeq||activeTab!=='tracks'||out.length>=512)return; if(item.type==='directory')await collectTracks(item.path,out,token,depth+1); else if(isSound(item.path)||isImage(item.path))out.push(item); }
 }
-async function uploadTrackFolder(){
- if(!trackQueue.length||!trackRoot)return;
- const button=$('#uploadTrackFolder');const progress=$('#trackProgress');const progressText=$('#trackProgressText');button.disabled=true;$('#trackProgressWrap').hidden=false;
- const directories=new Set([trackRoot]);
- for(const item of trackQueue){const parts=item.target.split('/');for(let i=1;i<parts.length;i++)directories.add(trackRoot+'/'+parts.slice(0,i).join('/'))}
- try{
-  for(const path of [...directories].sort((a,b)=>a.length-b.length)){status('Creating '+path+'...');await jsonPost('/api/fs/mkdir',{path})}
-  let complete=trackQueue.filter(item=>item.done).length;progress.max=trackQueue.length;progress.value=complete;
-  for(const item of trackQueue){
-   if(item.done)continue;
-   progressText.textContent='Uploading '+(complete+1)+' of '+trackQueue.length+': '+item.target;
-   status(progressText.textContent+'...');
-   const body=item.kind==='convert'?await convertBrowserImage(item.file,false):item.file;
-   const path=trackRoot+'/'+item.target;
-   await api('/api/fs/upload?path='+encodeURIComponent(path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body});
-   item.done=true;complete++;progress.value=complete;
-  }
-  const uploadedRoot=trackRoot;progressText.textContent='Uploaded '+trackQueue.length+' files to '+uploadedRoot;status(progressText.textContent,'ok');trackQueue=[];trackRoot='';$('#trackFolder').value='';button.textContent='Upload folder';button.disabled=true;if(activeTab==='tracks')await loadTracks();
- }catch(e){progressText.textContent='Upload stopped: '+e.message;status(progressText.textContent,'err');button.textContent='Retry remaining files';button.disabled=false}
+async function loadTracks(){if(!unlocked||activeTab!=='tracks')return;await ensureSavedMedia();const token=++tracksLoadSeq;const box=$('#tracks');box.innerHTML='<p class="empty">Loading tracks...</p>';try{const items=[];await collectTracks('/sdcard/media',items,token);if(token!==tracksLoadSeq||activeTab!=='tracks')return;items.sort((a,b)=>naturalCompare(a.path,b.path));box.innerHTML='';if(!items.length){box.innerHTML='<p class="empty">No playable tracks or player images under /sdcard/media.</p>';return}for(const item of items){const row=document.createElement('div');row.className='entry';const head=document.createElement('div');head.className='entry-head';const name=document.createElement('div');name.className='entry-name';name.textContent=item.path.slice('/sdcard/media/'.length);const badge=document.createElement('span');badge.className='chip';badge.hidden=true;head.append(name,badge);if(isImage(item.path)){const t=thumbCanvas();head.prepend(t);renderThumb(t,item.path)}if(savedMedia&&savedMedia.has(item.path)){badge.textContent='on a card';badge.className='chip saved';badge.hidden=false;badge.title=mediaOwner.get(item.path)||''}const meta=document.createElement('div');meta.className='entry-meta';meta.textContent=isSound(item.path)?'Audio · '+humanSize(item.size):'Player image · '+humanSize(item.size);const acts=document.createElement('div');acts.className='actions';acts.append(isSound(item.path)?action('Play',()=>remote('/api/control/play',item.path,'Playing')):action('Display',()=>remote('/api/control/display',item.path,'Displaying')));row.append(head,meta,acts);box.append(row)}status('Loaded '+items.length+' track assets.','ok')}catch(e){if(token===tracksLoadSeq){box.innerHTML='<p class="empty">Unable to load tracks.</p>';status('Tracks failed: '+e.message,'err')}}}
+async function collectMappingAssets(path,out,depth=0){ if(depth>8||out.length>=512)return; const items=await listDirectory(path); for(const item of items){ if(out.length>=512)return; if(item.type==='directory')await collectMappingAssets(item.path,out,depth+1); else if(isSound(item.path)||isImage(item.path))out.push(item); }
 }
-async function collectTracks(path,out,token,depth=0){
- if(token!==tracksLoadSeq||activeTab!=='tracks'||depth>8||out.length>=512)return;
- const items=await listDirectory(path);
- for(const item of items){
-  if(token!==tracksLoadSeq||activeTab!=='tracks'||out.length>=512)return;
-  if(item.type==='directory')await collectTracks(item.path,out,token,depth+1);
-  else if(isSound(item.path)||isImage(item.path))out.push(item);
- }
+function mappingRef(path){ if(!path.startsWith('/sdcard/media/'))throw new Error('Selected media must stay under /sdcard/media'); const ref=path.slice('/sdcard/'.length); if(ref.length>=128)throw new Error('Selected media path is too long: '+path); return ref;
 }
-async function loadTracks(){
- if(!unlocked||activeTab!=='tracks')return;
- const token=++tracksLoadSeq;const box=$('#tracks');box.innerHTML='<p class="empty">Loading tracks...</p>';
- try{
-  const items=[];await collectTracks('/sdcard/media',items,token);
-  if(token!==tracksLoadSeq||activeTab!=='tracks')return;
-  items.sort((a,b)=>a.path.localeCompare(b.path));box.innerHTML='';
-  if(!items.length){box.innerHTML='<p class="empty">No playable tracks or player images under /sdcard/media.</p>';return}
-  for(const item of items){
-   const row=document.createElement('div');row.className='entry';const info=document.createElement('div');const name=document.createElement('div');name.className='entry-name';name.textContent=item.path.slice('/sdcard/media/'.length);const meta=document.createElement('div');meta.className='entry-meta';meta.textContent=isSound(item.path)?'Audio · '+humanSize(item.size):'Player image · '+humanSize(item.size);info.append(name,meta);const acts=document.createElement('div');acts.className='actions';acts.append(isSound(item.path)?action('Play',()=>remote('/api/control/play',item.path,'Playing')):action('Display',()=>remote('/api/control/display',item.path,'Displaying')));row.append(info,acts);box.append(row);
-  }
-  status('Loaded '+items.length+' track assets.','ok');
- }catch(e){if(token===tracksLoadSeq){box.innerHTML='<p class="empty">Unable to load tracks.</p>';status('Tracks failed: '+e.message,'err')}}
+function mappingSelected(){return [...$('#mappingTracks').querySelectorAll('input[type=checkbox]:checked')].map(i=>i.value)}
+function updateMappingOrder(){ const chosen=mappingSelected();const selected=new Set(chosen); mappingOrder=mappingOrder.filter(path=>selected.has(path)); mappingOrder.push(...chosen.filter(path=>!mappingOrder.includes(path))); $('#saveMapping').disabled=!mappingOrder.length; renderMappingArtwork();
 }
-async function collectMappingAssets(path,out,depth=0){
- if(depth>8||out.length>=512)return;
- const items=await listDirectory(path);
- for(const item of items){
-  if(out.length>=512)return;
-  if(item.type==='directory')await collectMappingAssets(item.path,out,depth+1);
-  else if(isSound(item.path)||isImage(item.path))out.push(item);
- }
+function renderMappingArtwork(){const box=$('#mappingArtwork');box.innerHTML='';const images=mappingAssets.filter(item=>isImage(item.path));if(!mappingOrder.length){box.innerHTML='<p class="hint">Select tracks to assign their artwork.</p>';renderCoverThumb();return}mappingOrder.forEach((track,index)=>{const row=document.createElement('div');row.className='row wrap-actions';const thumb=thumbCanvas();renderThumb(thumb,artForTrack(track));const select=document.createElement('select');select.setAttribute('aria-label','Artwork for '+track);select.append(new Option('Use card cover',''));images.forEach(item=>select.append(new Option(item.path.slice(MEDIA_ROOT.length+1),item.path)));select.value=mappingImages.get(track)||'';select.onchange=()=>{mappingImages.set(track,select.value);renderThumb(thumb,artForTrack(track))};const label=document.createElement('label');label.textContent=(index+1)+'. '+track.slice(MEDIA_ROOT.length+1);label.style.flex='1';label.append(select);const up=action('Up',()=>moveMappingTrack(index,-1));up.disabled=index===0;const down=action('Down',()=>moveMappingTrack(index,1));down.disabled=index===mappingOrder.length-1;row.append(thumb,label,up,down);box.append(row)});renderCoverThumb()}
+function moveMappingTrack(index,offset){ const target=index+offset;if(target<0||target>=mappingOrder.length)return; [mappingOrder[index],mappingOrder[target]]=[mappingOrder[target],mappingOrder[index]];renderMappingArtwork();
 }
-function mappingRef(path){
- if(!path.startsWith('/sdcard/media/'))throw new Error('Selected media must stay under /sdcard/media');
- const ref=path.slice('/sdcard/'.length);
- if(ref.length>=128)throw new Error('Selected media path is too long: '+path);
- return ref;
-}
-function mappingSelected(){return [...$('#mappingTracks').selectedOptions].map(o=>o.value)}
-function updateMappingOrder(){
- const chosen=mappingSelected();const selected=new Set(chosen);
- mappingOrder=mappingOrder.filter(path=>selected.has(path));
- mappingOrder.push(...chosen.filter(path=>!mappingOrder.includes(path)));
- $('#saveMapping').disabled=!mappingOrder.length;
- renderMappingArtwork();
-}
-function renderMappingArtwork(){
- const box=$('#mappingArtwork');box.innerHTML='';
- const images=mappingAssets.filter(item=>isImage(item.path));
- if(!mappingOrder.length){box.innerHTML='<p class="hint">Select tracks to assign their artwork.</p>';return}
- mappingOrder.forEach((track,index)=>{
-  const row=document.createElement('div');row.className='row wrap-actions';
-  const select=document.createElement('select');select.setAttribute('aria-label','Artwork for '+track);select.append(new Option('Use card cover', ''));
-  images.forEach(item=>select.append(new Option(item.path.slice(MEDIA_ROOT.length+1),item.path)));
-  select.value=mappingImages.get(track)||'';select.onchange=()=>mappingImages.set(track,select.value);
-  const label=document.createElement('label');label.textContent=(index+1)+'. '+track.slice(MEDIA_ROOT.length+1);label.style.flex='1';label.append(select);
-  const up=action('Up',()=>moveMappingTrack(index,-1));up.disabled=index===0;
-  const down=action('Down',()=>moveMappingTrack(index,1));down.disabled=index===mappingOrder.length-1;
-  row.append(label,up,down);box.append(row);
- });
-}
-function moveMappingTrack(index,offset){
- const target=index+offset;if(target<0||target>=mappingOrder.length)return;
- [mappingOrder[index],mappingOrder[target]]=[mappingOrder[target],mappingOrder[index]];renderMappingArtwork();
-}
-async function loadMappingAssets(){
- if(!unlocked||activeTab!=='cards')return;
- const tracks=$('#mappingTracks'),cover=$('#mappingCover');tracks.disabled=true;cover.disabled=true;$('#saveMapping').disabled=true;
- try{
-  const assets=[];await collectMappingAssets(MEDIA_ROOT,assets);assets.sort((a,b)=>a.path.localeCompare(b.path));mappingAssets=assets;
-  const sounds=assets.filter(item=>isSound(item.path));const images=assets.filter(item=>isImage(item.path));const selected=new Set(mappingOrder);
-  tracks.innerHTML='';sounds.forEach(item=>{const option=new Option(item.path.slice(MEDIA_ROOT.length+1),item.path);option.selected=selected.has(item.path);tracks.append(option)});
-  mappingOrder=mappingOrder.filter(path=>sounds.some(item=>item.path===path));
-  cover.innerHTML='';cover.append(new Option('Use the first track image',''));images.forEach(item=>cover.append(new Option(item.path.slice(MEDIA_ROOT.length+1),item.path)));
-  tracks.disabled=!sounds.length;cover.disabled=!images.length;$('#saveMapping').disabled=!mappingOrder.length;renderMappingArtwork();
- }catch(e){mappingAssets=[];tracks.innerHTML='';cover.innerHTML='';renderMappingArtwork();status('Media selection failed: '+e.message,'err')}
-}
-async function saveMapping(){
- const url=$('#mappingUrl').value.trim();const tracks=[...mappingOrder];
- if(!url||url.length>200){status('Enter a card URI of 200 characters or fewer.','err');return}
- if(!tracks.length){status('Select at least one track.','err');return}
- if(tracks.length>32){status('A card mapping can contain at most 32 tracks.','err');return}
- const button=$('#saveMapping');button.disabled=true;button.textContent='Saving…';
- try{
-  const payload={url,tracks:tracks.map(mappingRef),track_images:tracks.map(track=>{const image=mappingImages.get(track)||'';return image?mappingRef(image):''}),image:$('#mappingCover').value?mappingRef($('#mappingCover').value):''};
-  await jsonPost('/api/add',payload);$('#cardUrl').value=url;cardUrlDirty=true;status('Mapping saved. Write this URI to the captured card to use it.','ok');await loadCards();
- }catch(e){status('Mapping save failed: '+e.message,'err')}
- finally{button.textContent='Save URI mapping';button.disabled=!mappingOrder.length}
+async function loadMappingAssets(){if(!unlocked||activeTab!=='cards')return;const cover=$('#mappingCover');cover.disabled=true;$('#saveMapping').disabled=true;try{const assets=[];await collectMappingAssets(MEDIA_ROOT,assets);assets.sort((a,b)=>naturalCompare(a.path,b.path));mappingAssets=assets;mediaPaths=new Set(assets.map(i=>i.path));mappingOrder=mappingOrder.filter(path=>assets.some(item=>item.path===path&&isSound(item.path)));renderMappingTracks();renderMappingCover();renderCoverThumb();renderMappingArtwork();$('#saveMapping').disabled=!mappingOrder.length}catch(e){mappingAssets=[];mediaPaths=new Set();$('#mappingTracks').innerHTML='';$('#mappingCover').innerHTML='';renderMappingArtwork();status('Media selection failed: '+e.message,'err')}}
+async function saveMapping(){ const url=$('#mappingUrl').value.trim();const tracks=[...mappingOrder]; if(!url||url.length>200){status('Enter a card URI of 200 characters or fewer.','err');return} if(!tracks.length){status('Select at least one track.','err');return} if(tracks.length>32){status('A card mapping can contain at most 32 tracks.','err');return} const button=$('#saveMapping');button.disabled=true;button.textContent='Saving…'; try{ const payload={url,tracks:tracks.map(mappingRef),track_images:tracks.map(track=>{const image=mappingImages.get(track)||'';return image?mappingRef(image):''}),image:$('#mappingCover').value?mappingRef($('#mappingCover').value):''}; await jsonPost('/api/add',payload);$('#cardUrl').value=url;cardUrlDirty=true;status('Mapping saved. Write this URI to the captured card to use it.','ok');await loadCards(); }catch(e){status('Mapping save failed: '+e.message,'err')} finally{button.textContent='Save mapping';button.disabled=!mappingOrder.length}
 }
 $('#unlock').onclick=unlock;$('#pin').onkeydown=e=>{if(e.key==='Enter')unlock()};$('#pin').oninput=e=>e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'');document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>selectTab(b.dataset.tab));
-$('#playSound').onclick=()=>remote('/api/control/play',$('#soundPath').value,'Playing');$('#stopSound').onclick=()=>remoteAction('/api/control/stop','Stopping playback...','Playback stopped.');$('#showImage').onclick=()=>remote('/api/control/display',$('#imagePath').value,'Displaying');$('#clearDisplay').onclick=()=>remoteAction('/api/control/clear','Clearing screen...','Screen cleared.');$('#imageSource').onchange=prepareBrowserImage;$('#convertImage').onclick=uploadAndDisplayImage;$('#cwd').onkeydown=e=>{if(e.key==='Enter')browsePath()};$('#goFiles').onclick=browsePath;$('#up').onclick=()=>{cwd=parent(cwd);loadFiles()};$('#refreshFiles').onclick=loadFiles;$('#upload').onclick=uploadFiles;$('#newFolder').onclick=makeDir;$('#newFile').onclick=makeFile;$('#refreshCard').onclick=()=>Promise.all([loadCards(),pollLastCard(true)]);$('#cardUrl').oninput=()=>{cardUrlDirty=true};$('#writeCard').onclick=writeCard;$('#mappingTracks').onchange=updateMappingOrder;$('#refreshMappingAssets').onclick=loadMappingAssets;$('#saveMapping').onclick=saveMapping;$('#trackFolder').onchange=prepareTrackFolder;$('#uploadTrackFolder').onclick=uploadTrackFolder;$('#refreshTracks').onclick=loadTracks;setInterval(()=>{if(activeTab==='cards'&&!$('#cardUrl').value.trim())pollLastCard(false)},2500);
+$('#playSound').onclick=()=>remote('/api/control/play',$('#soundPath').value,'Playing');$('#stopSound').onclick=()=>remoteAction('/api/control/stop','Stopping playback...','Playback stopped.');$('#showImage').onclick=()=>remote('/api/control/display',$('#imagePath').value,'Displaying');$('#clearDisplay').onclick=()=>remoteAction('/api/control/clear','Clearing screen...','Screen cleared.');$('#imageSource').onchange=prepareBrowserImage;$('#convertImage').onclick=uploadAndDisplayImage;$('#cwd').onkeydown=e=>{if(e.key==='Enter')browsePath()};$('#goFiles').onclick=browsePath;$('#up').onclick=()=>{cwd=parent(cwd);loadFiles()};$('#refreshFiles').onclick=loadFiles;$('#upload').onclick=uploadFiles;$('#newFolder').onclick=makeDir;$('#newFile').onclick=makeFile;$('#refreshCard').onclick=()=>Promise.all([loadCards(),pollLastCard(true)]);$('#cardUrl').oninput=()=>{cardUrlDirty=true};$('#writeCard').onclick=writeCard;$('#mappingTracks').addEventListener('change',updateMappingOrder);$('#refreshMappingAssets').onclick=loadMappingAssets;$('#saveMapping').onclick=saveMapping;$('#mappingCover').onchange=()=>{renderCoverThumb();renderMappingArtwork()};$('#refreshFolders').onclick=loadFolderChooser;$('#trackFolder').onchange=prepareTrackFolder;$('#uploadTrackFolder').onclick=uploadTrackFolder;$('#refreshTracks').onclick=loadTracks;$('#folderUploads').onchange=prepareFolderUpload;$('#uploadFolder').onclick=uploadFolder;setInterval(()=>{if(activeTab==='cards'&&!$('#cardUrl').value.trim())pollLastCard(false)},2500);
 </script>
 </body>
 </html>
