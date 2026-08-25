@@ -315,8 +315,8 @@ static esp_err_t content_load(const char *path)
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "catalog JSON parsed");
-
     cards = cJSON_GetObjectItemCaseSensitive(root, "cards");
+
     if (cards == NULL || !cJSON_IsArray(cards))
     {
         cJSON_Delete(root);
@@ -330,6 +330,8 @@ static esp_err_t content_load(const char *path)
 
     s_root = root;
     s_cards = cards;
+    ESP_LOGI(TAG, "catalog load complete: %d cards",
+             cJSON_GetArraySize(cards));
     return ESP_OK;
 }
 
@@ -964,7 +966,10 @@ static esp_err_t content_list_json_locked(char **out)
     {
         return err;
     }
+    ESP_LOGI(TAG, "serializing catalog response");
     *out = cJSON_PrintUnformatted(s_cards);
+    ESP_LOGI(TAG, "catalog response serialized: %u bytes",
+             *out == NULL ? 0U : (unsigned)strlen(*out));
     return *out == NULL ? ESP_ERR_NO_MEM : ESP_OK;
 }
 
