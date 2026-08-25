@@ -1986,7 +1986,10 @@ static esp_err_t admin_delete_handler(httpd_req_t *req)
     err = content_delete(url);
     if (err != ESP_OK)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "delete failed");
+        char message[96];
+        snprintf(message, sizeof(message), "delete failed: %s",
+                 esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, message);
         return ESP_FAIL;
     }
 

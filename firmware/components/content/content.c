@@ -641,6 +641,7 @@ esp_err_t content_add(const char *url, const char *sound_name,
 esp_err_t content_delete(const char *url)
 {
     cJSON *card;
+    cJSON *detached;
     int idx;
     int i;
 
@@ -673,9 +674,20 @@ esp_err_t content_delete(const char *url)
         return ESP_ERR_NOT_FOUND;
     }
 
-    cJSON_DeleteItemFromArray(s_cards, idx);
-
-    return content_save();
+    detached = cJSON_DetachItemFromArray(s_cards, idx);
+    if (detached == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+    index_err = content_save();
+    if (index_err != ESP_OK)
+    {
+        /* Restore the exact position when mapping.json could not be replaced. */
+        cJSON_InsertItemInArray(s_cards, idx, detached);
+        return index_err;
+    }
+    cJSON_Delete(detached);
+    return ESP_OK;
 }
 
 esp_err_t content_delete_all(void)
