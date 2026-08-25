@@ -892,6 +892,52 @@ int main(void)
               "battery icon: charging must map to BATTERY_ICON_CHARGING");
     }
 
+    /* ------------------------------------------- 9. POWER OFF / ON -------- */
+    {
+        int mark;
+
+        reset_state();
+        set_charging(false);
+        advance_ms(200);
+
+        /* Off blanks the panel and parks the base at OFF. */
+        power_toggle();
+        CHECK(s_powered_off, "power: the first tap must switch off");
+        CHECK(s_display_base == DISPLAY_BASE_OFF,
+              "power: off should park the base at OFF, got %d",
+              (int)s_display_base);
+        CHECK(s_clear_count > 0 && s_flush_count > 0,
+              "power: off must blank the panel");
+
+        /* On must restore the idle face as the base, not leave it at OFF: the
+         * battery glimpse preserves whatever base it covers, so an OFF base
+         * would expire back to a blank panel and keep the wink suppressed. */
+        mark = s_frame_count;
+        power_toggle();
+        CHECK(!s_powered_off, "power: the second tap must switch on");
+        CHECK(s_display_base == DISPLAY_BASE_IDLE,
+              "power: on must restore the IDLE base, got %d",
+              (int)s_display_base);
+        CHECK(s_frame_count > mark,
+              "power: on must paint something (battery glimpse)");
+
+        advance_ms(BATTERY_GLIMPSE_MS + 300);
+        CHECK(last_frame() == IDLE_FACE_RGBA,
+              "power: after the power-on glimpse expires the face must be on "
+              "the panel, not a blank screen");
+        CHECK(s_display_base == DISPLAY_BASE_IDLE,
+              "power: base should still be IDLE after the glimpse");
+
+        /* And the wink must work again after a power cycle. */
+        s_track_count = 0;
+        skip_track(1);
+        CHECK(last_frame() == WINK_FACE_FRAMES[0],
+              "power: a right-knob twist after power-on must wink");
+        advance_ms(IDLE_WINK_MS + 100);
+        CHECK(last_frame() == IDLE_FACE_RGBA,
+              "power: the wink must expire back to the face after power-on");
+    }
+
     if (s_failures != 0)
     {
         fprintf(stderr, "display state test: %d assertion(s) failed\n",

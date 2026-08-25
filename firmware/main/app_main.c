@@ -372,12 +372,22 @@ static void display_apply_volume_overlay_locked(void)
     display_draw_volume_overlay(s_volume);
 }
 
-static void display_set_idle_locked(void)
+/*
+ * Make the idle face the base screen without painting it. Callers that paint a
+ * transient straight afterwards use this; everything else uses
+ * display_set_idle_locked(), which also puts the face on the panel.
+ */
+static void display_set_idle_base_locked(void)
 {
     s_display_base = DISPLAY_BASE_IDLE;
     s_display_image_path[0] = '\0';
     s_battery_visual_deadline = 0;
     s_idle_wink_deadline = 0;
+}
+
+static void display_set_idle_locked(void)
+{
+    display_set_idle_base_locked();
     display_show_rgba(IDLE_FACE_RGBA);
     display_apply_volume_overlay_locked();
 }
@@ -559,9 +569,7 @@ static void display_show_wink_locked(void)
     }
     /* Demote the battery screen instead of drawing over it, so the wink hold
      * expires back to the face rather than snapping to the battery icon. */
-    s_display_base = DISPLAY_BASE_IDLE;
-    s_display_image_path[0] = '\0';
-    s_battery_visual_deadline = 0;
+    display_set_idle_base_locked();
     display_show_rgba(WINK_FACE_FRAMES[s_wink_frame_index]);
     display_apply_volume_overlay_locked();
     ESP_LOGI(TAG, "wink frame %u", (unsigned)s_wink_frame_index);
@@ -657,9 +665,15 @@ static void power_toggle(void)
     }
     else
     {
-        /* Powering on resamples the charger, so a cable plugged in while the
-         * player was off shows its glimpse here instead of firing a stale edge
-         * half a second later. */
+        /* The battery glimpse deliberately leaves the base screen alone, so
+         * powering on must restore the idle face as the base itself: otherwise
+         * the glimpse expires back onto DISPLAY_BASE_OFF (blank panel) and the
+         * wink stays suppressed because its guard rejects that base.
+         *
+         * Powering on also resamples the charger, so a cable plugged in while
+         * the player was off shows its glimpse here instead of firing a stale
+         * edge half a second later. */
+        display_set_idle_base_locked();
         s_charging_latched = battery_is_charging();
         display_show_battery_glimpse_locked();
         ESP_LOGI(TAG, "powered on");
