@@ -4,9 +4,8 @@
  * Owns the FatFS SDMMC (1-bit) mount at /sdcard and mapping.json, which ties
  * an NFC URI to media stored under /sdcard/media/. Playlist entries use:
  *
- *     {"cards":[{"url":"...","tracks":["media/a.mp3"],
+ *     {"cards":[{"url":"...","name":"...","tracks":["media/a.mp3"],
  *       "track_images":["media/a.img"],"image":"media/cover.img"}]}
- *
  * `track_images` is parallel to `tracks`; an empty item uses the optional
  * card-cover image. Legacy {"url","sound","image"} entries remain readable.
  */
@@ -87,6 +86,7 @@ esp_err_t content_add(const char *url, const char *sound_name,
  * nested media folders; persisted entries always use "media/...".
  *
  * @param url          URL key.
+ * @param name         optional display name; empty/NULL defaults to url.
  * @param tracks       array of n sound media names/paths.
  * @param track_images array of n image media names/paths; each entry may be
  *                     "" for a track that falls back to the cover.
@@ -96,6 +96,7 @@ esp_err_t content_add(const char *url, const char *sound_name,
  *         ESP_ERR_NO_MEM on allocation failure, or ESP_FAIL on file IO.
  */
 esp_err_t content_add_playlist(const char *url,
+                               const char *name,
                                const char *const tracks[],
                                const char *const track_images[],
                                int n,
@@ -123,6 +124,15 @@ esp_err_t content_get_track_image(const char *url, int index,
  *         ESP_ERR_INVALID_STATE if not initialized.
  */
 esp_err_t content_delete(const char *url);
+
+/**
+ * Remove every mapping entry and persist the empty catalog atomically.
+ *
+ * @return ESP_OK on success, or an esp_err_t from index loading, allocation,
+ *         or persistence. The in-memory catalog is restored if persistence
+ *         fails.
+ */
+esp_err_t content_delete_all(void);
 
 /**
  * Allocate the mapping as a compact JSON array on first request.

@@ -70,6 +70,7 @@ static esp_err_t admin_send_oom(httpd_req_t *req, const char *where)
 #define ADMIN_NAME_MAX          128
 #define ADMIN_URL_MAX           512
 #define ADMIN_BODY_MAX          (4 * 1024 * 1024)
+#define ADMIN_FS_UPLOAD_CHUNK_SIZE 8192
 #define ADMIN_MAX_TRACKS        32
 #define ADMIN_MAX_FILES         64
 #define ADMIN_MANIFEST_MAX      4096
@@ -128,6 +129,7 @@ typedef struct
 typedef struct
 {
     char             url[ADMIN_URL_MAX];
+    char             name[ADMIN_NAME_MAX];
 
     /* Single-add (legacy): spec strings (copied) or raw bytes (into body). */
     char             sound_spec[ADMIN_URL_MAX];
@@ -778,6 +780,7 @@ static esp_err_t admin_parse_multipart(char *body, size_t len,
 
             memcpy(manifest_buf, data, copy);
             manifest_buf[copy] = '\0';
+            out->playlist_refs = true;
             if (admin_parse_manifest(manifest_buf, out) != ESP_OK)
             {
                 return ESP_ERR_INVALID_ARG;
@@ -858,8 +861,8 @@ static esp_err_t admin_parse_multipart(char *body, size_t len,
 
 /*
  * Parse the JSON playlist contract:
- * {"url":"...","tracks":["media/a.mp3"],"track_images":["media/a.img"],
- *  "image":"media/cover.img"}.
+ * {"url":"...","name":"...","tracks":["media/a.mp3"],
+ *  "track_images":["media/a.img"],"image":"media/cover.img"}.
  *
  * Legacy JSON {"url","sound","image"} remains supported on /api/add.
  */
@@ -889,6 +892,20 @@ static esp_err_t admin_parse_json_add(const char *body, admin_add_req_t *out)
     snprintf(out->url, sizeof(out->url), "%s", item->valuestring);
 
     tracks = cJSON_GetObjectItemCaseSensitive(root, "tracks");
+    out->playlist_refs = tracks != NULL;
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "name");
+    if (item != NULL)
+    {
+        if (!cJSON_IsString(item) || item->valuestring == NULL
+            || strlen(item->valuestring) >= sizeof(out->name))
+        {
+            cJSON_Delete(root);
+            return ESP_ERR_INVALID_ARG;
+        }
+        snprintf(out->name, sizeof(out->name), "%s", item->valuestring);
+    }
+
     if (tracks == NULL)
     {
         item = cJSON_GetObjectItemCaseSensitive(root, "sound");
@@ -1101,7 +1118,7 @@ static esp_err_t admin_ingest_playlist(const admin_add_req_t *add)
         image_ptrs[i] = track_images[i];
     }
 
-    return content_add_playlist(add->url, track_ptrs, image_ptrs,
+    return content_add_playlist(add->url, add->name, track_ptrs, image_ptrs,
                                 add->manifest_count,
                                 cover[0] != '\0' ? cover : NULL);
 }
@@ -1562,8 +1579,8 @@ static esp_err_t admin_register_playlist(const admin_add_req_t *add)
         }
         cover = add->cover_image;
     }
-    return content_add_playlist(add->url, tracks, images, add->manifest_count,
-                                cover);
+    return content_add_playlist(add->url, add->name, tracks, images,
+                                add->manifest_count, cover);
 }
 
 /* ------------------------------------------------------------ handlers -- */
@@ -1804,6 +1821,7 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
     char image_name[ADMIN_NAME_MAX] = { 0 };
 
     bool playlist_refs;
+    bool is_playlist;
     if (!admin_session_ok(req))
     {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "unauthorized");
@@ -1827,9 +1845,13 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
     err = admin_parse_add_request(req, ct, add);
     if (err != ESP_OK)
     {
+        bool invalid_playlist = add->playlist_refs;
+
         free(add->body);
         free(add);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad request");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            invalid_playlist ? "invalid playlist"
+                                              : "bad request");
         return ESP_FAIL;
     }
     if (add->url[0] == '\0')
@@ -1839,8 +1861,14 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing url");
         return ESP_FAIL;
     }
+    if (add->name[0] == '\0')
+    {
+        snprintf(add->name, sizeof(add->name), "%.*s",
+                 (int)sizeof(add->name) - 1, add->url);
+    }
 
     playlist_refs = add->playlist_refs;
+    is_playlist = playlist_refs || add->manifest_count > 0;
     if (playlist_refs)
     {
         err = admin_register_playlist(add);
@@ -1863,12 +1891,25 @@ static esp_err_t admin_add_handler(httpd_req_t *req)
 
     if (err != ESP_OK)
     {
-        httpd_resp_send_err(req,
-                            playlist_refs && (err == ESP_ERR_INVALID_ARG
-                                              || err == ESP_ERR_NOT_FOUND)
-                                ? HTTPD_400_BAD_REQUEST
-                                : HTTPD_500_INTERNAL_SERVER_ERROR,
-                            playlist_refs ? "invalid playlist" : "add failed");
+        if (is_playlist && (err == ESP_ERR_INVALID_ARG
+                            || err == ESP_ERR_NOT_FOUND))
+        {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "invalid playlist");
+        }
+        else if (is_playlist)
+        {
+            char message[96];
+
+            snprintf(message, sizeof(message), "playlist save failed: %s",
+                     esp_err_to_name(err));
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, message);
+        }
+        else
+        {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                "add failed");
+        }
         return ESP_FAIL;
     }
 
@@ -1946,6 +1987,31 @@ static esp_err_t admin_delete_handler(httpd_req_t *req)
     if (err != ESP_OK)
     {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "delete failed");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t admin_delete_all_handler(httpd_req_t *req)
+{
+    esp_err_t err;
+
+    if (!admin_session_ok(req))
+    {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "unauthorized");
+        return ESP_FAIL;
+    }
+
+    err = content_delete_all();
+    if (err != ESP_OK)
+    {
+        char message[96];
+
+        snprintf(message, sizeof(message), "delete all failed: %s",
+                 esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, message);
         return ESP_FAIL;
     }
 
@@ -2351,7 +2417,7 @@ static esp_err_t admin_fs_upload_handler(httpd_req_t *req)
     char logical[ADMIN_PATH_MAX];
     char absolute[ADMIN_PATH_MAX];
     FILE *fp;
-    uint8_t buffer[2048];
+    uint8_t buffer[ADMIN_FS_UPLOAD_CHUNK_SIZE];
     size_t remaining = req->content_len;
     size_t written_total = 0;
 
@@ -2537,6 +2603,8 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
           .handler = admin_add_handler },
         { .uri = "/api/delete", .method = HTTP_POST,
           .handler = admin_delete_handler },
+        { .uri = "/api/delete-all", .method = HTTP_POST,
+          .handler = admin_delete_all_handler },
         { .uri = "/api/control/play", .method = HTTP_POST,
           .handler = admin_play_handler },
         { .uri = "/api/control/display", .method = HTTP_POST,

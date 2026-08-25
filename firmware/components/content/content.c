@@ -678,6 +678,49 @@ esp_err_t content_delete(const char *url)
     return content_save();
 }
 
+esp_err_t content_delete_all(void)
+{
+    cJSON *old_cards;
+    cJSON *empty_cards;
+    cJSON *discarded_cards;
+    esp_err_t err;
+
+    err = content_ensure_index_loaded();
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    empty_cards = cJSON_CreateArray();
+    if (empty_cards == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    old_cards = cJSON_DetachItemFromObjectCaseSensitive(s_root, "cards");
+    if (old_cards == NULL)
+    {
+        cJSON_Delete(empty_cards);
+        return ESP_ERR_INVALID_STATE;
+    }
+    cJSON_AddItemToObjectCS(s_root, "cards", empty_cards);
+    s_cards = empty_cards;
+
+    err = content_save();
+    if (err != ESP_OK)
+    {
+        discarded_cards = cJSON_DetachItemFromObjectCaseSensitive(s_root,
+                                                                   "cards");
+        cJSON_AddItemToObjectCS(s_root, "cards", old_cards);
+        s_cards = old_cards;
+        cJSON_Delete(discarded_cards);
+        return err;
+    }
+
+    cJSON_Delete(old_cards);
+    return ESP_OK;
+}
+
 esp_err_t content_list_json(char **out)
 {
     esp_err_t err;
@@ -697,6 +740,7 @@ esp_err_t content_list_json(char **out)
 }
 
 esp_err_t content_add_playlist(const char *url,
+                               const char *name,
                                const char *const tracks[],
                                const char *const track_images[],
                                int n,
@@ -706,6 +750,7 @@ esp_err_t content_add_playlist(const char *url,
     cJSON *new_card;
     cJSON *tracks_arr;
     cJSON *images_arr;
+    const char *display_name;
     char media[CONTENT_MEDIA_PATH_MAX];
     int idx;
     int i;
@@ -719,6 +764,7 @@ esp_err_t content_add_playlist(const char *url,
     {
         return ESP_ERR_INVALID_ARG;
     }
+    display_name = (name != NULL && name[0] != '\0') ? name : url;
 
     for (i = 0; i < n; i++)
     {
@@ -785,6 +831,7 @@ esp_err_t content_add_playlist(const char *url,
     }
 
     cJSON_AddStringToObject(new_card, "url", url);
+    cJSON_AddStringToObject(new_card, "name", display_name);
     cJSON_AddItemToObject(new_card, "tracks", tracks_arr);
     cJSON_AddItemToObject(new_card, "track_images", images_arr);
 

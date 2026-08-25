@@ -221,6 +221,9 @@ class Handler(BaseHTTPRequestHandler):
                 items[:] = [e for e in items if e["path"] != target]
             IMAGES.pop(target, None)
             self._json({"ok": True})
+        elif path == "/api/delete-all":
+            MAPPINGS.clear()
+            self._json({"ok": True})
         elif path in OK_POSTS:
             self._json({"ok": True})
         else:
