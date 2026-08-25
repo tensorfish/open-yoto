@@ -71,6 +71,13 @@ void vTaskDelay(TickType_t ticks)
     s_tick_ms += (uint32_t)ticks;
 }
 
+/* A healthy fixed margin: stack_watch() must not warn during the host run. */
+UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task)
+{
+    (void)task;
+    return 4096;
+}
+
 /* xTaskCreate records the entry point but never runs it. */
 void (*s_task_entry)(void *);
 
@@ -321,9 +328,15 @@ esp_err_t content_init(void)
     return ESP_OK;
 }
 
+/* Counts every SD-backed lookup, so a test can prove the encoder callback never
+ * performs one: doing that on the 4 KB encoder task overflows its stack. */
+static int s_content_lookups;
+static bool s_admin_active;
+
 int content_get_track_count(const char *url)
 {
     (void)url;
+    s_content_lookups++;
     return 0;
 }
 
@@ -332,9 +345,9 @@ esp_err_t content_get_track(const char *url, int index,
 {
     (void)url;
     (void)index;
-    (void)sound_path;
-    (void)sp;
-    return ESP_ERR_NOT_FOUND;
+    s_content_lookups++;
+    snprintf(sound_path, sp, "/sdcard/media/track%d.mp3", index);
+    return ESP_OK;
 }
 
 esp_err_t content_get_track_image(const char *url, int index,
@@ -342,9 +355,9 @@ esp_err_t content_get_track_image(const char *url, int index,
 {
     (void)url;
     (void)index;
-    (void)image_path;
-    (void)ip;
-    return ESP_ERR_NOT_FOUND;
+    s_content_lookups++;
+    snprintf(image_path, ip, "/sdcard/media/track%d.img", index);
+    return ESP_OK;
 }
 
 esp_err_t admin_start(char *code_out, size_t code_size)
@@ -361,7 +374,7 @@ esp_err_t admin_stop(void)
 
 bool admin_is_active(void)
 {
-    return false;
+    return s_admin_active;
 }
 
 void admin_set_last_card(const uint8_t *uid, uint8_t uid_len,
@@ -564,6 +577,10 @@ static void reset_state(void)
     s_last_playpause_ticks = 0;
     s_last_power_ticks = 0;
     s_battery_check_ticks = 0;
+    s_pending_skip = 0;
+    s_pending_power = false;
+    s_content_lookups = 0;
+    s_admin_active = false;
 
     s_state_mutex = xSemaphoreCreateMutex();
 
@@ -572,6 +589,12 @@ static void reset_state(void)
     s_clear_count = 0;
     s_flush_count = 0;
     s_access_code_count = 0;
+}
+
+/* Fire one encoder event exactly as the encoder task would. */
+static void encoder_event(int id, int delta, encoder_event_t event)
+{
+    encoder_cb(id, delta, event);
 }
 
 int main(void)
@@ -936,6 +959,104 @@ int main(void)
         advance_ms(IDLE_WINK_MS + 100);
         CHECK(last_frame() == IDLE_FACE_RGBA,
               "power: the wink must expire back to the face after power-on");
+    }
+
+    /* ------------------------------ 10. ENCODER DOES NO HEAVY WORK -------- */
+    {
+        int lookups;
+
+        reset_state();
+        advance_ms(200);
+
+        /* A right-knob turn with a multi-track card loaded must NOT read the SD
+         * card from the encoder callback: that work needs more stack than the
+         * 4 KB encoder task has, which is what panicked the device. */
+        s_track_count = 3;
+        snprintf(s_current_url, sizeof(s_current_url), "%s",
+                 "https://example.com/card");
+        s_content_lookups = 0;
+        encoder_event(ENCODER_ID_1, 1, ENCODER_EVT_TURN);
+        CHECK(s_content_lookups == 0,
+              "encoder: the callback performed %d SD lookup(s); track skipping "
+              "must be deferred to the main loop", s_content_lookups);
+        CHECK(s_pending_skip == 1,
+              "encoder: the callback must record the skip, got %d",
+              s_pending_skip);
+
+        /* The main loop then performs it. */
+        encoder_actions_pump();
+        lookups = s_content_lookups;
+        CHECK(lookups > 0,
+              "encoder: the pump must perform the deferred skip");
+        CHECK(s_pending_skip == 0,
+              "encoder: the pump must clear the pending skip");
+        CHECK(s_track_index == 1,
+              "encoder: the deferred skip must advance the track, got %d",
+              s_track_index);
+
+        /* Power gestures are deferred for the same reason (admin teardown and
+         * card-art re-render both overflow the encoder task). */
+        s_last_power_ticks = 0;
+        encoder_event(ENCODER_ID_POWER, 0, ENCODER_EVT_SHORT_PRESS);
+        CHECK(s_pending_power && !s_powered_off,
+              "encoder: a power tap must be recorded, not executed inline");
+        encoder_actions_pump();
+        CHECK(s_powered_off,
+              "encoder: the pump must apply the deferred power toggle");
+    }
+
+    /* ------------------------------ 11. ADMIN CODE STAYS ON THE PANEL ----- */
+    {
+        int codes;
+
+        reset_state();
+        advance_ms(200);
+
+        /* Admin mode active with a code displayed. */
+        s_admin_active = true;
+        snprintf(s_admin_code, sizeof(s_admin_code), "%s", "ABC123");
+        state_lock();
+        s_display_base = DISPLAY_BASE_ADMIN;
+        state_unlock();
+
+        /* Every "back to the face" path must land on the code instead. */
+        codes = s_access_code_count;
+        state_lock();
+        display_set_idle_locked();
+        state_unlock();
+        CHECK(s_access_code_count == codes + 1,
+              "admin: display_set_idle_locked must redraw the access code");
+        CHECK(s_display_base == DISPLAY_BASE_ADMIN,
+              "admin: the base must stay ADMIN, got %d", (int)s_display_base);
+
+        /* A card image shown from the web UI, then the card is removed: the
+         * panel must return to the code, never to the face. */
+        codes = s_access_code_count;
+        state_lock();
+        s_display_base = DISPLAY_BASE_CARD;
+        display_set_idle_locked();
+        state_unlock();
+        CHECK(s_access_code_count == codes + 1 && last_frame() != IDLE_FACE_RGBA,
+              "admin: after card removal the code must return, not the face");
+
+        /* A right-knob twist must not replace the code with a wink. */
+        codes = s_access_code_count;
+        s_track_count = 0;
+        state_lock();
+        display_show_wink_locked();
+        state_unlock();
+        CHECK(last_frame() != WINK_FACE_FRAMES[0]
+              && last_frame() != WINK_FACE_FRAMES[1],
+              "admin: a wink must not cover the access code");
+
+        /* And once admin stops, the face comes back. */
+        s_admin_active = false;
+        s_admin_code[0] = '\0';
+        state_lock();
+        display_set_idle_locked();
+        state_unlock();
+        CHECK(last_frame() == IDLE_FACE_RGBA,
+              "admin: stopping admin must restore the idle face");
     }
 
     if (s_failures != 0)

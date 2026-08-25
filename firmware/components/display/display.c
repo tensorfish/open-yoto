@@ -215,7 +215,10 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
 
 esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
 {
-    uint8_t rgba[16 * 16 * 4];
+    /* Static, not stack: this sits at the bottom of the card-render path
+     * (main loop -> render_image -> here) where a 1 KB frame overflowed the main
+     * task. Every display call is serialised by the caller's state mutex. */
+    static uint8_t rgba[16 * 16 * 4];
     esp_err_t err;
 
     if (pixels == NULL)

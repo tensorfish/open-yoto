@@ -264,6 +264,7 @@ function mappingRef(path){
  if(ref.length>=128)throw new Error('Selected media path is too long: '+path);
  return ref;
 }
+function mappingSelected(){return [...$('#mappingTracks').selectedOptions].map(o=>o.value)}
 function updateMappingOrder(){
  const chosen=mappingSelected();const selected=new Set(chosen);
  mappingOrder=mappingOrder.filter(path=>selected.has(path));

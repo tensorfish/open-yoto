@@ -77,3 +77,7 @@ CONFIG_AUDIO_DECODER_MP3_SUPPORT=y
 # CONFIG_AUDIO_ENCODER_SBC_SUPPORT is not set
 # CONFIG_AUDIO_ENCODER_LC3_SUPPORT is not set
 # CONFIG_AUDIO_ENCODER_G722_SUPPORT is not set
+
+# The main loop polls NFC, parses mapping.json off the SD card and renders card
+# art in one call chain; 3584 bytes (the IDF default) overflows it.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

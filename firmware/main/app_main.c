@@ -324,6 +324,9 @@ static uint32_t s_volume_draw_due;
 static SemaphoreHandle_t s_volume_blip_signal;
 static bool s_volume_dirty;
 static uint8_t s_wink_frame_index;
+/* Gestures the encoder task recorded for the main loop to perform. */
+static int s_pending_skip;
+static bool s_pending_power;
 /* Last sampled charger state; the not-charging -> charging edge is news. */
 static bool s_charging_latched;
 
@@ -387,6 +390,17 @@ static void display_set_idle_base_locked(void)
 
 static void display_set_idle_locked(void)
 {
+    /* Admin mode owns the panel: the six-character code is the only way into
+     * the web UI, so every "back to the face" path — card removal, an expiring
+     * transient, a battery recovery — must land on the code, not the face. */
+    if (admin_is_active() && s_admin_code[0] != '\0')
+    {
+        s_display_base = DISPLAY_BASE_ADMIN;
+        s_battery_visual_deadline = 0;
+        s_idle_wink_deadline = 0;
+        display_show_access_code(s_admin_code);
+        return;
+    }
     display_set_idle_base_locked();
     display_show_rgba(IDLE_FACE_RGBA);
     display_apply_volume_overlay_locked();
@@ -840,7 +854,22 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
         }
         else if (encoder_id == ENCODER_ID_1)
         {
-            skip_track(delta);
+            state_lock();
+            if (s_track_count > 1)
+            {
+                /* Skipping a track reads mapping.json off the SD card and
+                 * renders card art, which needs far more stack than the 4 KB
+                 * encoder task has — doing it here overflows and panics. Record
+                 * the intent and let the main loop perform it. */
+                s_pending_skip += delta;
+            }
+            else if (s_track_count == 0)
+            {
+                /* The wink is one constant frame straight to the panel, cheap
+                 * enough to answer the knob immediately. */
+                display_show_wink_locked();
+            }
+            state_unlock();
         }
     }
     else if (event == ENCODER_EVT_SHORT_PRESS)
@@ -856,7 +885,12 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
         {
             if (!gesture_debounced(&s_last_power_ticks, POWER_DEBOUNCE_MS))
             {
-                power_toggle();
+                /* Powering off stops the admin HTTP server and tears down the
+                 * AP netif, and powering on can re-render card art: both are far
+                 * too stack-hungry for this task. */
+                state_lock();
+                s_pending_power = true;
+                state_unlock();
             }
         }
     }
@@ -866,9 +900,68 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
         {
             if (!gesture_debounced(&s_last_power_ticks, POWER_DEBOUNCE_MS))
             {
-                power_toggle();
+                state_lock();
+                s_pending_power = true;
+                state_unlock();
             }
         }
+    }
+}
+
+/*
+ * Perform the gestures the encoder task deferred. The encoder callback runs on a
+ * 4 KB task, so anything touching the SD card, the admin server or the image
+ * renderer is recorded as intent and executed here, on the main loop's stack.
+ */
+static void encoder_actions_pump(void)
+{
+    int skip;
+    bool power;
+
+    state_lock();
+    skip = s_pending_skip;
+    s_pending_skip = 0;
+    power = s_pending_power;
+    s_pending_power = false;
+    state_unlock();
+
+    if (power)
+    {
+        power_toggle();
+    }
+    if (skip != 0)
+    {
+        skip_track(skip);
+    }
+}
+
+/*
+ * Watch this task's stack margin. The card path (NFC poll -> mapping.json parse
+ * -> image decode -> panel write) is the deepest chain the loop takes, and a
+ * silent overflow there ends in a panic rather than an error, so complain while
+ * there is still room. uxTaskGetStackHighWaterMark() reports StackType_t units,
+ * which are bytes on the ESP32.
+ */
+#define STACK_WATCH_PERIOD_MS 10000
+#define STACK_WATCH_MIN_BYTES  1024
+static uint32_t s_stack_watch_ticks;
+
+static void stack_watch(void)
+{
+    uint32_t now = xTaskGetTickCount();
+    UBaseType_t headroom;
+
+    if (s_stack_watch_ticks != 0
+        && (int32_t)(now - s_stack_watch_ticks) < pdMS_TO_TICKS(STACK_WATCH_PERIOD_MS))
+    {
+        return;
+    }
+    s_stack_watch_ticks = now;
+    headroom = uxTaskGetStackHighWaterMark(NULL);
+    if (headroom < STACK_WATCH_MIN_BYTES)
+    {
+        ESP_LOGW(TAG, "main task stack headroom down to %u bytes",
+                 (unsigned)headroom);
     }
 }
 
@@ -952,9 +1045,12 @@ static esp_err_t render_image(const char *path)
         if (width == PLAYER_COLOR_IMAGE_16_WIDTH
             && file_size == PLAYER_COLOR_IMAGE_16_FILE_SIZE)
         {
-            uint8_t pixel_bytes[PLAYER_COLOR_IMAGE_16_DATA_SIZE];
-            uint16_t pixels[PLAYER_COLOR_IMAGE_16_WIDTH
-                            * PLAYER_COLOR_IMAGE_16_WIDTH];
+            /* Static, not stack: 1 KB of card-image buffers here plus the 1 KB
+             * inside display_show_rgb56516() overflowed the main task. The
+             * display path is serialised by the state mutex. */
+            static uint8_t pixel_bytes[PLAYER_COLOR_IMAGE_16_DATA_SIZE];
+            static uint16_t pixels[PLAYER_COLOR_IMAGE_16_WIDTH
+                                   * PLAYER_COLOR_IMAGE_16_WIDTH];
 
             if (fread(pixel_bytes, 1, sizeof(pixel_bytes), f)
                 != sizeof(pixel_bytes))
@@ -1424,6 +1520,12 @@ void app_main(void)
 
     while (1)
     {
+        /* Deferred encoder gestures first: a pending power-on must be seen even
+         * while the loop is otherwise parked. */
+        encoder_actions_pump();
+
+        stack_watch();
+
         if (s_powered_off)
         {
             vTaskDelay(pdMS_TO_TICKS(200));
