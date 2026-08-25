@@ -1,13 +1,14 @@
 /*
- * content.h — SD-card content store: mapping.json index + media directory.
+ * content.h — SD-card content store: library.json index + media directory.
  *
- * Owns the FatFS SDMMC (1-bit) mount at /sdcard and mapping.json, which ties
+ * Owns the FatFS SDMMC (1-bit) mount at /sdcard and library.json, which ties
  * an NFC URI to media stored under /sdcard/media/. Playlist entries use:
  *
  *     {"cards":[{"url":"...","name":"...","tracks":["media/a.mp3"],
  *       "track_images":["media/a.img"],"image":"media/cover.img"}]}
  * `track_images` is parallel to `tracks`; an empty item uses the optional
  * card-cover image. Legacy {"url","sound","image"} entries remain readable.
+ * If present without library.json, the legacy mapping.json is migrated once.
  */
 #pragma once
 
@@ -19,15 +20,17 @@
 
 /**
  * Mount the SD card at /sdcard (FatFS over SDMMC, 1-bit), ensure
- * /sdcard/mapping.json and /sdcard/media/ exist, and load the mapping into
- * memory. Idempotent: subsequent calls return ESP_OK without remounting.
+ * /sdcard/media/ exists, and lazily load library.json. If library.json is
+ * absent, a legacy /sdcard/mapping.json is migrated once and retained as a
+ * fallback artifact. Idempotent: subsequent calls return ESP_OK without
+ * remounting.
  *
  * @return ESP_OK on success, or an esp_err_t from the mount/IO layer.
  */
 esp_err_t content_init(void);
 
 /**
- * Look up a URL in mapping.json and copy the matched card's sound and image
+ * Look up a URL in library.json and copy the matched card's sound and image
  * paths (relative to /sdcard, e.g. "media/a.mp3") into the caller buffers.
  * Either output may be NULL to skip it.
  *
@@ -48,7 +51,7 @@ esp_err_t content_lookup(const char *url, char *sound_path, size_t sp,
  * a legacy "sound" string counts as one track.
  *
  * @param url URL key to match against cards[].url.
- * @return track count (>=0), or -1 if the URL is not mapped.
+ * @return track count (>=0), or -1 if the URL is not in the catalog.
  */
 int content_get_track_count(const char *url);
 
@@ -68,7 +71,7 @@ esp_err_t content_get_track(const char *url, int index,
                             char *sound_path, size_t sp);
 
 /**
- * Add or replace a legacy single-track mapping. Names may be bare media file
+ * Add or replace a legacy single-track catalog entry. Names may be bare media
  * names or safe content-relative "media/..." paths. A card already carrying
  * url is replaced.
  *
@@ -117,7 +120,7 @@ esp_err_t content_get_track_image(const char *url, int index,
                                   char *image_path, size_t ip);
 
 /**
- * Remove the mapping entry whose URL matches url and persist the change.
+ * Remove the catalog entry whose URL matches url and persist the change.
  *
  * @param url URL key to remove.
  * @return ESP_OK on success, ESP_ERR_NOT_FOUND if no card matches,
@@ -126,7 +129,7 @@ esp_err_t content_get_track_image(const char *url, int index,
 esp_err_t content_delete(const char *url);
 
 /**
- * Remove every mapping entry and persist the empty catalog atomically.
+ * Remove every catalog entry and persist the empty catalog atomically.
  *
  * @return ESP_OK on success, or an esp_err_t from index loading, allocation,
  *         or persistence. The in-memory catalog is restored if persistence
@@ -135,7 +138,7 @@ esp_err_t content_delete(const char *url);
 esp_err_t content_delete_all(void);
 
 /**
- * Allocate the mapping as a compact JSON array on first request.
+ * Allocate the library catalog as a compact JSON array on first request.
  *
  * The caller owns `*out` and must release it with cJSON_free(). Keeping
  * allocation ownership avoids a second fixed-size copy in the HTTP server.

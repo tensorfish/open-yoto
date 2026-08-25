@@ -1,11 +1,11 @@
 /*
- * content.c — SD-card content store: mapping.json index + media directory.
+ * content.c — SD-card content store: library.json index + media directory.
  *
  * Mounts a FatFS-formatted SD card on the SDMMC peripheral at /sdcard (1-bit
  * bus on rev #05, 4-bit bus on rev #04 — see board_pins.h), keeps a
- * mapping.json index in memory as a cJSON tree, and persists
+ * library.json index in memory as a cJSON tree, and persists
  * every mutation back to the card. Lookups return the relative media paths
- * recorded in the mapping ("media/<file>"); callers join them onto
+ * recorded in the catalog ("media/<file>"); callers join them onto
  * CONTENT_MOUNT_POINT to open the real file.
  */
 #include "content.h"
@@ -29,9 +29,10 @@
 
 static const char *TAG = "content";
 
-#define CONTENT_MAP_PATH    CONTENT_MOUNT_POINT "/mapping.json"
 #define CONTENT_MEDIA_DIR   CONTENT_MOUNT_POINT "/media"
 #define CONTENT_MEDIA_PREFIX "media"
+#define CONTENT_LIBRARY_PATH CONTENT_MOUNT_POINT "/media/library.json"
+#define CONTENT_LEGACY_MAP_PATH CONTENT_MOUNT_POINT "/mapping.json"
 
 /* Upper bound for a persisted media path ("media/<nested/name>"). */
 #define CONTENT_MEDIA_PATH_MAX 128
@@ -44,7 +45,7 @@ static const char *TAG = "content";
 /* Handle returned by the mount; retained for later deinit/format. */
 static sdmmc_card_t *s_card;
 
-/* Parsed mapping.json: s_root = { "cards": [...] }, s_cards = the array. */
+/* Parsed library.json: s_root = { "cards": [...] }, s_cards = the array. */
 static cJSON *s_root;
 static cJSON *s_cards;
 
@@ -135,7 +136,7 @@ static bool content_make_media_path(const char *name, char *out, size_t cap)
 }
 
 /*
- * Serialize the in-memory cJSON tree back to /sdcard/mapping.json.
+ * Serialize the in-memory cJSON tree to /sdcard/media/library.json.
  *
  * @return ESP_OK on success, ESP_ERR_NO_MEM on allocation failure,
  *         ESP_FAIL on any file IO error.
@@ -160,10 +161,10 @@ static esp_err_t content_save(void)
         return ESP_ERR_NO_MEM;
     }
 
-    f = fopen(CONTENT_MAP_PATH ".tmp", "w");
+    f = fopen(CONTENT_LIBRARY_PATH ".tmp", "w");
     if (f == NULL)
     {
-        ESP_LOGE(TAG, "open mapping temp failed: %s", strerror(errno));
+        ESP_LOGE(TAG, "open library temp failed: %s", strerror(errno));
         cJSON_free(json);
         return ESP_FAIL;
     }
@@ -175,9 +176,9 @@ static esp_err_t content_save(void)
 
     if (written != len || rc != 0)
     {
-        ESP_LOGE(TAG, "write mapping temp failed: %u/%u close=%d errno=%s",
+        ESP_LOGE(TAG, "write library temp failed: %u/%u close=%d errno=%s",
                  (unsigned)written, (unsigned)len, rc, strerror(errno));
-        unlink(CONTENT_MAP_PATH ".tmp");
+        unlink(CONTENT_LIBRARY_PATH ".tmp");
         return ESP_FAIL;
     }
 
@@ -186,43 +187,45 @@ static esp_err_t content_save(void)
      * the old index aside, install the new one, and restore the old file on
      * failure. This makes delete/wipe/add persistence transactional.
      */
-    unlink(CONTENT_MAP_PATH ".bak");
-    if (rename(CONTENT_MAP_PATH, CONTENT_MAP_PATH ".bak") == 0)
+    unlink(CONTENT_LIBRARY_PATH ".bak");
+    if (rename(CONTENT_LIBRARY_PATH, CONTENT_LIBRARY_PATH ".bak") == 0)
     {
         backed_up = true;
     }
     else if (errno != ENOENT)
     {
-        ESP_LOGE(TAG, "backup mapping failed: %s", strerror(errno));
-        unlink(CONTENT_MAP_PATH ".tmp");
+        ESP_LOGE(TAG, "backup library failed: %s", strerror(errno));
+        unlink(CONTENT_LIBRARY_PATH ".tmp");
         return ESP_FAIL;
     }
 
-    if (rename(CONTENT_MAP_PATH ".tmp", CONTENT_MAP_PATH) != 0)
+    if (rename(CONTENT_LIBRARY_PATH ".tmp", CONTENT_LIBRARY_PATH) != 0)
     {
-        ESP_LOGE(TAG, "install mapping failed: %s", strerror(errno));
-        unlink(CONTENT_MAP_PATH ".tmp");
-        if (backed_up && rename(CONTENT_MAP_PATH ".bak", CONTENT_MAP_PATH) != 0)
+        ESP_LOGE(TAG, "install library failed: %s", strerror(errno));
+        unlink(CONTENT_LIBRARY_PATH ".tmp");
+        if (backed_up && rename(CONTENT_LIBRARY_PATH ".bak",
+                                CONTENT_LIBRARY_PATH) != 0)
         {
-            ESP_LOGE(TAG, "restore mapping backup failed: %s", strerror(errno));
+            ESP_LOGE(TAG, "restore library backup failed: %s", strerror(errno));
         }
         return ESP_FAIL;
     }
-    if (backed_up && unlink(CONTENT_MAP_PATH ".bak") != 0)
+    if (backed_up && unlink(CONTENT_LIBRARY_PATH ".bak") != 0)
     {
-        ESP_LOGW(TAG, "remove mapping backup failed: %s", strerror(errno));
+        ESP_LOGW(TAG, "remove library backup failed: %s", strerror(errno));
     }
     return ESP_OK;
 }
 
 /*
- * Read and parse /sdcard/mapping.json into the s_root/s_cards tree. Frees any
+ * Read and parse a catalog JSON file into the s_root/s_cards tree. Frees any
  * previously loaded tree first.
  *
+ * @param path catalog file to load.
  * @return ESP_OK on success, ESP_ERR_NO_MEM on allocation failure,
  *         ESP_FAIL on IO or parse error.
  */
-static esp_err_t content_load(void)
+static esp_err_t content_load(const char *path)
 {
     FILE *f;
     long size;
@@ -231,7 +234,7 @@ static esp_err_t content_load(void)
     cJSON *root;
     cJSON *cards;
 
-    f = fopen(CONTENT_MAP_PATH, "rb");
+    f = fopen(path, "rb");
     if (f == NULL)
     {
         return ESP_FAIL;
@@ -319,6 +322,7 @@ static esp_err_t content_ensure_index_loaded(void)
 {
     struct stat st;
     esp_err_t err;
+    bool migrated = false;
 
     if (s_index_loaded)
     {
@@ -329,30 +333,63 @@ static esp_err_t content_ensure_index_loaded(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (stat(CONTENT_MAP_PATH, &st) == 0)
+    if (stat(CONTENT_LIBRARY_PATH, &st) == 0)
     {
-        ESP_LOGI(TAG, "loading optional index %s on demand", CONTENT_MAP_PATH);
-        err = content_load();
+        ESP_LOGI(TAG, "loading catalog %s on demand", CONTENT_LIBRARY_PATH);
+        err = content_load(CONTENT_LIBRARY_PATH);
         if (err == ESP_ERR_NO_MEM)
         {
             return err;
         }
         if (err != ESP_OK)
         {
-            ESP_LOGW(TAG, "ignoring invalid optional index %s: %s",
-                     CONTENT_MAP_PATH, esp_err_to_name(err));
+            ESP_LOGW(TAG, "ignoring invalid catalog %s: %s",
+                     CONTENT_LIBRARY_PATH, esp_err_to_name(err));
             err = content_create_empty_index();
+        }
+    }
+    else if (stat(CONTENT_LEGACY_MAP_PATH, &st) == 0)
+    {
+        ESP_LOGI(TAG, "migrating legacy catalog %s to %s",
+                 CONTENT_LEGACY_MAP_PATH, CONTENT_LIBRARY_PATH);
+        err = content_load(CONTENT_LEGACY_MAP_PATH);
+        if (err == ESP_ERR_NO_MEM)
+        {
+            return err;
+        }
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "ignoring invalid legacy catalog %s: %s",
+                     CONTENT_LEGACY_MAP_PATH, esp_err_to_name(err));
+            err = content_create_empty_index();
+        }
+        else
+        {
+            migrated = true;
         }
     }
     else
     {
         err = content_create_empty_index();
     }
-    if (err == ESP_OK)
+    if (err != ESP_OK)
     {
-        s_index_loaded = true;
+        return err;
     }
-    return err;
+    if (migrated)
+    {
+        err = content_save();
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "legacy catalog migration failed: %s",
+                     esp_err_to_name(err));
+            return err;
+        }
+        ESP_LOGI(TAG, "legacy catalog migrated to %s; legacy file retained",
+                 CONTENT_LIBRARY_PATH);
+    }
+    s_index_loaded = true;
+    return ESP_OK;
 }
 
 
@@ -445,8 +482,8 @@ esp_err_t content_init(void)
                  CONTENT_MEDIA_DIR, errno, strerror(errno));
     }
 
-    /* mapping.json is not needed to mount SD or start the web UI. Parse it
-     * only when NFC mapping or the Cards tab first requests it. */
+    /* library.json is loaded lazily on first NFC or Cards-tab access. A
+     * legacy mapping.json is migrated once when no library exists. */
     s_index_loaded = false;
     ESP_LOGI(TAG, "content index deferred until first use");
     ESP_LOGI(TAG, "content store ready at %s", CONTENT_MOUNT_POINT);
@@ -532,7 +569,7 @@ esp_err_t content_lookup(const char *url, char *sound_path, size_t sp,
 }
 
 /*
- * Find the mapping card whose "url" matches url, or NULL if absent.
+ * Find the catalog card whose "url" matches url, or NULL if absent.
  *
  * @param url URL key to match.
  * @return the cJSON card object, or NULL.
@@ -723,7 +760,7 @@ static esp_err_t content_add_locked(const char *url, const char *sound_name,
         return ESP_ERR_NO_MEM;
     }
 
-    /* Paths were normalized and validated before replacing the old mapping. */
+    /* Paths were normalized and validated before replacing the old catalog. */
 
     cJSON_AddStringToObject(new_card, "url", url);
     cJSON_AddStringToObject(new_card, "sound", sound_media);
@@ -795,7 +832,7 @@ static esp_err_t content_delete_locked(const char *url)
     index_err = content_save();
     if (index_err != ESP_OK)
     {
-        /* Restore the exact position when mapping.json could not be replaced. */
+        /* Restore the exact position when library.json could not be replaced. */
         cJSON_InsertItemInArray(s_cards, idx, detached);
         return index_err;
     }
