@@ -34,6 +34,7 @@ static const char *TAG = "content";
 #define CONTENT_LIBRARY_PATH CONTENT_MOUNT_POINT "/media/library.json"
 #define CONTENT_LEGACY_MAP_PATH CONTENT_MOUNT_POINT "/mapping.json"
 
+#define CONTENT_LIBRARY_MAX_BYTES (1024 * 1024)
 /* Upper bound for a persisted media path ("media/<nested/name>"). */
 #define CONTENT_MEDIA_PATH_MAX 128
 
@@ -49,13 +50,24 @@ static sdmmc_card_t *s_card;
 static cJSON *s_root;
 static cJSON *s_cards;
 
+#define CONTENT_MUTEX_TIMEOUT_MS 5000
 static bool s_mounted;
 static bool s_index_loaded;
 static SemaphoreHandle_t s_mutex;
-
 static bool content_lock(void)
 {
-    return s_mutex != NULL && xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE;
+    if (s_mutex == NULL)
+    {
+        return false;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(CONTENT_MUTEX_TIMEOUT_MS))
+        != pdTRUE)
+    {
+        ESP_LOGE(TAG, "catalog mutex timeout after %d ms",
+                 CONTENT_MUTEX_TIMEOUT_MS);
+        return false;
+    }
+    return true;
 }
 
 static void content_unlock(void)
@@ -233,26 +245,45 @@ static esp_err_t content_load(const char *path)
     size_t n;
     cJSON *root;
     cJSON *cards;
+    struct stat st;
+
+    ESP_LOGI(TAG, "catalog load begin: %s", path);
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        ESP_LOGE(TAG, "catalog stat failed: %s", strerror(errno));
+        return ESP_FAIL;
+    }
+    if (st.st_size < 0 || st.st_size > CONTENT_LIBRARY_MAX_BYTES)
+    {
+        ESP_LOGE(TAG, "catalog size invalid: %ld bytes (max %u)",
+                 (long)st.st_size, (unsigned)CONTENT_LIBRARY_MAX_BYTES);
+        return ESP_ERR_INVALID_SIZE;
+    }
 
     f = fopen(path, "rb");
     if (f == NULL)
     {
+        ESP_LOGE(TAG, "catalog open failed: %s", strerror(errno));
         return ESP_FAIL;
     }
+    ESP_LOGI(TAG, "catalog opened: %s (%ld bytes)", path, (long)st.st_size);
 
     if (fseek(f, 0, SEEK_END) != 0)
     {
+        ESP_LOGE(TAG, "catalog seek-end failed: %s", strerror(errno));
         fclose(f);
         return ESP_FAIL;
     }
     size = ftell(f);
-    if (size < 0)
+    if (size < 0 || size > CONTENT_LIBRARY_MAX_BYTES)
     {
+        ESP_LOGE(TAG, "catalog tell failed or size invalid: %ld", size);
         fclose(f);
-        return ESP_FAIL;
+        return ESP_ERR_INVALID_SIZE;
     }
     if (fseek(f, 0, SEEK_SET) != 0)
     {
+        ESP_LOGE(TAG, "catalog seek-start failed: %s", strerror(errno));
         fclose(f);
         return ESP_FAIL;
     }
@@ -266,14 +297,24 @@ static esp_err_t content_load(const char *path)
 
     n = fread(buf, 1, (size_t)size, f);
     fclose(f);
+    if (n != (size_t)size)
+    {
+        ESP_LOGE(TAG, "catalog read failed: %u/%u bytes errno=%s",
+                 (unsigned)n, (unsigned)size, strerror(errno));
+        free(buf);
+        return ESP_FAIL;
+    }
     buf[n] = '\0';
+    ESP_LOGI(TAG, "catalog bytes read: %u", (unsigned)n);
 
     root = cJSON_Parse(buf);
     free(buf);
     if (root == NULL)
     {
+        ESP_LOGE(TAG, "catalog JSON parse failed");
         return ESP_FAIL;
     }
+    ESP_LOGI(TAG, "catalog JSON parsed");
 
     cards = cJSON_GetObjectItemCaseSensitive(root, "cards");
     if (cards == NULL || !cJSON_IsArray(cards))
