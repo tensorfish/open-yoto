@@ -1646,10 +1646,14 @@ static esp_err_t admin_list_handler(httpd_req_t *req)
     {
         if (err == ESP_ERR_NO_MEM)
         {
-            return admin_send_oom(req, "serializing card mappings");
+            return admin_send_oom(req, "serializing card library");
         }
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                            "content list failed");
+        {
+            char message[96];
+            snprintf(message, sizeof(message), "library load failed: %s",
+                     esp_err_to_name(err));
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, message);
+        }
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
