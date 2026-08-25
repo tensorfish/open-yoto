@@ -45,19 +45,14 @@ void display_flush(void);
  * 12× to its calibrated `(24,24)..(215,215)` test window, then transmits
  * RGB666 with the device-specific channel-order correction.
  *
- * @param[in] rgba 1024-byte 16x16 RGBA frame in row-major order.
- */
-void display_show_rgba(const uint8_t rgba[16 * 16 * 4]);
-
-/**
- * Render a 16x16 RGBA icon without blanking the panel outside the icon window.
- * Every pixel of the window is written, so successive animation frames use this
- * to skip the rev #04 full-panel fill. Use display_show_rgba() whenever the
- * previous frame may have drawn outside the window.
+ * The icon covers that window completely, so rev #04 blanks the rest of the
+ * panel only when an earlier render could have lit it (a 1-bit bitmap flush or
+ * a full 240x320 raster). Successive icon frames therefore cost the window
+ * alone, which is what keeps an animation free of black flashes.
  *
  * @param[in] rgba 1024-byte 16x16 RGBA frame in row-major order.
  */
-void display_show_rgba_frame(const uint8_t rgba[16 * 16 * 4]);
+void display_show_rgba(const uint8_t rgba[16 * 16 * 4]);
 
 /** Draw a transient blue-to-green-to-red volume bar over the current frame. */
 void display_draw_volume_overlay(int volume);

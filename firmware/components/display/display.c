@@ -89,6 +89,15 @@ static const char *TAG = "display";
 
 static bool s_fb[16][16];
 
+/*
+ * True while the panel outside the 192x192 icon window is known black. An icon
+ * frame covers that window completely, so once the margin is clean successive
+ * frames skip the 230 KB full-panel fill — paying it per frame flashes the
+ * panel black between animation frames. Content is undefined after reset, so
+ * the first frame always clears.
+ */
+static bool s_panel_margin_clean;
+
 esp_err_t display_init(void)
 {
     esp_err_t err = gc9306_init();
@@ -141,6 +150,9 @@ void display_set_pixel(int x, int y, bool on)
 
 void display_flush(void)
 {
+    /* Bitmap pixels reach panel row 218, three rows below the icon window, so
+     * an icon frame cannot erase them. */
+    s_panel_margin_clean = false;
     esp_err_t err = gc9306_fill_rect(0, 0, 239, 319, 0x000000);
 
     if (err != ESP_OK)
@@ -172,24 +184,6 @@ void display_flush(void)
     }
 }
 
-void display_show_rgba_frame(const uint8_t rgba[16 * 16 * 4])
-{
-    esp_err_t err;
-
-    if (rgba == NULL)
-    {
-        return;
-    }
-
-    /* gc9306_draw_rgba16() writes every pixel of the 192x192 icon window, so
-     * a caller that already owns the panel needs no clear beforehand. */
-    err = gc9306_draw_rgba16(rgba);
-    if (err != ESP_OK)
-    {
-        ESP_LOGW(TAG, "RGBA frame failed: %s", esp_err_to_name(err));
-    }
-}
-
 void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
 {
     esp_err_t err;
@@ -199,15 +193,24 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
         return;
     }
 
-    /* Blank the whole panel first: an access code or a 240x320 mask leaves
-     * pixels outside the icon window that the icon itself cannot erase. */
-    err = gc9306_fill_rect(0, 0, 239, 319, 0x000000);
+    if (!s_panel_margin_clean)
+    {
+        err = gc9306_fill_rect(0, 0, 239, 319, 0x000000);
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "RGBA frame failed: %s", esp_err_to_name(err));
+            return;
+        }
+        s_panel_margin_clean = true;
+    }
+
+    /* gc9306_draw_rgba16() writes every pixel of the icon window, including the
+     * volume bar's rows, so it needs no clear of its own. */
+    err = gc9306_draw_rgba16(rgba);
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "RGBA frame failed: %s", esp_err_to_name(err));
-        return;
     }
-    display_show_rgba_frame(rgba);
 }
 
 esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
@@ -235,6 +238,7 @@ esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
     err = gc9306_fill_rect(0, 0, 239, 319, 0x000000);
     if (err == ESP_OK)
     {
+        s_panel_margin_clean = true;
         err = gc9306_draw_rgba16(rgba);
     }
     if (err != ESP_OK)
@@ -273,6 +277,8 @@ void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
     }
 
     esp_err_t err = gc9306_draw_mask_full(mask, foreground, background);
+    /* A caller-supplied raster can light any pixel on the panel. */
+    s_panel_margin_clean = false;
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "full raster failed: %s", esp_err_to_name(err));
@@ -349,7 +355,13 @@ void display_show_access_code(
     }
     esp_err_t err = gc9306_draw_mask_full(mask, 0xF5A623, 0x000000);
     free(mask);
-    if (err != ESP_OK)
+    if (err == ESP_OK)
+    {
+        /* The mask blacks the whole panel and keeps its glyphs inside the icon
+         * window (rows 40..208). */
+        s_panel_margin_clean = true;
+    }
+    else
     {
         ESP_LOGW(TAG, "access-code render failed: %s", esp_err_to_name(err));
     }
@@ -494,13 +506,6 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
         }
     }
     display_flush();
-}
-
-void display_show_rgba_frame(const uint8_t rgba[16 * 16 * 4])
-{
-    /* The matrix path rebuilds the whole 16x16 framebuffer for every frame,
-     * so it has no panel-wide fill to skip. */
-    display_show_rgba(rgba);
 }
 
 #define VOLUME_BAR_LOGICAL_X      2

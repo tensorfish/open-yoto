@@ -13,10 +13,18 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o /tmp/volume_overlay_rev05_test \
     volume_overlay_rev05_test.c
 
+cc -std=c11 -Wall -Wextra -Werror \
+    -I stubs \
+    -o /tmp/panel_clear_test \
+    panel_clear_test.c
+
 /tmp/volume_overlay_test
 echo "PASS: volume overlay geometry (rev04)"
 
 /tmp/volume_overlay_rev05_test
 echo "PASS: volume overlay geometry (rev05)"
+
+/tmp/panel_clear_test
+echo "PASS: panel clear elision (rev04)"
 
 echo "PASS: all host display tests"

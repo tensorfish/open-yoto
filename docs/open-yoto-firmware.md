@@ -37,8 +37,9 @@ flowchart TD
 4. The two knobs control **volume** (left) and **track skip** (right); pressing
    them **pauses**. Long-pressing the right knob or the power button turns the
    device **off/on**. Turning the right knob with no card loaded winks the face;
-   turning the left knob shows a volume bar redrawn at most once per 100 ms
-   with the newest level.
+   turning the left knob shows a volume bar redrawn at most once per 100 ms with
+   the newest level. Turning both composes: the bar is re-applied over each wink
+   frame instead of the two screens taking turns.
 5. On boot, starts the open `openyoto` hotspot and web UI. A random
    six-character alphanumeric code is shown as two rows of three glyphs. Rev
    #04 renders a native 5×7 font at 9× scale inside the panel's verified
@@ -115,6 +116,12 @@ The knobs/buttons are handled as events (not polled in the loop):
 
 Simultaneous or rapid presses are debounced so a double press can't
 double-toggle power or cancel a play/pause.
+
+The display carries one **base screen** (idle face, card art, admin code, or a
+low-battery warning) plus **transients** that expire back onto it: the wink
+(300 ms), the volume bar (1.5 s after the last detent), and the battery glimpse
+(5 s). Transients compose rather than pre-empt each other — every icon frame
+re-applies a live volume bar — and each expiry repaints the base underneath.
 
 ## Card → playback flow
 
@@ -285,11 +292,12 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   `battery-charging.png` while charging, `battery-empty.png` when low or when
   the reading is unavailable, otherwise the SOC floored to the nearest ten
   (`battery-10.png`…`battery-100.png`).
-- Battery info never fights the face. Charging is a status glimpse: it is shown
-  at boot and on power-on for 5 s, and the 30 s re-check refreshes the icon only
-  while it still owns the display. A right-knob twist with no card loaded winks
-  and then rests on the face, taking the display back from the charging icon.
-  Only a **low** battery re-asserts itself over whatever is on screen.
+- Battery info never fights the face. Charging is announced as a glimpse on the
+  not-charging → charging **edge** (polled every 500 ms), at boot, and on
+  power-on; it covers the base screen for 5 s and then hands it back. The 30 s
+  re-check only logs while charging. A right-knob twist with no card loaded winks
+  and rests on the face, taking the display back from the charging icon. Only a
+  **low** battery re-asserts itself over whatever is on screen.
 - `IOX_CHG_STAT` is the active-low charging signal even when the SGM41513 I²C
   device does not ACK.
 - "Off" is software standby: audio and the admin server stop and the display

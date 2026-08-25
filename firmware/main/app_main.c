@@ -291,7 +291,9 @@ typedef enum {
     DISPLAY_BASE_BATTERY,
 } display_base_t;
 
-#define POWERED_BATTERY_VISUAL_MS 5000
+/* A battery glimpse is transient: it covers the base screen for this long and
+ * then hands the panel back. */
+#define BATTERY_GLIMPSE_MS        5000
 /* The panel is refreshed once per coalesce window with the newest volume, never
  * once per detent. One window is one main-loop pass, so a fast turn still costs
  * at most one bar draw per pass. */
@@ -311,6 +313,8 @@ static uint32_t s_idle_wink_deadline;
 static uint32_t s_volume_draw_due;
 static bool s_volume_dirty;
 static uint8_t s_wink_frame_index;
+/* Last sampled charger state; the not-charging -> charging edge is news. */
+static bool s_charging_latched;
 
 /* Serialize access to playback/track state across the two tasks. */
 static void state_lock(void)
@@ -329,16 +333,42 @@ static bool display_deadline_reached(uint32_t now, uint32_t deadline)
     return deadline != 0 && (int32_t)(now - deadline) >= 0;
 }
 
+/*
+ * Drop a pending coalesced volume draw along with the overlay itself. Every
+ * screen that replaces the overlay must go through this: a draw that fires
+ * after the overlay deadline was cleared would paint a bar that nothing
+ * erases.
+ */
+static void display_cancel_volume_locked(void)
+{
+    s_volume_overlay_deadline = 0;
+    s_volume_draw_due = 0;
+    s_volume_dirty = false;
+}
+
+/*
+ * Re-apply the volume bar on top of a frame that was just painted. Every icon
+ * frame rewrites the bar's rows, so a wink, a face or a battery icon erases the
+ * bar; without this the two knobs fight over the panel instead of composing.
+ */
+static void display_apply_volume_overlay_locked(void)
+{
+    if (s_volume_overlay_deadline == 0)
+    {
+        return;
+    }
+    s_volume_dirty = false;
+    display_draw_volume_overlay(s_volume);
+}
+
 static void display_set_idle_locked(void)
 {
     s_display_base = DISPLAY_BASE_IDLE;
     s_display_image_path[0] = '\0';
     s_battery_visual_deadline = 0;
     s_idle_wink_deadline = 0;
-    if (s_volume_overlay_deadline == 0)
-    {
-        display_show_rgba(IDLE_FACE_RGBA);
-    }
+    display_show_rgba(IDLE_FACE_RGBA);
+    display_apply_volume_overlay_locked();
 }
 
 /*
@@ -384,19 +414,31 @@ static void display_render_battery_locked(void)
         icon = battery_icon_for(battery_soc());
     }
     display_show_rgba(icon);
+    display_apply_volume_overlay_locked();
     s_display_base = DISPLAY_BASE_BATTERY;
 }
 
-static void display_show_powered_battery_locked(void)
+/*
+ * Show the battery icon as a transient glimpse: the base screen underneath is
+ * left intact, and display_maintain_locked() restores it when the deadline
+ * expires. A depleted battery is not a glimpse — it becomes the base screen and
+ * stays until the battery recovers.
+ */
+static void display_show_battery_glimpse_locked(void)
 {
-    display_render_battery_locked();
-    /* Charging is an initial status, not a persistent base screen. A
-     * sufficiently charged device always returns to its idle face. */
-    if (!battery_is_low())
+    if (battery_is_low())
     {
-        s_battery_visual_deadline =
-            xTaskGetTickCount() + pdMS_TO_TICKS(POWERED_BATTERY_VISUAL_MS);
+        display_render_battery_locked();
+        return;
     }
+    /* The glimpse replaces a wink rather than racing its deadline, but a volume
+     * bar still composes on top. */
+    s_idle_wink_deadline = 0;
+    display_show_rgba(battery_is_charging() ? BATTERY_ICON_CHARGING
+                                           : battery_icon_for(battery_soc()));
+    display_apply_volume_overlay_locked();
+    s_battery_visual_deadline =
+        xTaskGetTickCount() + pdMS_TO_TICKS(BATTERY_GLIMPSE_MS);
 }
 
 static void display_play_boot_animation_locked(void)
@@ -414,7 +456,7 @@ static void display_play_boot_animation_locked(void)
         }
         else if (i < BOOT_FACE_FRAME_COUNT - 1)
         {
-            display_show_rgba_frame(BOOT_FACE_FRAMES[i]);
+            display_show_rgba(BOOT_FACE_FRAMES[i]);
         }
         else
         {
@@ -450,6 +492,7 @@ static void display_render_base_locked(void)
             if (s_display_image_path[0] != '\0'
                 && render_image(s_display_image_path) == ESP_OK)
             {
+                display_apply_volume_overlay_locked();
                 break;
             }
             display_set_idle_locked();
@@ -480,22 +523,8 @@ static esp_err_t display_show_card_image_locked(const char *path)
     return err;
 }
 
-/*
- * Drop a pending coalesced volume draw along with the overlay itself. Every
- * screen that replaces the overlay must go through this: a draw that fires
- * after the overlay deadline was cleared would paint a bar that nothing
- * erases.
- */
-static void display_cancel_volume_locked(void)
-{
-    s_volume_overlay_deadline = 0;
-    s_volume_draw_due = 0;
-    s_volume_dirty = false;
-}
-
 static void display_show_volume_locked(void)
 {
-    s_idle_wink_deadline = 0;
     /* Re-arming the draw deadline on every detent would starve the draw for
      * the whole time the user keeps turning; arm it only when no draw is
      * already pending. */
@@ -513,10 +542,10 @@ static void display_show_wink_locked(void)
 {
     /* A right-knob twist is direct user feedback, so it outranks the battery
      * screen. Card art, the admin access code and an explicitly cleared screen
-     * still win, as does an on-screen volume bar. */
-    if ((s_display_base != DISPLAY_BASE_IDLE
-         && s_display_base != DISPLAY_BASE_BATTERY)
-        || s_volume_overlay_deadline != 0)
+     * still win. A live volume bar does not block the wink: the two compose,
+     * with the bar re-applied over each wink frame. */
+    if (s_display_base != DISPLAY_BASE_IDLE
+        && s_display_base != DISPLAY_BASE_BATTERY)
     {
         return;
     }
@@ -526,6 +555,7 @@ static void display_show_wink_locked(void)
     s_display_image_path[0] = '\0';
     s_battery_visual_deadline = 0;
     display_show_rgba(WINK_FACE_FRAMES[s_wink_frame_index]);
+    display_apply_volume_overlay_locked();
     /* Alternate so consecutive right-knob turns cycle the two wink frames. */
     s_wink_frame_index = (uint8_t)(s_wink_frame_index ^ 1u);
     s_idle_wink_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(IDLE_WINK_MS);
@@ -534,35 +564,33 @@ static void display_show_wink_locked(void)
 static void display_maintain_locked(void)
 {
     uint32_t now = xTaskGetTickCount();
-    if (s_volume_dirty && display_deadline_reached(now, s_volume_draw_due))
-    {
-        s_volume_dirty = false;
-        display_draw_volume_overlay(s_volume);
-    }
 
-    if (display_deadline_reached(now, s_volume_overlay_deadline))
-    {
-        display_cancel_volume_locked();
-        display_render_base_locked();
-    }
-    if (s_volume_overlay_deadline != 0)
-    {
-        return;
-    }
+    /*
+     * Three transients can be live at once (wink, battery glimpse, volume bar).
+     * Each expiry repaints the frame it covered, and the leaf painters re-apply
+     * a still-live volume bar, so the panel is never left half-composed.
+     */
     if (display_deadline_reached(now, s_idle_wink_deadline))
     {
         s_idle_wink_deadline = 0;
         display_render_base_locked();
     }
-    if (s_idle_wink_deadline != 0)
-    {
-        return;
-    }
-    if (display_deadline_reached(now, s_battery_visual_deadline)
-        && s_display_base == DISPLAY_BASE_BATTERY)
+    if (display_deadline_reached(now, s_battery_visual_deadline))
     {
         s_battery_visual_deadline = 0;
-        display_set_idle_locked();
+        display_render_base_locked();
+    }
+    if (display_deadline_reached(now, s_volume_overlay_deadline))
+    {
+        /* Only the bar goes away here, so repaint what it covered and stop. */
+        display_cancel_volume_locked();
+        display_render_base_locked();
+        return;
+    }
+    if (s_volume_dirty && display_deadline_reached(now, s_volume_draw_due))
+    {
+        s_volume_dirty = false;
+        display_draw_volume_overlay(s_volume);
     }
     /* The original provides named wink resources, but retained artifacts do
      * not prove an autonomous blink timer. Winks are event-driven only. */
@@ -620,7 +648,11 @@ static void power_toggle(void)
     }
     else
     {
-        display_show_powered_battery_locked();
+        /* Powering on resamples the charger, so a cable plugged in while the
+         * player was off shows its glimpse here instead of firing a stale edge
+         * half a second later. */
+        s_charging_latched = battery_is_charging();
+        display_show_battery_glimpse_locked();
         ESP_LOGI(TAG, "powered on");
     }
     state_unlock();
@@ -1051,21 +1083,54 @@ static void battery_periodic_check(void)
     }
     else if (battery_is_charging())
     {
+        /* Charging is announced by the charge-state edge, not by this period:
+         * re-asserting it here would steal the face or card art back. */
         ESP_LOGI(TAG, "charging (SOC %d%%)", battery_soc());
-        /* Charging is a status glimpse, not a base screen: refresh the icon
-         * only while it already owns the display, so a wink, card art or the
-         * idle face keeps it. */
-        if (s_display_base == DISPLAY_BASE_BATTERY
-            && s_volume_overlay_deadline == 0
-            && s_idle_wink_deadline == 0)
-        {
-            display_render_battery_locked();
-        }
     }
     else if (s_display_base == DISPLAY_BASE_BATTERY
              && s_battery_visual_deadline == 0)
     {
         display_set_idle_locked();
+    }
+    state_unlock();
+}
+
+/* Charge state is edge-polled on this period so a plug-in shows its glimpse
+ * promptly instead of waiting for the 30 s battery period. */
+#define CHARGE_EDGE_POLL_MS 500
+static uint32_t s_charge_poll_ticks;
+
+/*
+ * Announce the not-charging -> charging edge with a battery glimpse. Unplugging
+ * needs no announcement: the glimpse already expires back to the base screen.
+ */
+static void charge_edge_check(void)
+{
+    uint32_t now = xTaskGetTickCount();
+    bool charging;
+
+    if (s_charge_poll_ticks != 0
+        && (int32_t)(now - s_charge_poll_ticks) < pdMS_TO_TICKS(CHARGE_EDGE_POLL_MS))
+    {
+        return;
+    }
+    s_charge_poll_ticks = now;
+    charging = battery_is_charging();
+    if (charging == s_charging_latched)
+    {
+        return;
+    }
+    s_charging_latched = charging;
+    if (!charging)
+    {
+        return;
+    }
+    ESP_LOGI(TAG, "charger connected (SOC %d%%)", battery_soc());
+    state_lock();
+    /* The admin access code must stay readable; every other screen yields. */
+    if (s_display_base != DISPLAY_BASE_ADMIN)
+    {
+        display_show_battery_glimpse_locked();
     }
     state_unlock();
 }
@@ -1170,12 +1235,13 @@ void app_main(void)
     /* Play the boot face animation and settle on the idle face. */
     state_lock();
     display_play_boot_animation_locked();
-    /* Show the battery icon straight after the animation when it carries news:
-     * a charging status clears itself after POWERED_BATTERY_VISUAL_MS, while a
-     * depleted battery stays up. The periodic check only runs 30 s later. */
-    if (battery_is_low() || battery_is_charging())
+    /* Show the battery icon straight after the animation when it carries news.
+     * Boot doubles as the first charge-state sample, so a device that boots
+     * plugged in glimpses once here and not again on the first poll. */
+    s_charging_latched = battery_is_charging();
+    if (battery_is_low() || s_charging_latched)
     {
-        display_show_powered_battery_locked();
+        display_show_battery_glimpse_locked();
     }
     state_unlock();
 
@@ -1349,6 +1415,9 @@ void app_main(void)
         {
             battery_periodic_check();
         }
+        /* Edge-polled separately: the latch must track the charger even while
+         * the admin code owns the display. */
+        charge_edge_check();
 
         state_lock();
         display_maintain_locked();

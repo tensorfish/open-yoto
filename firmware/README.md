@@ -165,6 +165,10 @@ firmware/
   remain readable through a 3× compatibility path. Both compensate the
   physical horizontal mirror and correct the observed R/B RGB666 swap at the
   panel boundary.
+  An icon frame covers that window completely, so the 230 KB full-panel fill is
+  issued only when an earlier 1-bit bitmap flush or 240×320 raster could have
+  lit pixels outside it; consecutive icon frames cost the window alone, which is
+  what keeps animations and knob feedback free of black flashes.
 - **Boot faces, winks, and battery icons**: `icons/face-01.png`…`face-08.png`
   play at 16 fps and rest on `face-08`, the idle face; turning the right knob
   with no card loaded winks between `icons/face-wink-01.png` and
