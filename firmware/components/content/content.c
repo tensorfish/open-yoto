@@ -130,6 +130,7 @@ static esp_err_t content_save(void)
     size_t len;
     size_t written;
     int rc;
+    bool backed_up = false;
 
     if (s_root == NULL)
     {
@@ -145,6 +146,7 @@ static esp_err_t content_save(void)
     f = fopen(CONTENT_MAP_PATH ".tmp", "w");
     if (f == NULL)
     {
+        ESP_LOGE(TAG, "open mapping temp failed: %s", strerror(errno));
         cJSON_free(json);
         return ESP_FAIL;
     }
@@ -156,13 +158,42 @@ static esp_err_t content_save(void)
 
     if (written != len || rc != 0)
     {
+        ESP_LOGE(TAG, "write mapping temp failed: %u/%u close=%d errno=%s",
+                 (unsigned)written, (unsigned)len, rc, strerror(errno));
         unlink(CONTENT_MAP_PATH ".tmp");
         return ESP_FAIL;
     }
-    if (rename(CONTENT_MAP_PATH ".tmp", CONTENT_MAP_PATH) != 0)
+
+    /*
+     * FatFS may not overwrite an existing destination during rename(). Move
+     * the old index aside, install the new one, and restore the old file on
+     * failure. This makes delete/wipe/add persistence transactional.
+     */
+    unlink(CONTENT_MAP_PATH ".bak");
+    if (rename(CONTENT_MAP_PATH, CONTENT_MAP_PATH ".bak") == 0)
     {
+        backed_up = true;
+    }
+    else if (errno != ENOENT)
+    {
+        ESP_LOGE(TAG, "backup mapping failed: %s", strerror(errno));
         unlink(CONTENT_MAP_PATH ".tmp");
         return ESP_FAIL;
+    }
+
+    if (rename(CONTENT_MAP_PATH ".tmp", CONTENT_MAP_PATH) != 0)
+    {
+        ESP_LOGE(TAG, "install mapping failed: %s", strerror(errno));
+        unlink(CONTENT_MAP_PATH ".tmp");
+        if (backed_up && rename(CONTENT_MAP_PATH ".bak", CONTENT_MAP_PATH) != 0)
+        {
+            ESP_LOGE(TAG, "restore mapping backup failed: %s", strerror(errno));
+        }
+        return ESP_FAIL;
+    }
+    if (backed_up && unlink(CONTENT_MAP_PATH ".bak") != 0)
+    {
+        ESP_LOGW(TAG, "remove mapping backup failed: %s", strerror(errno));
     }
     return ESP_OK;
 }

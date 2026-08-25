@@ -1653,7 +1653,7 @@ static esp_err_t admin_list_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
-    err = httpd_resp_sendstr(req, json);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     cJSON_free(json);
     return err;
 }
