@@ -93,8 +93,8 @@ The loop keeps physical controls active while the web server runs:
 A card is "new" on a rising edge or when its UID changes (a swap within one
 poll window):
 
-- **Magic URL** (`https://openyoto.local/admin`) → explicitly toggle the
-  otherwise boot-enabled admin server.
+- **Magic URL** (`https://openyoto.com/admin`) → explicitly toggle the
+  on-demand admin server.
 - **Admin active** → capture UID and URL for `/api/last-card`; do not resolve a
   mapping, change the screen, or start card playback. Blank cards are captured
   by UID with an empty URL.
@@ -104,18 +104,19 @@ poll window):
 Removing the card stops playback; a swap (or rapid remove/re-insert) is
 detected by UID change, not just presence.
 
-The knobs/buttons are handled as events (not polled in the loop):
+The knobs/buttons are handled as events (not polled in the main loop):
 
 | Input | Action |
 |-------|--------|
 | Left knob turn | volume (5 per click, 0–100); bar redraw coalesced to 100 ms, plus one 45 ms 880 Hz blip per detent when nothing is playing |
 | Right knob turn | skip track (wraps around); with no card, winks the face |
 | Either knob press (short) | play / pause |
-| Right knob press (long, ~0.8 s) | power off/on |
-| Power button | power off/on |
+| Power button hold (3 s) | disconnect downstream peripheral rails and enter low-power mode; a second 3 s hold restores rails and restarts the ESP32 |
 
-Simultaneous or rapid presses are debounced so a double press can't
-double-toggle power or cancel a play/pause.
+The dedicated power button remains readable through the IO expander while the
+downstream rails are disconnected. The main player loop yields in its
+low-activity off state; restoring power performs a clean restart so the
+display, audio, SD, and NFC peripherals cold-initialize.
 
 The display carries one **base screen** (idle face, card art, admin code, or a
 low-battery warning) plus **transients** that expire back onto it: the wink

@@ -64,6 +64,14 @@ Output binaries (flash offsets):
 
 Flash size is 8 MB (`ESP32-WROVER-E` module).
 
+### USB-C limitation
+
+The player’s USB-C connector supplies power through the HUSB238 PD sink; it
+does **not** expose the ESP32 boot UART or a USB-to-UART bridge. The original
+ESP32 has no native USB peripheral, so a USB-C cable connected only to the
+player cannot flash firmware. Use the external USB-UART adapter wired to
+UART0, BOOT/GPIO0, and RESET/EN as described below.
+
 ### Linux UART flash automation
 
 The Yoto wiring does not use Espressif's conventional automatic-reset circuit:

@@ -1,80 +1,54 @@
 ---
-icon: lucide/radio
+icon: lucide/cog
 ---
 
-# open-yoto — Reverse Engineering
+# open-yoto Firmware
 
-This project has three parts:
+A from-scratch, offline firmware for the Yoto Player's ESP32. It plays local
+SD-card media from NFC cards and exposes an authenticated administration UI on
+demand. No cloud account or Yoto service is required.
 
-1. **[open-yoto firmware](open-yoto-firmware.md)** — a from-scratch, open-source
-   firmware for the Yoto Player. It reads NFC cards, plays audio + pictures,
-   and boots an offline `openyoto` hotspot with authenticated remote control
-   and SD file management. No cloud connection is required.
-2. **Reverse engineering** (this section) — a map of the *original* stock
-   firmware in `yoto-firmware.bin` (the 8 MiB flash dump), documented below.
-3. **[Research](ai/index.md)** — dense, evidence-backed detail (exact strings,
-   function addresses, pin maps) for AI agents and tooling.
+## Start here
 
-## Summary
+- [Installation & setup](firmware/setup.md) — hardware, toolchain, first boot,
+  and media setup outline.
+- [Build & flash](build-setup.md) — verified ESP-IDF and UART flashing workflow.
+- [How it works](open-yoto-firmware.md) — runtime architecture and behavior.
+- [Hardware & ports](hardware.md) — board revisions and recovered pin maps.
 
-| Attribute | Value |
-|-----------|-------|
-| **File** | `yoto-firmware.bin` — 8 MiB raw flash dump |
-| **SoC** | Espressif **ESP32** (Xtensa LX6, dual-core, 240 MHz) |
-| **Framework** | **ESP-IDF** + **ESP-ADF** (audio development framework) |
-| **Chip ID** | `0x0000` (image header magic `0xE9`) |
-| **App entry** | `0x400813a8` (IRAM) |
-| **App image** | factory partition @ flash `0x40000`, 2.45 MB, 7 segments |
+## Firmware architecture
 
-## Partition table
+`firmware/main/app_main.c` owns the player state machine. It initializes the
+I/O expanders, battery monitor, display, audio path, NFC reader, encoders, SD
+content store, and embedded system assets. It starts normal card playback only
+outside admin mode.
 
-| Label | Type | Offset | Size |
-|-------|------|--------|------|
-| `nvs` | data / nvs | `0x009000` | 192 KB |
-| `otadata` | data / ota | `0x039000` | 8 KB |
-| `phy_init` | data / phy | `0x03b000` | 4 KB |
-| **`factory`** | app | **`0x040000`** | 2.5 MB |
-| `ota_0` | app / ota_0 | `0x2c0000` | 2.5 MB *(empty)* |
-| `ota_1` | app / ota_1 | `0x540000` | 2.5 MB *(empty)* |
+| Area | Source | Responsibility |
+|------|--------|----------------|
+| Player state | `firmware/main/app_main.c` | Boot recovery, NFC card lifecycle, playback, physical controls, display state |
+| Content | `firmware/components/content/` | SD mount, `library.json`, media paths, card mappings |
+| Audio | `firmware/components/audio/`, `codec_es8156/`, `aw88194/` | MP3/AAC/M4A decode, I²S output, headphone/speaker routing |
+| Physical I/O | `board/`, `iox/`, `encoder/`, `battery/`, `display/` | Revision pins, expanders, controls, power, and panel output |
+| NFC | `firmware/components/cr95hf/` | Read/write NFC Type 2 card URLs |
+| Admin mode | `firmware/components/admin/` | `openyoto` SoftAP, authenticated HTTP API, SD-hosted web UI |
+| System assets | `firmware/components/yoto_vfs/` | Read-only boot and welcome assets |
 
-The device boots the `factory` image; both OTA slots are erased (`0xFF`).
+## Runtime model
 
-## Memory map (app image)
+1. Boot initializes the board and mounts the SD card.
+2. In normal mode, an NFC URL resolves through `library.json` and starts the
+   mapped media.
+3. The admin magic URL (`https://openyoto.com/admin`) toggles the `openyoto`
+   hotspot and shows the six-character access code.
+4. While admin mode is active, card scans are captured for the web UI rather
+   than starting playback.
 
-| Segment | Load address | Size | Region |
-|---------|--------------|------|--------|
-| DROM | `0x3F400020` | 680 KB | flash-mapped read-only data |
-| RTC_DRAM | `0x3FF80063` | 8 B | RTC fast data |
-| DRAM | `0x3FFBDB60` | 30 KB | internal data RAM |
-| IRAM | `0x40080000` | 9 KB | instruction RAM (entry) |
-| IROM | `0x400D0020` | 1.63 MB | flash-mapped code |
-| IRAM | `0x40082470` | 98 KB | instruction RAM |
-| RTC_IRAM | `0x400C0000` | 100 B | RTC fast instructions |
+## Documentation map
 
-## Peripheral inventory
-
-| Function | Chip / driver | Interface |
-|----------|---------------|-----------|
-| NFC / RFID card reader | **ST CR95HF** | UART or SPI |
-| SD card | **SDMMC** (1/4-bit) + **FatFS** | `d0..d3`, `clk`, `cmd` |
-| Display | **HT16D35x** LED matrix / **GC9306** TFT | SPI (via IO expander CS) |
-| Audio codec | **ES8388** / **aw881xx + ES8156** | I2S + I2C |
-| Battery fuel gauge | **CW2215B** / CW2015 / ADC | I2C + ADC |
-| Charger | **SGM41513** / SGM41511 / ETA6003 | I2C |
-| USB-C PD sink | **HUSB238** | I2C |
-| Qi wireless RX | **CV8013N** / CV8085 | I2C |
-| Accelerometer | **LIS2DH12** | I2C |
-| RTC | **IT8563** | I2C |
-| Night light | **AW2028H** / direct GPIO | I2C / GPIO |
-| IO expander | **PI4IOE5V6416** (×1 or ×2) | I2C |
-| Light sensor | ADC (GPIO 36) | ADC1 CH0 |
-| Temperature sensor | ADC (GPIO 39) | ADC1 CH3 |
-
-## How to read this documentation
-
-- **[Hardware & Ports](hardware.md)** — the complete GPIO/ADC/IO-expander pin
-  map across six hardware revisions.
-- **Subsystem pages** — one per peripheral, describing the driver, protocol,
-  and how the firmware uses it.
-- **[Methodology](methodology.md)** — the tooling and extraction pipeline used
-  to produce these findings.
+- **[Installation & setup](firmware/setup.md)** — practical getting-started
+  guide outline.
+- **[Firmware behavior](open-yoto-firmware.md)** — boot, playback, controls,
+  card mappings, and admin API.
+- **[Reverse engineering](reverse-engineering.md)** — stock image layout and
+  recovered hardware evidence.
+- **[Research](ai/index.md)** — source-oriented subsystem reference.

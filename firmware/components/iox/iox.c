@@ -124,6 +124,34 @@ esp_err_t iox_init(void)
     return ESP_OK;
 }
 
+esp_err_t iox_set_peripherals_powered(bool powered)
+{
+    esp_err_t err;
+
+    if (!powered)
+    {
+        err = iox_set_pin(IOX_POWER_LEVELCONVERTOR, false);
+        if (err != ESP_OK) return err;
+        err = iox_set_pin(IOX_POWER_PWREN, true);
+        if (err != ESP_OK) return err;
+#ifndef CONFIG_BOARD_REV_04
+        err = iox_set_pin(IOX_POWER_VOUTEN, false);
+        if (err != ESP_OK) return err;
+#endif
+        return ESP_OK;
+    }
+
+    err = iox_set_pin(IOX_POWER_VINHOLD, true);
+    if (err != ESP_OK) return err;
+#ifndef CONFIG_BOARD_REV_04
+    err = iox_set_pin(IOX_POWER_VOUTEN, true);
+    if (err != ESP_OK) return err;
+#endif
+    err = iox_set_pin(IOX_POWER_PWREN, false);
+    if (err != ESP_OK) return err;
+    return iox_set_pin(IOX_POWER_LEVELCONVERTOR, true);
+}
+
 esp_err_t iox_set_pin(uint8_t pin, bool level)
 {
     uint8_t exp = IOX_EXP(pin);

@@ -49,9 +49,9 @@ static const char *TAG = "encoder";
 #define ENCODER_BTN_DEBOUNCE_MS      30
 #define ENCODER_BTN_SAMPLES          (ENCODER_BTN_DEBOUNCE_MS / ENCODER_BTN_POLL_MS)
 
-/* A button held this long is classified as a long press. */
+/* Knobs classify an 800 ms hold; power requires a deliberate three seconds. */
 #define ENCODER_LONG_PRESS_MS        800
-#define ENCODER_LONG_PRESS_TICKS     (ENCODER_LONG_PRESS_MS / ENCODER_BTN_POLL_MS)
+#define ENCODER_POWER_HOLD_MS        3000
 
 /* Queue depth carrying encoder events from the ISR to the task. */
 #define ENCODER_QUEUE_DEPTH          16
@@ -78,10 +78,10 @@ typedef struct
 /* Button debounce + long-press state. */
 typedef struct
 {
-    bool     pressed;     /* debounced pressed state                        */
-    uint8_t  count;       /* hysteresis counter toward/away from pressed    */
-    uint32_t held_ticks;  /* poll ticks held since the press was accepted   */
-    bool     long_fired;  /* the long-press event was already delivered     */
+    bool     pressed;      /* debounced pressed state                       */
+    uint8_t  count;        /* hysteresis counter toward/away from pressed   */
+    TickType_t pressed_at; /* tick when the press was accepted              */
+    bool     long_fired;   /* the long-press event was already delivered    */
 } encoder_button_t;
 
 static QueueHandle_t s_encoder_queue;
@@ -167,15 +167,17 @@ static void encoder_poll_buttons(void)
                 if (btn->count == ENCODER_BTN_SAMPLES && !btn->pressed)
                 {
                     btn->pressed = true;
-                    btn->held_ticks = 0;
+                    btn->pressed_at = xTaskGetTickCount();
                     btn->long_fired = false;
                 }
             }
             else
             {
-                btn->held_ticks++;
+                TickType_t threshold = pdMS_TO_TICKS(
+                    id == ENCODER_ID_POWER ? ENCODER_POWER_HOLD_MS
+                                           : ENCODER_LONG_PRESS_MS);
                 if (!btn->long_fired &&
-                    btn->held_ticks >= ENCODER_LONG_PRESS_TICKS)
+                    (TickType_t)(xTaskGetTickCount() - btn->pressed_at) >= threshold)
                 {
                     btn->long_fired = true;
                     if (s_callback != NULL)
@@ -373,8 +375,10 @@ esp_err_t encoder_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "2 encoders + 3 buttons ready (4X, %d counts/detent, %d ms long-press)",
-             ENCODER_COUNTS_PER_DETENT, ENCODER_LONG_PRESS_MS);
+    ESP_LOGI(TAG, "2 encoders + 3 buttons ready (4X, %d counts/detent, "
+             "%d ms knob hold, %d ms power hold)",
+             ENCODER_COUNTS_PER_DETENT, ENCODER_LONG_PRESS_MS,
+             ENCODER_POWER_HOLD_MS);
     return ESP_OK;
 }
 

@@ -19,6 +19,12 @@ esp_err_t iox_init(void);
 /** Set a single expander pin (use IOX_PIN(...) from board_pins.h). */
 esp_err_t iox_set_pin(uint8_t pin, bool level);
 
+/**
+ * Disconnect or restore the board's downstream peripheral rails while keeping
+ * the IO expander and power button available to the ESP32.
+ */
+esp_err_t iox_set_peripherals_powered(bool powered);
+
 /** Read a single expander pin (use IOX_PIN(...) from board_pins.h). */
 bool iox_get_pin(uint8_t pin);
 

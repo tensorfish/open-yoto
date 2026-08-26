@@ -671,9 +671,17 @@ static void play_pause_toggle(void)
     state_unlock();
 }
 
-/* Toggle power: "off" stops audio, ends admin mode, and blanks the display. */
+/*
+ * A deliberate power-button hold disconnects downstream rails and leaves the
+ * ESP32 in its low-activity idle state. Waking restores the rails then
+ * restarts, which is the only safe way to cold-initialize the codec, NFC
+ * reader, SD bus, and display.
+ */
 static void power_toggle(void)
 {
+    bool restart = false;
+    esp_err_t err;
+
     state_lock();
     s_powered_off = !s_powered_off;
     if (s_powered_off)
@@ -691,24 +699,35 @@ static void power_toggle(void)
         display_cancel_volume_locked();
         s_idle_wink_deadline = 0;
         display_render_base_locked();
-        ESP_LOGI(TAG, "powered off");
+        err = iox_set_peripherals_powered(false);
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "could not disconnect peripheral rails: %s",
+                     esp_err_to_name(err));
+        }
+        ESP_LOGI(TAG, "powered off; peripheral rails disconnected");
     }
     else
     {
-        /* The battery glimpse deliberately leaves the base screen alone, so
-         * powering on must restore the idle face as the base itself: otherwise
-         * the glimpse expires back onto DISPLAY_BASE_OFF (blank panel) and the
-         * wink stays suppressed because its guard rejects that base.
-         *
-         * Powering on also resamples the charger, so a cable plugged in while
-         * the player was off shows its glimpse here instead of firing a stale
-         * edge half a second later. */
-        display_set_idle_base_locked();
-        s_charging_latched = battery_is_charging();
-        display_show_battery_glimpse_locked();
-        ESP_LOGI(TAG, "powered on");
+        err = iox_set_peripherals_powered(true);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "could not restore peripheral rails: %s",
+                     esp_err_to_name(err));
+        }
+        else
+        {
+            restart = true;
+            ESP_LOGI(TAG, "peripheral rails restored; restarting");
+        }
     }
     state_unlock();
+
+    if (restart)
+    {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        esp_restart();
+    }
 }
 
 
@@ -824,15 +843,13 @@ static bool gesture_debounced(uint32_t *last, uint32_t window_ms)
 }
 
 /*
- * Encoder callback: encoder 0 = volume, encoder 1 = track skip; both knobs
- * short-press = play/pause; encoder 1 long-press and the power button = power.
+ * Encoder callback: knob short presses toggle play/pause. Only a three-second
+ * hold of the dedicated power button changes the board power state.
  */
 static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
 {
     bool power_gesture =
-        (event == ENCODER_EVT_LONG_PRESS &&
-         (encoder_id == ENCODER_ID_1 || encoder_id == ENCODER_ID_POWER)) ||
-        (event == ENCODER_EVT_SHORT_PRESS && encoder_id == ENCODER_ID_POWER);
+        event == ENCODER_EVT_LONG_PRESS && encoder_id == ENCODER_ID_POWER;
 
     /* While "off", ignore everything except the power-toggle gestures. */
     if (s_powered_off && !power_gesture)
@@ -902,31 +919,18 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
                 play_pause_toggle();
             }
         }
-        else if (encoder_id == ENCODER_ID_POWER)
-        {
-            if (!gesture_debounced(&s_last_power_ticks, POWER_DEBOUNCE_MS))
-            {
-                /* Powering off stops the admin HTTP server and tears down the
-                 * AP netif, and powering on can re-render card art: both are far
-                 * too stack-hungry for this task. */
-                state_lock();
-                s_pending_power = true;
-                gesture_signal();
-                state_unlock();
-            }
-        }
     }
-    else if (event == ENCODER_EVT_LONG_PRESS)
+    else if (event == ENCODER_EVT_LONG_PRESS &&
+             encoder_id == ENCODER_ID_POWER)
     {
-        if (encoder_id == ENCODER_ID_1 || encoder_id == ENCODER_ID_POWER)
+        if (!gesture_debounced(&s_last_power_ticks, POWER_DEBOUNCE_MS))
         {
-            if (!gesture_debounced(&s_last_power_ticks, POWER_DEBOUNCE_MS))
-            {
-                state_lock();
-                s_pending_power = true;
-                gesture_signal();
-                state_unlock();
-            }
+            /* The power operation tears down Wi-Fi and cycles board rails, so
+             * run it outside the encoder task's small stack. */
+            state_lock();
+            s_pending_power = true;
+            gesture_signal();
+            state_unlock();
         }
     }
 }
@@ -1617,6 +1621,8 @@ void app_main(void)
 
         if (s_powered_off)
         {
+            /* Keep the I/O-expander button task alive while the main player
+             * loop yields; all downstream rails are already disconnected. */
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }

@@ -179,6 +179,7 @@ esp_err_t nvs_flash_erase(void)
     return ESP_OK;
 }
 
+static int s_restart_count;
 esp_reset_reason_t esp_reset_reason(void)
 {
     return ESP_RST_POWERON;
@@ -186,7 +187,7 @@ esp_reset_reason_t esp_reset_reason(void)
 
 void esp_restart(void)
 {
-    /* no-op: the host test never exercises the restart path */
+    s_restart_count++;
 }
 
 const char *esp_err_to_name(esp_err_t err)
@@ -280,6 +281,13 @@ esp_err_t audio_play_blip(int freq_hz, int duration_ms)
 
 esp_err_t iox_init(void)
 {
+    return ESP_OK;
+}
+
+static bool s_iox_peripherals_powered;
+esp_err_t iox_set_peripherals_powered(bool powered)
+{
+    s_iox_peripherals_powered = powered;
     return ESP_OK;
 }
 
@@ -585,6 +593,8 @@ static void reset_state(void)
     s_pending_power = false;
     s_content_lookups = 0;
     s_admin_active = false;
+    s_restart_count = 0;
+    s_iox_peripherals_powered = true;
 
     s_state_mutex = xSemaphoreCreateMutex();
 
@@ -921,48 +931,26 @@ int main(void)
 
     /* ------------------------------------------- 9. POWER OFF / ON -------- */
     {
-        int mark;
+        int restart_mark;
 
         reset_state();
-        set_charging(false);
-        advance_ms(200);
-
-        /* Off blanks the panel and parks the base at OFF. */
         power_toggle();
-        CHECK(s_powered_off, "power: the first tap must switch off");
+        CHECK(s_powered_off, "power: the first hold must switch off");
         CHECK(s_display_base == DISPLAY_BASE_OFF,
               "power: off should park the base at OFF, got %d",
               (int)s_display_base);
         CHECK(s_clear_count > 0 && s_flush_count > 0,
               "power: off must blank the panel");
+        CHECK(!s_iox_peripherals_powered,
+              "power: off must disconnect downstream peripheral rails");
 
-        /* On must restore the idle face as the base, not leave it at OFF: the
-         * battery glimpse preserves whatever base it covers, so an OFF base
-         * would expire back to a blank panel and keep the wink suppressed. */
-        mark = s_frame_count;
+        restart_mark = s_restart_count;
         power_toggle();
-        CHECK(!s_powered_off, "power: the second tap must switch on");
-        CHECK(s_display_base == DISPLAY_BASE_IDLE,
-              "power: on must restore the IDLE base, got %d",
-              (int)s_display_base);
-        CHECK(s_frame_count > mark,
-              "power: on must paint something (battery glimpse)");
-
-        advance_ms(BATTERY_GLIMPSE_MS + 300);
-        CHECK(last_frame() == IDLE_FACE_RGBA,
-              "power: after the power-on glimpse expires the face must be on "
-              "the panel, not a blank screen");
-        CHECK(s_display_base == DISPLAY_BASE_IDLE,
-              "power: base should still be IDLE after the glimpse");
-
-        /* And the wink must work again after a power cycle. */
-        s_track_count = 0;
-        skip_track(1);
-        CHECK(last_frame() == WINK_FACE_FRAMES[0],
-              "power: a right-knob twist after power-on must wink");
-        advance_ms(IDLE_WINK_MS + 100);
-        CHECK(last_frame() == IDLE_FACE_RGBA,
-              "power: the wink must expire back to the face after power-on");
+        CHECK(!s_powered_off, "power: the second hold must switch on");
+        CHECK(s_iox_peripherals_powered,
+              "power: on must restore downstream peripheral rails");
+        CHECK(s_restart_count == restart_mark + 1,
+              "power: on must restart to cold-initialize every peripheral");
     }
 
     /* ------------------------------ 10. ENCODER DOES NO HEAVY WORK -------- */
@@ -998,15 +986,17 @@ int main(void)
               "encoder: the deferred skip must advance the track, got %d",
               s_track_index);
 
-        /* Power gestures are deferred for the same reason (admin teardown and
-         * card-art re-render both overflow the encoder task). */
+        /* Only the deliberate power-button hold is deferred; a tap is ignored. */
         s_last_power_ticks = 0;
         encoder_event(ENCODER_ID_POWER, 0, ENCODER_EVT_SHORT_PRESS);
+        CHECK(!s_pending_power && !s_powered_off,
+              "encoder: a power tap must not change power state");
+        encoder_event(ENCODER_ID_POWER, 0, ENCODER_EVT_LONG_PRESS);
         CHECK(s_pending_power && !s_powered_off,
-              "encoder: a power tap must be recorded, not executed inline");
+              "encoder: a power hold must be recorded, not executed inline");
         encoder_actions_pump();
         CHECK(s_powered_off,
-              "encoder: the pump must apply the deferred power toggle");
+              "encoder: the pump must apply the deferred power transition");
 
         /* A skip captured for one card must not be applied to a different card
          * that arrived in between: the turn belonged to the old story. */

@@ -12,14 +12,14 @@ site_author = "open-yoto"
 
 nav = [
   { "open-yoto Firmware" = [
-      { "Overview" = "firmware/index.md" },
+      { "Overview" = "index.md" },
+      { "Installation & Setup" = "firmware/setup.md" },
       { "How It Works" = "open-yoto-firmware.md" },
       { "Build & Flash" = "build-setup.md" },
   ]},
   { "Reverse Engineering" = [
-      { "Overview" = "index.md" },
+      { "Overview" = "reverse-engineering.md" },
       { "Subsystems" = [
-          { "Overview" = "subsystems/index.md" },
           { "NFC / RFID (CR95HF)" = "subsystems/nfc.md" },
           { "SD Card & Storage" = "subsystems/storage.md" },
           { "Display" = "subsystems/display.md" },
