@@ -591,6 +591,8 @@ static void reset_state(void)
     s_battery_check_ticks = 0;
     s_pending_skip = 0;
     s_pending_power = false;
+    s_pending_screen_toggle = false;
+    s_power_resume_magic = 0;
     s_content_lookups = 0;
     s_admin_active = false;
     s_restart_count = 0;
@@ -949,6 +951,8 @@ int main(void)
         CHECK(!s_powered_off, "power: the second hold must switch on");
         CHECK(s_iox_peripherals_powered,
               "power: on must restore downstream peripheral rails");
+        CHECK(s_power_resume_magic == POWER_RESUME_MAGIC,
+              "power: on must mark the restart as a low-power resume");
         CHECK(s_restart_count == restart_mark + 1,
               "power: on must restart to cold-initialize every peripheral");
     }
@@ -986,11 +990,22 @@ int main(void)
               "encoder: the deferred skip must advance the track, got %d",
               s_track_index);
 
-        /* Only the deliberate power-button hold is deferred; a tap is ignored. */
+        /* A short power press changes only the screen and restores a battery
+         * status frame when pressed again. */
         s_last_power_ticks = 0;
         encoder_event(ENCODER_ID_POWER, 0, ENCODER_EVT_SHORT_PRESS);
-        CHECK(!s_pending_power && !s_powered_off,
-              "encoder: a power tap must not change power state");
+        CHECK(s_pending_screen_toggle && !s_powered_off,
+              "encoder: a power tap must queue a screen toggle");
+        encoder_actions_pump();
+        CHECK(s_display_base == DISPLAY_BASE_OFF && !s_powered_off,
+              "encoder: a power tap must blank only the screen");
+        encoder_event(ENCODER_ID_POWER, 0, ENCODER_EVT_SHORT_PRESS);
+        encoder_actions_pump();
+        CHECK(s_display_base == DISPLAY_BASE_IDLE,
+              "encoder: a second tap must restore the idle base");
+        CHECK(last_frame() == BATTERY_ICON_FRAMES[5],
+              "encoder: screen-on must show the current battery percentage");
+
         encoder_event(ENCODER_ID_POWER, 0, ENCODER_EVT_LONG_PRESS);
         CHECK(s_pending_power && !s_powered_off,
               "encoder: a power hold must be recorded, not executed inline");

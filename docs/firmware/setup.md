@@ -46,10 +46,11 @@ The exact commands and supported Linux UART workflow are in
 
 ## Power control
 
-Hold the dedicated power button for three seconds to switch off. This
+Press the dedicated power button to toggle only the screen; turning it back on
+shows the current battery icon. Hold it for three seconds to switch off. This
 disconnects downstream peripheral rails and leaves the player in its
-low-activity off state. Hold it for three seconds again to restore the rails
-and restart the player.
+low-activity off state. Hold it for three seconds again to restore the rails,
+restart the player, and show the battery icon.
 
 ## Prepare media
 

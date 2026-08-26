@@ -111,7 +111,8 @@ The knobs/buttons are handled as events (not polled in the main loop):
 | Left knob turn | volume (5 per click, 0–100); bar redraw coalesced to 100 ms, plus one 45 ms 880 Hz blip per detent when nothing is playing |
 | Right knob turn | skip track (wraps around); with no card, winks the face |
 | Either knob press (short) | play / pause |
-| Power button hold (3 s) | disconnect downstream peripheral rails and enter low-power mode; a second 3 s hold restores rails and restarts the ESP32 |
+| Power button press | toggle only the screen; screen-on shows the current battery icon |
+| Power button hold (3 s) | disconnect downstream peripheral rails and enter low-power mode; a second 3 s hold restores rails, restarts the ESP32, and shows the battery icon |
 
 The dedicated power button remains readable through the IO expander while the
 downstream rails are disconnected. The main player loop yields in its

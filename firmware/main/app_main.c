@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_random.h"
+#include "esp_attr.h"
 #include "board_pins.h"
 #include "iox.h"
 #include "battery.h"
@@ -280,6 +281,9 @@ static void show_admin_code(
 /* Playback/power state, guarded by s_state_mutex (shared by the encoder task
  * and the main loop). */
 static bool s_powered_off = false;
+/* Survives the restart used to exit low-power mode. */
+#define POWER_RESUME_MAGIC 0x4f595057u
+static RTC_DATA_ATTR uint32_t s_power_resume_magic;
 static char s_current_url[CR95HF_URL_MAX + 1];
 static int s_track_index = 0;
 static int s_track_count = 0;
@@ -328,6 +332,7 @@ static uint8_t s_wink_frame_index;
 /* Gestures the encoder task recorded for the gesture task to perform. */
 static int s_pending_skip;
 static bool s_pending_power;
+static bool s_pending_screen_toggle;
 /* The card a pending skip was captured for; a swap invalidates the turn. */
 static char s_pending_skip_url[CR95HF_URL_MAX + 1];
 /* Wakes the gesture task the moment a gesture is recorded. */
@@ -719,6 +724,7 @@ static void power_toggle(void)
         {
             restart = true;
             ESP_LOGI(TAG, "peripheral rails restored; restarting");
+            s_power_resume_magic = POWER_RESUME_MAGIC;
         }
     }
     state_unlock();
@@ -728,6 +734,28 @@ static void power_toggle(void)
         vTaskDelay(pdMS_TO_TICKS(20));
         esp_restart();
     }
+}
+
+/* Short power presses blank or restore only the panel; rails stay powered. */
+static void screen_toggle(void)
+{
+    state_lock();
+    if (s_display_base == DISPLAY_BASE_OFF)
+    {
+        display_set_idle_base_locked();
+        display_show_battery_glimpse_locked();
+        ESP_LOGI(TAG, "screen on; showing battery status");
+    }
+    else
+    {
+        s_display_base = DISPLAY_BASE_OFF;
+        s_battery_visual_deadline = 0;
+        display_cancel_volume_locked();
+        s_idle_wink_deadline = 0;
+        display_render_base_locked();
+        ESP_LOGI(TAG, "screen off");
+    }
+    state_unlock();
 }
 
 
@@ -919,6 +947,13 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
                 play_pause_toggle();
             }
         }
+        else if (encoder_id == ENCODER_ID_POWER)
+        {
+            state_lock();
+            s_pending_screen_toggle = true;
+            gesture_signal();
+            state_unlock();
+        }
     }
     else if (event == ENCODER_EVT_LONG_PRESS &&
              encoder_id == ENCODER_ID_POWER)
@@ -949,6 +984,7 @@ static void encoder_actions_pump(void)
 {
     int skip;
     bool power;
+    bool screen_toggle_pending;
     bool stale;
 
     state_lock();
@@ -956,6 +992,8 @@ static void encoder_actions_pump(void)
     s_pending_skip = 0;
     power = s_pending_power;
     s_pending_power = false;
+    screen_toggle_pending = s_pending_screen_toggle;
+    s_pending_screen_toggle = false;
     /* A skip belongs to the card that was loaded when the knob turned. The card
      * can be removed or swapped in between, and applying the turn to whatever
      * card arrived next would skip the wrong story. */
@@ -966,6 +1004,10 @@ static void encoder_actions_pump(void)
     if (power)
     {
         power_toggle();
+    }
+    if (screen_toggle_pending)
+    {
+        screen_toggle();
     }
     if (skip != 0 && !stale)
     {
@@ -1492,6 +1534,9 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
+    bool resumed_from_power_off =
+        s_power_resume_magic == POWER_RESUME_MAGIC;
+    s_power_resume_magic = 0;
     ESP_ERROR_CHECK(err);
     boot_recovery_prepare();
 
@@ -1520,11 +1565,10 @@ void app_main(void)
     /* Play the boot face animation and settle on the idle face. */
     state_lock();
     display_play_boot_animation_locked();
-    /* Show the battery icon straight after the animation when it carries news.
-     * Boot doubles as the first charge-state sample, so a device that boots
-     * plugged in glimpses once here and not again on the first poll. */
+    /* Show the battery icon after a low-power resume, or when boot state
+     * otherwise warrants it. */
     s_charging_latched = battery_is_charging();
-    if (battery_is_low() || s_charging_latched)
+    if (resumed_from_power_off || battery_is_low() || s_charging_latched)
     {
         display_show_battery_glimpse_locked();
     }
