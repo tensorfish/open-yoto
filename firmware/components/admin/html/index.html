@@ -23,6 +23,7 @@ button,.button{min-height:44px;border:1px solid transparent;border-radius:9px;ba
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.panel-head h2{margin-bottom:0}.progress-wrap{margin-top:12px}.progress-wrap progress{width:100%;height:10px;accent-color:var(--accent)}.progress-wrap .hint{margin:6px 0 0}
 .sd-nav{display:flex;gap:4px}.sd-nav .icon-button{width:30px;min-width:30px;min-height:30px!important;height:30px}
 .track-list{margin-bottom:12px}.track-choice{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:9px;padding:12px;margin-bottom:8px;background:#0d1118;cursor:pointer}.track-choice:has(input:checked){border-color:var(--accent);background:#1b2230}.track-choice input{flex:0 0 auto;width:18px;height:18px;min-height:0;margin:0;padding:0;border:0;background:transparent;accent-color:var(--accent)}.track-choice .track-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.track-controls{display:flex;align-items:center;margin:0 0 10px;padding:0 0 10px;border-bottom:1px solid var(--line)}.track-controls button{min-height:34px;padding:5px 10px;font-size:12px}.debug-grid{gap:10px}.debug-grid .card{margin:0;padding:14px}.debug-grid .card h2{margin-bottom:10px}.debug-grid .card>input{margin-bottom:8px}.debug-grid #cardReader{border-color:#f4a62a66}.debug-grid .actions{margin-top:4px}
 .mapping-mode{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.mapping-mode label{display:flex;align-items:center;gap:8px;min-height:44px;margin:0;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:#0d1118;color:var(--text);cursor:pointer}.mapping-mode label:has(input:checked){border-color:var(--accent);background:#1b2230}.mapping-mode input{width:18px;height:18px;min-height:0;margin:0;padding:0;accent-color:var(--accent)}.new-track{border:1px solid var(--line);border-radius:9px;padding:12px;margin-bottom:12px}.new-track .actions{margin-top:4px}
 .card-ready{border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin:0 0 12px;font-weight:600}.card-ready.missing{border-color:#ef5b6266;color:var(--danger);background:#ef5b6218}.card-ready.ready{border-color:var(--ok);color:var(--ok);background:#43c98518}.card-ready.warning{border-color:#f4a62a88;color:var(--accent);background:#f4a62a18}.card-ready.manual{color:var(--muted);background:#0d1118}
 .entry-head{display:flex;align-items:center;gap:8px;min-width:0}.entry-head .entry-name{flex:1}
@@ -71,7 +72,7 @@ button,.button{min-height:44px;border:1px solid transparent;border-radius:9px;ba
 </div>
 </section>
 <section data-panel="debug" hidden>
-<div class="grid">
+<div class="grid debug-grid">
 <div class="card" id="cardReader"><div class="panel-head"><h2>Card reader</h2><button class="secondary" id="refreshCard">Refresh</button></div><p class="hint" id="lastCard" role="status" aria-live="polite">Scan a card to read or write it.</p><label for="cardUrl">Card URL</label><input id="cardUrl" maxlength="200" placeholder="https://example.com/card" autocapitalize="off" spellcheck="false"><button id="writeCard" disabled>Write URL to card</button></div>
 <div class="card"><h2>Play sound</h2><label for="soundPath">Media path</label><input id="soundPath" placeholder="/sdcard/media/track.mp3"><div class="row wrap-actions"><button id="playSound">Play</button><button class="secondary" id="stopSound">Stop</button></div></div>
 <div class="card"><h2>Display image</h2><label for="imagePath">Player image path</label><input id="imagePath" placeholder="/sdcard/media/card.img"><div class="row wrap-actions"><button class="secondary" id="showImage">Display</button><button class="secondary" id="clearDisplay">Clear</button></div><hr class="separator"><label for="imageSource">Convert PNG/JPEG</label><input id="imageSource" type="file" accept="image/png,image/jpeg"><div class="image-converter"><canvas class="image-preview" id="imagePreview" width="16" height="16" hidden></canvas><p class="hint" id="imageConversionHint">Converted artwork fills the full player display.</p></div><button id="convertImage" disabled>Upload &amp; display</button></div>
@@ -112,7 +113,7 @@ async function browsePath(){try{const next=normalizeBrowserPath($('#cwd').value)
 function isSound(path){return /\.(mp3|m4a|aac)$/i.test(path)}function isImage(path){return /\.img$/i.test(path)}
 function action(text,fn,cls='secondary'){const b=document.createElement('button');b.textContent=text;b.className=cls;b.onclick=fn;return b}
 const ICONS={play:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>',pause:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>',edit:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4-1 11-11-3-3L5 16zM14 6l3 3"/></svg>',delete:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>',download:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 20h14"/></svg>',display:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="m7 15 3-3 2 2 3-4 2 5"/></svg>',select:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="m8 12 3 3 5-6"/></svg>',clear:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>'};
-Object.assign(ICONS,{up:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 11 6-6 6 6M12 5v14"/></svg>',go:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12m-5-5 5 5-5 5"/></svg>',refresh:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5M20 4v7h-7"/></svg>'});
+Object.assign(ICONS,{up:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 11 6-6 6 6M12 5v14"/></svg>',down:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 13 6 6 6-6M12 19V5"/></svg>',go:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12m-5-5 5 5-5 5"/></svg>',refresh:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5M20 4v7h-7"/></svg>'});
 function iconMarkup(icon){return ICONS[icon]||''}
 function iconAction(icon,label,fn,cls='secondary'){const b=action('',fn,cls);b.classList.add('icon-button');b.setAttribute('aria-label',label);b.title=label;b.innerHTML=iconMarkup(icon);return b}
 function iconLink(icon,label,href){const a=document.createElement('a');a.className='button secondary icon-button';a.setAttribute('aria-label',label);a.title=label;a.href=href;a.innerHTML=iconMarkup(icon);return a}
@@ -127,7 +128,7 @@ function drawDecoded(c,img){c.width=img.w;c.height=img.h;const ctx=c.getContext(
 async function renderThumb(c,absPath){c.dataset.path=absPath||'';if(!absPath){placeholderThumb(c);return}let img=thumbCache.get(absPath);if(img===undefined){try{const buf=await(await api('/api/fs/file?path='+encodeURIComponent(absPath))).arrayBuffer();img=decodePlayerImage(new Uint8Array(buf));if(!img)img=null}catch(e){img=null}thumbCache.set(absPath,img)}if(img)drawDecoded(c,img);else placeholderThumb(c)}
 function chip(text,cls){const s=document.createElement('span');s.className='chip '+cls;s.textContent=text;return s}
 async function dirBadge(path){let items;try{items=await listDirectory(path)}catch(e){return null}const audio=items.filter(i=>i.type==='file'&&isSound(i.path));if(!audio.length)return null;const n=audio.filter(i=>savedMedia&&savedMedia.has(i.path)).length;if(n===audio.length)return{text:'on a card',cls:'saved'};if(n>0)return{text:'partly',cls:'partly'};return null}
-function renderMappingTracks(){const box=$('#mappingTracks');const sounds=mappingAssets.filter(i=>isSound(i.path));const selected=new Set(mappingOrder);box.innerHTML='';if(!sounds.length){box.innerHTML='<p class="empty">No audio tracks found.</p>';return}const visible=sounds.map(item=>item.path);const allSelected=visible.every(path=>selected.has(path));const controls=document.createElement('div');controls.className='actions';const toggle=action(allSelected?'Deselect all':'Select all',()=>{if(allSelected)mappingOrder=mappingOrder.filter(path=>!visible.includes(path));else mappingOrder.push(...visible.filter(path=>!mappingOrder.includes(path)));applyMatchingArtwork();renderMappingTracks();updateSaveMappingButton();renderMappingArtwork()});controls.append(toggle);box.append(controls);sounds.forEach(item=>{const row=document.createElement('label');row.className='track-choice';const input=document.createElement('input');input.type='checkbox';input.value=item.path;input.checked=selected.has(item.path);const name=document.createElement('span');name.className='track-name';name.textContent=item.path.slice(MEDIA_ROOT.length+1);row.append(input,name);box.append(row)})}
+function renderMappingTracks(){const box=$('#mappingTracks');const sounds=mappingAssets.filter(i=>isSound(i.path));const selected=new Set(mappingOrder);box.innerHTML='';if(!sounds.length){box.innerHTML='<p class="empty">No audio tracks found.</p>';return}const visible=sounds.map(item=>item.path);const allSelected=visible.every(path=>selected.has(path));const controls=document.createElement('div');controls.className='track-controls';const toggle=action(allSelected?'Deselect all':'Select all',()=>{if(allSelected)mappingOrder=mappingOrder.filter(path=>!visible.includes(path));else mappingOrder.push(...visible.filter(path=>!mappingOrder.includes(path)));applyMatchingArtwork();renderMappingTracks();updateSaveMappingButton();renderMappingArtwork()});controls.append(toggle);box.append(controls);sounds.forEach(item=>{const row=document.createElement('label');row.className='track-choice';const input=document.createElement('input');input.type='checkbox';input.value=item.path;input.checked=selected.has(item.path);const name=document.createElement('span');name.className='track-name';name.textContent=item.path.slice(MEDIA_ROOT.length+1);row.append(input,name);box.append(row)})}
 function renderMappingCover(){const cover=$('#mappingCover');const images=mappingAssets.filter(i=>isImage(i.path));cover.innerHTML='';cover.append(new Option('Use the first track image',''));images.forEach(item=>cover.append(new Option(item.path.slice(MEDIA_ROOT.length+1),item.path)));cover.disabled=!images.length}
 function coverThumbSource(){const v=$('#mappingCover').value;if(v)return v;const first=mappingOrder[0];return first&&mappingImages.get(first)||''}
 function renderCoverThumb(){const c=$('#mappingCoverThumb');renderThumb(c,coverThumbSource()||null)}
@@ -137,7 +138,7 @@ function updateCardReadyState(){const state=$('#cardReady');if(editingPlaylistUr
 function updatePlaylistCreationControls(){const editing=Boolean(editingPlaylistUrl);const manual=!editing&&playlistCreationMode==='manual';$('#playlistCreationMode').hidden=editing;$('#playlistModeHint').hidden=editing||!manual;$('#manualPlaylistUri').hidden=!manual;$('#playlistModeAuto').checked=playlistCreationMode==='auto';$('#playlistModeManual').checked=playlistCreationMode==='manual';if(!editing&&manual){$('#playlistModeHint').textContent='Enter a card URI. Saving does not write a physical card.';$('#saveMapping').textContent='Save card'}else if(!editing){$('#saveMapping').textContent='Create & write card'}updateCardReadyState()}
 function setPlaylistCreationMode(mode){playlistCreationMode=mode;updatePlaylistCreationControls();updateSaveMappingButton()}
 function updateSaveMappingButton(){const button=$('#saveMapping');const ready=editingPlaylistUrl?true:(playlistCreationMode==='auto'?lastCard.captured:Boolean($('#mappingUrl').value.trim()));button.disabled=!mappingOrder.length||!ready}
-function beginNewPlaylist(){editingPlaylistUrl='';playlistCreationMode='auto';newPlaylistDirectory='';mappingOrder=[];mappingImages.clear();$('#playlistName').value='';$('#mappingUrl').value='';$('#mappingCover').value='';$('#playlistEditorTitle').textContent='Create card';$('#playlistEditorHint').textContent='Choose media, then insert a card to create and write this card automatically.';setMappingMode('new');renderMappingTracks();renderMappingCover();renderMappingArtwork();updatePlaylistCreationControls();updateSaveMappingButton()}
+function beginNewPlaylist(){editingPlaylistUrl='';playlistCreationMode='auto';mappingOrder=[];mappingImages.clear();$('#playlistName').value='';$('#mappingUrl').value='';$('#mappingCover').value='';$('#playlistEditorTitle').textContent='Create card';$('#playlistEditorHint').textContent='Choose media from a directory, then insert a card to create and write this card automatically.';setMappingMode();renderMappingTracks();renderMappingCover();renderMappingArtwork();updatePlaylistCreationControls();updateSaveMappingButton()}
 async function editPlaylist(playlist){await selectTab('cards');const tracks=(Array.isArray(playlist.tracks)&&playlist.tracks.length?playlist.tracks:[playlist.sound].filter(Boolean));const images=Array.isArray(playlist.track_images)?playlist.track_images:[];editingPlaylistUrl=playlist.url||'';mappingOrder=tracks.map(mediaToAbs);mappingImages.clear();tracks.forEach((track,i)=>{if(images[i])mappingImages.set(mediaToAbs(track),mediaToAbs(images[i]))});const first=mappingOrder[0];const dir=first?first.slice(0,first.lastIndexOf('/')):MEDIA_ROOT;$('#playlistName').value=String(playlist.name||playlist.url||'');$('#mappingUrl').value=playlist.url||'';$('#playlistEditorTitle').textContent='Edit card';$('#playlistEditorHint').textContent='Edit this card without inserting or writing a physical card. Use Debug to write it later.';$('#saveMapping').textContent='Save card';setMappingMode('existing');try{await selectMappingDirectory(dir);mappingOrder=tracks.map(mediaToAbs);renderMappingTracks();renderMappingCover();$('#mappingCover').value=playlist.image?mediaToAbs(playlist.image):'';renderCoverThumb();renderMappingArtwork();updatePlaylistCreationControls();updateSaveMappingButton();status('Loaded "'+(playlist.name||playlist.url||'card')+'" into the editor.','ok')}catch(e){status('Card media failed: '+e.message,'err')}}
 async function loadMappingDirectories(){if(!unlocked||activeTab!=='cards')return;const select=$('#mappingDirectory');select.disabled=true;select.innerHTML='';try{const items=await listDirectory(MEDIA_ROOT);const dirs=items.filter(i=>i.type==='directory').sort((a,b)=>naturalCompare(a.name,b.name));select.append(new Option('Choose a directory first',''));select.append(new Option('/sdcard/media',MEDIA_ROOT));dirs.forEach(d=>select.append(new Option(d.path,d.path)));const selected=mappingDirectory&&(mappingDirectory===MEDIA_ROOT||dirs.some(d=>d.path===mappingDirectory))?mappingDirectory:'';select.value=selected;mappingDirectory=selected;if(selected)await selectMappingDirectory(selected);else{mappingAssets=[];renderMappingTracks();renderMappingCover();renderMappingArtwork();updateSaveMappingButton()}}catch(e){mappingAssets=[];select.innerHTML='';select.append(new Option('Could not load directories',''));$('#mappingTracks').innerHTML='';renderMappingArtwork();status('Directory list failed: '+e.message,'err')}finally{select.disabled=false}}
 async function selectMappingDirectory(path){if(!path){mappingDirectory='';mappingAssets=[];renderMappingTracks();renderMappingCover();renderMappingArtwork();updateSaveMappingButton();return}const items=await listDirectory(path);mappingDirectory=path;mappingAssets=items.filter(i=>i.type==='file'&&(isSound(i.path)||isImage(i.path))).sort((a,b)=>naturalCompare(a.name,b.name));mediaPaths=new Set(mappingAssets.map(i=>i.path));renderMappingTracks();renderMappingCover();applyMatchingArtwork();renderMappingArtwork();updateSaveMappingButton()}
@@ -179,7 +180,7 @@ function updateFileSelectionControls(){const count=selectedFiles.size;$('#fileBu
 function clearFileSelection(){selectedFiles.clear();document.querySelectorAll('.entry-select').forEach(input=>{input.checked=false});updateFileSelectionControls()}
 function selectAllFiles(){document.querySelectorAll('.entry-select').forEach(input=>{input.checked=true;selectedFiles.set(input.dataset.path,{path:input.dataset.path,isDirectory:input.dataset.directory==='true'})});updateFileSelectionControls()}
 async function deleteSelectedFiles(){const entries=[...selectedFiles.values()];if(!entries.length)return;if(!confirm('Delete '+entries.length+' selected item'+(entries.length===1?'':'s')+'?'))return;if(entries.some(item=>item.isDirectory)&&!confirm('Selected folders and everything inside them will be deleted. This cannot be undone.'))return;const button=$('#deleteFileSelection');button.disabled=true;try{for(const item of entries){await jsonPost('/api/fs/delete',{path:item.path,recursive:item.isDirectory});selectedFiles.delete(item.path)}status('Deleted '+entries.length+' selected item'+(entries.length===1?'':'s')+'.','ok');await loadFiles()}catch(e){status('Bulk delete stopped: '+e.message,'err')}finally{button.disabled=false;updateFileSelectionControls()}}
-async function loadFiles(refreshTree=true){
+async function loadFiles(){
 if(!unlocked)return;
 await ensureSavedMedia();
 $('#cwd').value=cwd;
@@ -193,8 +194,9 @@ items.sort((a,b)=>a.type===b.type?naturalCompare(a.name,b.name):(a.type==='direc
 const visible=new Set(items.map(item=>item.path));
 for(const path of selectedFiles.keys())if(!visible.has(path))selectedFiles.delete(path);
 updateFileSelectionControls();
-box.innerHTML='';
-if(!items.length)box.innerHTML='<p class="empty">Directory is empty.</p>';
+const directoryStates=new Map(await Promise.all((cwd===MEDIA_ROOT?items.filter(item=>item.type==='directory'):[]).map(async item=>[item.path,await dirBadge(item.path)])));
+const fragment=document.createDocumentFragment();
+if(!items.length)fragment.append(Object.assign(document.createElement('p'),{className:'empty',textContent:'Directory is empty.'}));
 for(const it of items){
 const row=document.createElement('div');
 row.className='entry';
@@ -219,14 +221,14 @@ badge.hidden=true;
 head.append(name,badge);
 if(it.type==='directory'){head.classList.add('open-folder');head.onclick=event=>{if(event.target.closest('input'))return;cwd=it.path;clearFileSelection();loadFiles()}}
 if(it.type==='file'&&isSound(it.path)){const audioMark=document.createElement('span');audioMark.className='audio-mark';audioMark.setAttribute('aria-hidden','true');audioMark.textContent='♫';head.insertBefore(audioMark,name)}
-if(it.type==='file'&&isImage(it.path)){const thumbnail=thumbCanvas();head.prepend(thumbnail);renderThumb(thumbnail,it.path)}
+if(it.type==='file'&&isImage(it.path)){const thumbnail=thumbCanvas();head.insertBefore(thumbnail,name);renderThumb(thumbnail,it.path)}
 const meta=document.createElement('div');
 meta.className='entry-meta';
 meta.textContent=it.type==='directory'?'Folder':humanSize(it.size);
 const acts=document.createElement('div');
 acts.className='actions';
 if(it.type==='directory'){
-if(cwd===MEDIA_ROOT){const state=await dirBadge(it.path);if(state){badge.textContent=state.text;badge.className='chip '+state.cls;badge.hidden=false}}
+const state=directoryStates.get(it.path);if(state){badge.textContent=state.text;badge.className='chip '+state.cls;badge.hidden=false}
 }else{
 if(savedMedia&&savedMedia.has(it.path)){badge.textContent='on a card';badge.className='chip saved';badge.hidden=false;badge.title=mediaOwner.get(it.path)||''}
 if(isSound(it.path)){const playing=filePlaybackPath===it.path;const button=iconAction(playing&&!filePlaybackPaused?'pause':'play',playing?(filePlaybackPaused?'Resume '+it.name:'Pause '+it.name):'Play '+it.name,()=>toggleFilePlayback(it.path));button.classList.add('file-playback');button.dataset.path=it.path;button.dataset.name=it.name;acts.append(button)}
@@ -236,8 +238,9 @@ acts.append(iconLink('download','Download '+it.name,'/api/fs/file?path='+encodeU
 acts.append(iconAction('edit','Rename '+it.name,()=>startInlineRename(name,it.path)));
 acts.append(iconAction('delete','Delete '+it.name,()=>deletePath(it.path,it.type==='directory'),'danger'));
 row.append(head,meta,acts);
-box.append(row)
+fragment.append(row)
 }
+box.replaceChildren(fragment);
 }catch(e){box.innerHTML='<p class="empty">Could not load directory.</p>';status('Directory failed: '+e.message,'err')}
 }
 async function uploadFiles(){
@@ -365,53 +368,10 @@ function mappingRef(path){ if(!path.startsWith('/sdcard/media/'))throw new Error
 }
 function mappingSelected(){return [...$('#mappingTracks').querySelectorAll('input[type=checkbox]:checked')].map(i=>i.value)}
 function updateMappingOrder(){const chosen=mappingSelected();const selected=new Set(chosen);const visible=new Set(mappingAssets.filter(item=>isSound(item.path)).map(item=>item.path));mappingOrder=mappingOrder.filter(path=>!visible.has(path)||selected.has(path));mappingOrder.push(...chosen.filter(path=>!mappingOrder.includes(path)));applyMatchingArtwork();updateSaveMappingButton();renderMappingArtwork()}
-function setMappingMode(mode){const isNew=mode==='new';$('#mappingExisting').hidden=isNew;$('#mappingNew').hidden=!isNew;$('#mappingModeExisting').checked=!isNew;$('#mappingModeNew').checked=isNew}
-function newTrackPath(audio,base=MEDIA_ROOT){const relative=audio.name.trim().replace(/\\/g,'/').replace(/^\/+/,'');const parts=relative.split('/');if(parts.some(part=>!safeTrackSegment(part)))throw new Error('Audio file name contains an invalid path');if(!isSound(parts.at(-1)))throw new Error('Audio must use .mp3, .m4a, or .aac');return base+'/'+parts.join('/')}
-function playlistDirectoryName(){const raw=$('#playlistName').value.trim();const name=raw.replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').replace(/[. ]+$/,'').slice(0,80);if(!safeTrackSegment(name))throw new Error('Name the card before adding new tracks');return name}
-async function newPlaylistTrackPath(audio){if(editingPlaylistUrl||!$('#mappingModeNew').checked)return newTrackPath(audio);if(!newPlaylistDirectory){const r=await jsonPost('/api/fs/mkdir-unique',{path:join(MEDIA_ROOT,playlistDirectoryName())});const result=await r.json();newPlaylistDirectory=result.path;createdDirectories.add(newPlaylistDirectory)}return newTrackPath(audio,newPlaylistDirectory)}
+function setMappingMode(){$('#mappingExisting').hidden=false}
 async function makeDirectories(path){path=sdPath(path);if(path===MEDIA_ROOT)return;const parts=path.slice(MEDIA_ROOT.length+1).split('/');parts.pop();let current=MEDIA_ROOT;for(const part of parts){if(!part)continue;current+='/'+part;if(createdDirectories.has(current))continue;await jsonPost('/api/fs/mkdir',{path:current});createdDirectories.add(current)}}
 async function uploadMediaBlob(path,body,createDirs=true,onProgress=null){if(createDirs)await makeDirectories(path);const total=body.size??body.byteLength??0;const timeout=Math.max(300000,Math.ceil(total/(64*1024))*1000);return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();const started=performance.now();xhr.open('POST','/api/fs/upload?path='+encodeURIComponent(path));xhr.withCredentials=true;xhr.timeout=timeout;xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.upload.onprogress=event=>{if(onProgress&&event.lengthComputable)onProgress(event.loaded,event.total,performance.now()-started)};xhr.onload=()=>{if(xhr.status===401){lock();reject(new Error('Session expired'));return}if(xhr.status<200||xhr.status>=300){reject(new Error(xhr.responseText||('HTTP '+xhr.status)));return}try{resolve(JSON.parse(xhr.responseText||'{}'))}catch(e){resolve({})}};xhr.onerror=()=>reject(new Error('Network error during upload'));xhr.ontimeout=()=>reject(new Error('Upload timed out'));xhr.send(body)})}
 function artForTrack(track){return mappingImages.get(track)||$('#mappingCover').value||''}
-async function addNewTrack(){
-const button=$('#addNewTrack');
-const audio=$('#newTrackAudio').files[0];
-const image=$('#newTrackImage').files[0];
-if(!audio){status('Choose an audio file first.','err');return}
-button.disabled=true;
-try{
-if(!isSound(audio.name))throw new Error('Audio must use .mp3, .m4a, or .aac');
-const audioPath=await newPlaylistTrackPath(audio);
-let imagePath='';
-let imageBody=null;
-if(image){
-imagePath=audioPath.replace(/\.[^.]+$/i,'.img');
-if(/\.img$/i.test(image.name)){if(!await validPlayerImage(image))throw new Error('Artwork is not a supported player image');imageBody=image}
-else if(/\.(png|jpe?g)$/i.test(image.name))imageBody=await convertBrowserImage(image,false);
-else throw new Error('Artwork must be .img, .png, or .jpg')
-}
-await makeDirectories(audioPath);
-await uploadMediaBlob(audioPath,audio,false);
-if(imageBody){await makeDirectories(imagePath);await uploadMediaBlob(imagePath,imageBody,false)}
-if(!mappingOrder.includes(audioPath))mappingOrder.push(audioPath);
-if(imagePath)mappingImages.set(audioPath,imagePath);
-const savedOrder=[...mappingOrder];
-const savedImages=new Map(mappingImages);
-renderMappingTracks();
-renderMappingArtwork();
-$('#newTrackAudio').value='';
-$('#newTrackImage').value='';
-savedMedia=null;
-if(newPlaylistDirectory)mappingDirectory=newPlaylistDirectory;
-await Promise.all([loadSavedMedia(),loadMappingDirectories()]);
-mappingOrder=savedOrder;
-mappingImages.clear();
-savedImages.forEach((value,key)=>mappingImages.set(key,value));
-renderMappingTracks();
-renderMappingArtwork();
-updateSaveMappingButton();
-status('Added '+audioPath.slice(MEDIA_ROOT.length+1)+'. Add another track or create the playlist.','ok')
-}catch(e){status('Upload failed: '+e.message+' Please retry.','err')}finally{button.disabled=false}
-}
 function renderMappingArtwork(){
 const box=$('#mappingArtwork');
 box.innerHTML='';
@@ -432,11 +392,11 @@ const label=document.createElement('label');
 label.textContent=(index+1)+'. '+track.slice(MEDIA_ROOT.length+1);
 label.style.flex='1';
 label.append(select);
-const up=action('Up',()=>moveMappingTrack(index,-1));
+const up=iconAction('up','Move track up',()=>moveMappingTrack(index,-1));
 up.disabled=index===0;
-const down=action('Down',()=>moveMappingTrack(index,1));
+const down=iconAction('down','Move track down',()=>moveMappingTrack(index,1));
 down.disabled=index===mappingOrder.length-1;
-const remove=action('Remove',()=>removeMappingTrack(index),'danger');
+const remove=iconAction('delete','Remove track',()=>removeMappingTrack(index),'danger');
 row.append(thumb,label,up,down,remove);
 box.append(row)
 });
@@ -524,9 +484,6 @@ $('#cardUrl').oninput=()=>{cardUrlDirty=true};
 $('#writeCard').onclick=writeCard;
 $('#mappingTracks').addEventListener('change',updateMappingOrder);
 $('#mappingDirectory').onchange=()=>selectMappingDirectory($('#mappingDirectory').value);
-$('#mappingModeExisting').onchange=()=>setMappingMode('existing');
-$('#mappingModeNew').onchange=()=>setMappingMode('new');
-$('#addNewTrack').onclick=addNewTrack;
 $('#refreshMappingAssets').onclick=loadMappingAssets;
 $('#saveMapping').onclick=saveMapping;
 $('#mappingCover').onchange=()=>{renderCoverThumb();renderMappingArtwork()};
@@ -534,9 +491,10 @@ $('#folderUploads').onchange=prepareFolderUpload;
 $('#uploadFolder').onclick=uploadFolder;
 $('#cancelFolderUpload').onclick=resetFolderUpload;
 $('#wipePlaylists').onclick=wipePlaylists;
-$('#mappingModeExisting').nextSibling.nodeValue=' From directory';
-$('#mappingModeNew').nextSibling.nodeValue=' Upload tracks';
-setMappingMode('new');
+$('#playlistEditorHint').textContent='Choose media from a directory, then scan a card to create and write this card automatically.';
+$('#mappingModeExisting').parentElement.parentElement.remove();
+$('#mappingNew').remove();
+setMappingMode();
 setPlaylistCreationMode('auto');
 restoreSession();
 setInterval(()=>{if(activeTab==='debug'||(activeTab==='cards'&&playlistCreationMode==='auto'&&!editingPlaylistUrl))pollLastCard(false)},2500);
