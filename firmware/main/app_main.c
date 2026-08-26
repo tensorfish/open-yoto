@@ -31,6 +31,7 @@
 #include "battery_icons_rgba.h"
 #include "boot_face_rgba.h"
 #include "wink_face_rgba.h"
+#include "cancel_face_rgba.h"
 static const char *TAG = "main";
 
 /* Exact NFC URI that toggles the on-demand admin endpoint. */
@@ -1692,7 +1693,17 @@ void app_main(void)
             else if (admin_is_active())
             {
                 admin_set_last_card(uid, uid_len, url);
-                ESP_LOGI(TAG, "admin captured card without playback");
+                if (url[0] != '\0' && content_get_track_count(url) <= 0)
+                {
+                    state_lock();
+                    display_show_rgba(CANCEL_FACE_RGBA);
+                    state_unlock();
+                    ESP_LOGI(TAG, "admin captured unmapped card");
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "admin captured card without playback");
+                }
             }
             else
             {
@@ -1715,7 +1726,11 @@ void app_main(void)
                 s_track_index = 0;
                 s_current_url[0] = '\0';
             }
-            if (s_display_base != DISPLAY_BASE_ADMIN)
+            if (s_display_base == DISPLAY_BASE_ADMIN && s_admin_code[0] != '\0')
+            {
+                display_show_access_code(s_admin_code);
+            }
+            else
             {
                 display_set_idle_locked();
             }
