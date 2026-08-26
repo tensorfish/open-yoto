@@ -98,6 +98,12 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
     return ESP_OK;
 }
 
+esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16])
+{
+    (void)pixels;
+    return ESP_OK;
+}
+
 esp_err_t gc9306_color64_begin(void)
 {
     return ESP_OK;

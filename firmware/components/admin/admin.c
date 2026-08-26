@@ -78,6 +78,10 @@ static esp_err_t admin_send_oom(httpd_req_t *req, const char *where)
 #define ADMIN_CARD_UID_MAX      10
 #define ADMIN_CARD_URL_MAX      200
 #define ADMIN_CARD_BODY_MAX     1024
+#define ADMIN_WEBUI_DIR         CONTENT_MOUNT_POINT "/webui"
+#define ADMIN_WEBUI_PATH        ADMIN_WEBUI_DIR "/index.html"
+#define ADMIN_WEBUI_TMP_PATH    ADMIN_WEBUI_DIR "/index.html.tmp"
+#define ADMIN_WEBUI_BAK_PATH    ADMIN_WEBUI_DIR "/index.html.bak"
 
 /* Active-session state. */
 static bool             s_active;
@@ -105,10 +109,10 @@ static bool s_last_card_captured;
 
 /* ------------------------------------------------------------------ page -- */
 
-/* The single-page admin UI is embedded via ESP-IDF EMBED_FILES (see
- * CMakeLists.txt); the linker exposes it as these byte symbols. */
-extern const uint8_t index_html_start[] asm("_binary_index_html_start");
-extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
+/* The recovery uploader is embedded so a missing or broken SD-hosted web UI
+ * can always be replaced. */
+extern const uint8_t upload_html_start[] asm("_binary_upload_html_start");
+extern const uint8_t upload_html_end[]   asm("_binary_upload_html_end");
 
 /* One uploaded file part: data points into the request body (kept alive for
  * the duration of the add request). */
@@ -1585,12 +1589,139 @@ static esp_err_t admin_register_playlist(const admin_add_req_t *add)
 
 /* ------------------------------------------------------------ handlers -- */
 
+static esp_err_t admin_send_webui_file(httpd_req_t *req)
+{
+    FILE *fp;
+    uint8_t buffer[ADMIN_FS_UPLOAD_CHUNK_SIZE];
+    size_t count;
+    esp_err_t err;
+
+    fp = fopen(ADMIN_WEBUI_PATH, "rb");
+    if (fp == NULL)
+    {
+        return admin_send_fs_errno(req, "open web UI", ADMIN_WEBUI_PATH, errno);
+    }
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    while ((count = fread(buffer, 1, sizeof(buffer), fp)) > 0)
+    {
+        err = httpd_resp_send_chunk(req, (const char *)buffer, (ssize_t)count);
+        if (err != ESP_OK)
+        {
+            fclose(fp);
+            return err;
+        }
+    }
+    fclose(fp);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t admin_root_handler(httpd_req_t *req)
 {
-    httpd_resp_set_type(req, "text/html");
+    struct stat st;
+
+    if (stat(ADMIN_WEBUI_PATH, &st) == 0 && S_ISREG(st.st_mode))
+    {
+        return admin_send_webui_file(req);
+    }
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/upload");
+    return httpd_resp_sendstr(req, "");
+}
+
+static esp_err_t admin_upload_page_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, (const char *)index_html_start,
-                           (ssize_t)(index_html_end - index_html_start));
+    return httpd_resp_send(req, (const char *)upload_html_start,
+                           (ssize_t)(upload_html_end - upload_html_start));
+}
+
+static esp_err_t admin_webui_upload_handler(httpd_req_t *req)
+{
+    FILE *fp;
+    uint8_t buffer[ADMIN_FS_UPLOAD_CHUNK_SIZE];
+    size_t remaining;
+    bool backed_up = false;
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    if (req->content_len == 0 || req->content_len > ADMIN_BODY_MAX)
+    {
+        return httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE,
+                                   "web UI file is empty or too large");
+    }
+    if (mkdir(ADMIN_WEBUI_DIR, 0755) != 0 && errno != EEXIST)
+    {
+        return admin_send_fs_errno(req, "create web UI directory",
+                                   ADMIN_WEBUI_DIR, errno);
+    }
+
+    fp = fopen(ADMIN_WEBUI_TMP_PATH, "wb");
+    if (fp == NULL)
+    {
+        return admin_send_fs_errno(req, "open web UI temporary file",
+                                   ADMIN_WEBUI_TMP_PATH, errno);
+    }
+    remaining = req->content_len;
+    while (remaining > 0)
+    {
+        size_t wanted = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        int received = httpd_req_recv(req, (char *)buffer, wanted);
+
+        if (received <= 0
+            || fwrite(buffer, 1, (size_t)received, fp) != (size_t)received)
+        {
+            int error_number = received <= 0 ? EIO : errno;
+            fclose(fp);
+            unlink(ADMIN_WEBUI_TMP_PATH);
+            return admin_send_fs_errno(req, "write web UI temporary file",
+                                       ADMIN_WEBUI_TMP_PATH, error_number);
+        }
+        remaining -= (size_t)received;
+    }
+    if (fclose(fp) != 0)
+    {
+        int error_number = errno;
+        unlink(ADMIN_WEBUI_TMP_PATH);
+        return admin_send_fs_errno(req, "close web UI temporary file",
+                                   ADMIN_WEBUI_TMP_PATH, error_number);
+    }
+
+    unlink(ADMIN_WEBUI_BAK_PATH);
+    if (rename(ADMIN_WEBUI_PATH, ADMIN_WEBUI_BAK_PATH) == 0)
+    {
+        backed_up = true;
+    }
+    else if (errno != ENOENT)
+    {
+        int error_number = errno;
+        unlink(ADMIN_WEBUI_TMP_PATH);
+        return admin_send_fs_errno(req, "backup web UI", ADMIN_WEBUI_PATH,
+                                   error_number);
+    }
+    if (rename(ADMIN_WEBUI_TMP_PATH, ADMIN_WEBUI_PATH) != 0)
+    {
+        int error_number = errno;
+
+        unlink(ADMIN_WEBUI_TMP_PATH);
+        if (backed_up)
+        {
+            rename(ADMIN_WEBUI_BAK_PATH, ADMIN_WEBUI_PATH);
+        }
+        return admin_send_fs_errno(req, "install web UI", ADMIN_WEBUI_PATH,
+                                   error_number);
+    }
+    if (backed_up)
+    {
+        unlink(ADMIN_WEBUI_BAK_PATH);
+    }
+    ESP_LOGI(TAG, "installed SD-hosted web UI (%u bytes)",
+             (unsigned)req->content_len);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
 static esp_err_t admin_login_handler(httpd_req_t *req)
@@ -2551,12 +2682,73 @@ static esp_err_t admin_fs_rename_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
+/*
+ * Remove a file or directory tree below an already validated /sdcard path.
+ * Each child name is supplied by the opened directory, never by HTTP input.
+ */
+static int admin_remove_tree(const char *path)
+{
+    struct stat st;
+    DIR *dir;
+    struct dirent *entry;
+    int saved_errno;
+
+    if (stat(path, &st) != 0)
+    {
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode))
+    {
+        return unlink(path);
+    }
+
+    dir = opendir(path);
+    if (dir == NULL)
+    {
+        return -1;
+    }
+    while ((entry = readdir(dir)) != NULL)
+    {
+        char child[ADMIN_PATH_MAX];
+        int written;
+
+        if (strcmp(entry->d_name, ".") == 0
+            || strcmp(entry->d_name, "..") == 0)
+        {
+            continue;
+        }
+        written = snprintf(child, sizeof(child), "%s/%s", path,
+                           entry->d_name);
+        if (written < 0 || (size_t)written >= sizeof(child))
+        {
+            saved_errno = ENAMETOOLONG;
+            closedir(dir);
+            errno = saved_errno;
+            return -1;
+        }
+        if (admin_remove_tree(child) != 0)
+        {
+            saved_errno = errno;
+            closedir(dir);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+    if (closedir(dir) != 0)
+    {
+        return -1;
+    }
+    return rmdir(path);
+}
+
 static esp_err_t admin_fs_delete_handler(httpd_req_t *req)
 {
     cJSON *root;
+    cJSON *recursive_item;
     char logical[ADMIN_PATH_MAX];
     char absolute[ADMIN_PATH_MAX];
     struct stat st;
+    bool recursive;
     int rc;
 
     if (!admin_require_session(req))
@@ -2564,8 +2756,11 @@ static esp_err_t admin_fs_delete_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     root = admin_read_json(req);
+    recursive_item = root == NULL ? NULL
+                   : cJSON_GetObjectItemCaseSensitive(root, "recursive");
     if (root == NULL
         || !admin_json_string(root, "path", logical, sizeof(logical))
+        || (recursive_item != NULL && !cJSON_IsBool(recursive_item))
         || !admin_resolve_sd_path(logical, absolute, sizeof(absolute))
         || strcmp(absolute, CONTENT_MOUNT_POINT) == 0)
     {
@@ -2573,19 +2768,19 @@ static esp_err_t admin_fs_delete_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
         return ESP_FAIL;
     }
+    recursive = cJSON_IsTrue(recursive_item);
     cJSON_Delete(root);
+
     if (stat(absolute, &st) != 0)
     {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "path not found");
-        return ESP_FAIL;
+        return admin_send_fs_errno(req, "inspect", absolute, errno);
     }
-    rc = S_ISDIR(st.st_mode) ? rmdir(absolute) : unlink(absolute);
+    rc = recursive && S_ISDIR(st.st_mode)
+       ? admin_remove_tree(absolute)
+       : (S_ISDIR(st.st_mode) ? rmdir(absolute) : unlink(absolute));
     if (rc != 0)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                            S_ISDIR(st.st_mode)
-                                ? "directory must be empty" : "delete failed");
-        return ESP_FAIL;
+        return admin_send_fs_errno(req, "delete", absolute, errno);
     }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -2597,10 +2792,14 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
     {
         { .uri = "/", .method = HTTP_GET,
           .handler = admin_root_handler },
+        { .uri = "/upload", .method = HTTP_GET,
+          .handler = admin_upload_page_handler },
         { .uri = "/media/*", .method = HTTP_GET,
           .handler = admin_media_handler },
         { .uri = "/api/login", .method = HTTP_POST,
           .handler = admin_login_handler },
+        { .uri = "/api/webui/upload", .method = HTTP_POST,
+          .handler = admin_webui_upload_handler },
         { .uri = "/api/list", .method = HTTP_GET,
           .handler = admin_list_handler },
         { .uri = "/api/last-card", .method = HTTP_GET,
@@ -2814,7 +3013,8 @@ esp_err_t admin_start(char *code_out, size_t code_size)
     s_wifi_started = true;
 
     httpd_cfg = (httpd_config_t)HTTPD_DEFAULT_CONFIG();
-    httpd_cfg.max_uri_handlers = 20;
+    /* Root, recovery uploader, and all management APIs require 22 handlers. */
+    httpd_cfg.max_uri_handlers = 24;
     httpd_cfg.max_open_sockets = 4;
     httpd_cfg.stack_size = 16384;
     httpd_cfg.lru_purge_enable = true;

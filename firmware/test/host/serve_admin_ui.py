@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Serve the admin UI with a stubbed player API for host-side UI testing.
+"""Serve the SD-hosted admin UI flow with a stubbed player API.
 
-The real UI is served from flash by `components/admin`; this reproduces enough of
-its HTTP contract to drive the page in a browser without hardware, including the
-pieces the card-organisation work needs: nested file downloads for cover
-previews, two first-level media directories (one already saved as a card, one
-not), directory creation and uploads.
-
-It is a test aid, not part of the firmware. Contract details are mirrored from
-firmware/components/admin/admin.c.
+The device embeds only the PIN-guarded uploader. Its root redirects to that
+page until an index.html has been stored on the SD card, then serves the stored
+page. This host fixture mirrors that installation path and enough of the
+custom-page API contract to drive it in a browser.
 
     python3 firmware/test/host/serve_admin_ui.py [--port 8099]
 """
@@ -23,6 +19,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 ROOT = Path(__file__).resolve().parents[3]
 INDEX = ROOT / "firmware/components/admin/html/index.html"
 CODE = "ABC123"
+UPLOAD = ROOT / "firmware/components/admin/html/upload.html"
+HOSTED_INDEX: bytes | None = None
 
 
 def oyim(colour: int) -> bytes:
@@ -71,6 +69,15 @@ MAPPINGS = [
     }
 ]
 
+# The most recently scanned card. Card writes update this value so browser
+# workflow tests can verify linked-playlist overwrite confirmation.
+LAST_CARD = {
+    "captured": True,
+    "uid": "04A1B2C3",
+    "url": "https://example.com/story",
+    "seq": 1,
+}
+
 OK_POSTS = {
     "/api/control/play", "/api/control/stop", "/api/control/display",
     "/api/control/clear", "/api/fs/rename", "/api/fs/create",
@@ -100,7 +107,15 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if path in ("/", "/index.html"):
-            self._send(200, INDEX.read_bytes(), "text/html; charset=utf-8")
+            if HOSTED_INDEX is None:
+                self.send_response(302)
+                self.send_header("Location", "/upload")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._send(200, HOSTED_INDEX, "text/html; charset=utf-8")
+        elif path == "/upload":
+            self._send(200, UPLOAD.read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/fs/list":
             target = (query.get("path") or ["/sdcard/media"])[0]
             self._json(TREE.get(target, []))
@@ -126,11 +141,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/list":
             self._json(MAPPINGS)
         elif path == "/api/last-card":
-            self._json({"captured": True, "uid": "04A1B2C3", "url": "", "seq": 1})
+            card = dict(LAST_CARD)
+            card["exists"] = any(
+                mapping.get("url") == card["url"] for mapping in MAPPINGS
+            )
+            self._json(card)
         else:
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        global HOSTED_INDEX
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
@@ -154,6 +174,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(payload)
             else:
                 self._json({"error": "bad pin"}, 403)
+        elif path == "/api/webui/upload":
+            if "yoto_session=stub" not in self.headers.get("Cookie", ""):
+                self._json({"error": "unauthorized"}, 401)
+                return
+            if not body:
+                self._json({"error": "web UI file is empty"}, 400)
+                return
+            HOSTED_INDEX = body
+            self._json({"ok": True})
         elif path == "/api/add":
             try:
                 card = json.loads(body or b"{}")
@@ -174,7 +203,13 @@ class Handler(BaseHTTPRequestHandler):
             MAPPINGS[:] = [m for m in MAPPINGS if m.get("url") != url]
             self._json({"ok": True})
         elif path == "/api/card/write":
-            self._json({"ok": True, "seq": 2})
+            try:
+                request = json.loads(body or b"{}")
+            except json.JSONDecodeError:
+                request = {}
+            LAST_CARD["url"] = request.get("url", "")
+            LAST_CARD["seq"] += 1
+            self._json({"ok": True, "seq": LAST_CARD["seq"]})
         elif path == "/api/fs/mkdir":
             try:
                 target = json.loads(body or b"{}").get("path", "")
@@ -214,12 +249,42 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True})
         elif path == "/api/fs/delete":
             try:
-                target = json.loads(body or b"{}").get("path", "")
+                request = json.loads(body or b"{}")
             except json.JSONDecodeError:
-                target = ""
-            for items in TREE.values():
-                items[:] = [e for e in items if e["path"] != target]
-            IMAGES.pop(target, None)
+                request = {}
+            target = request.get("path", "")
+            recursive = request.get("recursive") is True
+            is_directory = target in TREE
+            has_children = any(
+                candidate.startswith(target + "/") for candidate in TREE
+            )
+            if is_directory and has_children and not recursive:
+                self._json({"error": "directory must be empty"}, 409)
+                return
+            targets = {target}
+            if recursive and is_directory:
+                targets.update(
+                    candidate for candidate in TREE
+                    if candidate.startswith(target + "/")
+                )
+            for parent, items in TREE.items():
+                items[:] = [
+                    item for item in items
+                    if not any(
+                        item["path"] == candidate
+                        or item["path"].startswith(candidate + "/")
+                        for candidate in targets
+                    )
+                ]
+            for candidate in targets:
+                TREE.pop(candidate, None)
+            for image_path in list(IMAGES):
+                if any(
+                    image_path == candidate
+                    or image_path.startswith(candidate + "/")
+                    for candidate in targets
+                ):
+                    IMAGES.pop(image_path)
             self._json({"ok": True})
         elif path == "/api/delete-all":
             MAPPINGS.clear()

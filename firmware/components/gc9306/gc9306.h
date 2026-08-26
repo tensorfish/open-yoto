@@ -18,6 +18,9 @@ esp_err_t gc9306_fill_rect(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
  */
 esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4]);
 
+/** Stretch a 16x16 RGB565 image across the complete 240x320 physical panel. */
+esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16]);
+
 /** Stream a 64x64 RGB565 frame scaled 3x into the 192x192 content window. */
 esp_err_t gc9306_color64_begin(void);
 esp_err_t gc9306_color64_write_row(const uint16_t pixels[64]);

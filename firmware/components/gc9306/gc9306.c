@@ -432,6 +432,92 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
     return err;
 }
 
+esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16])
+{
+    uint8_t b[4];
+    esp_err_t err;
+    size_t sent = 0;
+    const size_t total = GC9306_PANEL_W * GC9306_PANEL_H;
+
+    if (pixels == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = iox_set_pin(IOX_TFT_CS, false);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    b[0] = 0x2A;
+    err = gc9306_tx_dc(b, 1, false);
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = 0x00;
+        b[2] = (GC9306_PANEL_W - 1) >> 8;
+        b[3] = (GC9306_PANEL_W - 1) & 0xFF;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2B;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x00;
+        b[1] = 0x00;
+        b[2] = (GC9306_PANEL_H - 1) >> 8;
+        b[3] = (GC9306_PANEL_H - 1) & 0xFF;
+        err = gc9306_tx_dc(b, 4, true);
+    }
+    if (err == ESP_OK)
+    {
+        b[0] = 0x2C;
+        err = gc9306_tx_dc(b, 1, false);
+    }
+    if (err == ESP_OK)
+    {
+        err = iox_set_pin(IOX_TFT_DC, true);
+    }
+
+    while (err == ESP_OK && sent < total)
+    {
+        spi_transaction_t t = { 0 };
+        spi_transaction_t *completed;
+        size_t n = total - sent;
+
+        if (n > GC9306_CHUNK_PIXELS)
+        {
+            n = GC9306_CHUNK_PIXELS;
+        }
+        for (size_t i = 0; i < n; i++)
+        {
+            size_t pixel = sent + i;
+            size_t x = pixel % GC9306_PANEL_W;
+            size_t y = pixel / GC9306_PANEL_W;
+            uint16_t color = pixels[(y / 20) * 16 + 15 - (x / 15)];
+
+            gc9306_store_rgb(i, (uint8_t)(((color >> 11) & 0x1F) << 3),
+                              (uint8_t)(((color >> 5) & 0x3F) << 2),
+                              (uint8_t)((color & 0x1F) << 3));
+        }
+        t.length = (size_t)(n * GC9306_BYTES_PER_PX * 8);
+        t.tx_buffer = s_chunk;
+        err = spi_device_queue_trans(s_spi, &t, portMAX_DELAY);
+        if (err == ESP_OK)
+        {
+            err = spi_device_get_trans_result(s_spi, &completed, portMAX_DELAY);
+        }
+        sent += n;
+    }
+
+    (void)iox_set_pin(IOX_TFT_CS, true);
+    return err;
+}
+
 esp_err_t gc9306_color64_begin(void)
 {
     enum {

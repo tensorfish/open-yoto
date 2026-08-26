@@ -14,6 +14,7 @@ esp_err_t gc9306_display_on(void);
 esp_err_t gc9306_fill_rect(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
                            uint32_t color);
 esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4]);
+esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16]);
 esp_err_t gc9306_color64_begin(void);
 esp_err_t gc9306_color64_write_row(const uint16_t pixels[64]);
 esp_err_t gc9306_color64_end(void);

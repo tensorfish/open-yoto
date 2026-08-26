@@ -27,6 +27,7 @@
 static int s_fill_count;
 static int s_clear_count;
 static int s_rgba_count;
+static int s_rgb565_full_count;
 static int s_mask_full_count;
 
 static int s_failures;
@@ -81,6 +82,13 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
 {
     (void)rgba;
     s_rgba_count++;
+    return ESP_OK;
+}
+
+esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16])
+{
+    (void)pixels;
+    s_rgb565_full_count++;
     return ESP_OK;
 }
 
@@ -278,6 +286,20 @@ int main(void)
         display_show_rgba(frame);
         CHECK(s_clear_count == clear_before,
               "NULL frame changed clean state: following frame issued a clear");
+    }
+
+    /* Converted 16x16 OYIM frames must use the full-panel renderer without
+     * reintroducing an intermediate black margin clear. */
+    {
+        static uint16_t image[16 * 16];
+
+        clear_before = s_clear_count;
+        display_show_rgb56516(image);
+        CHECK(s_rgb565_full_count == 1,
+              "RGB565 frame issued %d full-panel draw(s), want 1",
+              s_rgb565_full_count);
+        CHECK(s_clear_count == clear_before,
+              "RGB565 frame issued a separate full-panel clear");
     }
 
     if (s_failures != 0)

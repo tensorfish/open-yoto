@@ -215,36 +215,21 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
 
 esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
 {
-    /* Static, not stack: this sits at the bottom of the card-render path
-     * (main loop -> render_image -> here) where a 1 KB frame overflowed the main
-     * task. Every display call is serialised by the caller's state mutex. */
-    static uint8_t rgba[16 * 16 * 4];
     esp_err_t err;
 
     if (pixels == NULL)
     {
         return ESP_ERR_INVALID_ARG;
     }
-    for (size_t i = 0; i < 16 * 16; i++)
-    {
-        uint16_t color = pixels[i];
-        uint8_t red5 = (uint8_t)((color >> 11) & 0x1F);
-        uint8_t green6 = (uint8_t)((color >> 5) & 0x3F);
-        uint8_t blue5 = (uint8_t)(color & 0x1F);
 
-        rgba[i * 4] = (uint8_t)((red5 << 3) | (red5 >> 2));
-        rgba[i * 4 + 1] = (uint8_t)((green6 << 2) | (green6 >> 4));
-        rgba[i * 4 + 2] = (uint8_t)((blue5 << 3) | (blue5 >> 2));
-        rgba[i * 4 + 3] = 0xFF;
-    }
-
-    err = gc9306_fill_rect(0, 0, 239, 319, 0x000000);
+    /* Browser-generated OYIM artwork is deliberately full-bleed. Icon and
+     * animation rendering remains on the calibrated 192x192 RGBA path. */
+    err = gc9306_draw_rgb56516_full(pixels);
     if (err == ESP_OK)
     {
         s_panel_margin_clean = true;
-        err = gc9306_draw_rgba16(rgba);
     }
-    if (err != ESP_OK)
+    else
     {
         ESP_LOGW(TAG, "RGB565 frame failed: %s", esp_err_to_name(err));
     }
