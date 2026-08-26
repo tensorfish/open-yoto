@@ -16,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_random.h"
 #include "board_pins.h"
 #include "iox.h"
 #include "battery.h"
@@ -767,8 +768,8 @@ static void play_card(const char *url)
         return;
     }
 
-    state_lock();
-    s_track_index = 0;
+    s_track_index = track_count > 1 ? (int)(esp_random() % (uint32_t)track_count)
+                                    : 0;
     s_track_count = track_count;
     snprintf(s_current_url, sizeof(s_current_url), "%s", url);
 
@@ -783,7 +784,8 @@ static void play_card(const char *url)
         return;
     }
 
-    ESP_LOGI(TAG, "track 1/%d: %s", s_track_count, sound_path);
+    ESP_LOGI(TAG, "track %d/%d: %s", s_track_index + 1, s_track_count,
+             sound_path);
     if (audio_play(sound_path) != ESP_OK)
     {
         ESP_LOGW(TAG, "could not play card track: %s", sound_path);
@@ -1191,15 +1193,6 @@ static esp_err_t remote_play_sound(const char *absolute_sd_path)
 static esp_err_t remote_display_image(const char *absolute_sd_path)
 {
     state_lock();
-    if (admin_is_active() && s_admin_code[0] != '\0')
-    {
-        /* Admin mode must keep the access code visible; remote image display
-         * is intentionally unavailable while the password owns the panel. */
-        s_display_base = DISPLAY_BASE_ADMIN;
-        display_show_access_code(s_admin_code);
-        state_unlock();
-        return ESP_ERR_INVALID_STATE;
-    }
     esp_err_t err = display_show_card_image_locked(absolute_sd_path);
     state_unlock();
     return err;
@@ -1212,17 +1205,34 @@ static esp_err_t remote_stop_sound(void)
     state_unlock();
     return err;
 }
+static esp_err_t remote_pause_sound(void)
+{
+    state_lock();
+    esp_err_t err = audio_pause();
+    state_unlock();
+    return err;
+}
+
+static esp_err_t remote_resume_sound(void)
+{
+    state_lock();
+    esp_err_t err = audio_resume();
+    state_unlock();
+    return err;
+}
+
 
 static esp_err_t remote_clear_display(void)
 {
     state_lock();
     if (admin_is_active() && s_admin_code[0] != '\0')
     {
-        /* Clearing the panel cannot hide the admin password. */
+        /* Clear returns the panel to the admin access code after a remote
+         * preview, so the PIN is never lost while admin mode is active. */
         s_display_base = DISPLAY_BASE_ADMIN;
         display_show_access_code(s_admin_code);
         state_unlock();
-        return ESP_ERR_INVALID_STATE;
+        return ESP_OK;
     }
     s_display_base = DISPLAY_BASE_OFF;
     s_battery_visual_deadline = 0;
@@ -1577,7 +1587,8 @@ void app_main(void)
     /* These registrations remain installed across admin start/stop cycles. */
     admin_set_code_callback(show_admin_code);
     admin_set_path_callbacks(remote_play_sound, remote_display_image,
-                             remote_stop_sound, remote_clear_display);
+                             remote_stop_sound, remote_pause_sound,
+                             remote_resume_sound, remote_clear_display);
     admin_set_card_write_callback(remote_write_card);
 
     err = boot_recovery_clear();
@@ -1690,6 +1701,10 @@ void app_main(void)
         }
         else if (!card && card_present)
         {
+            if (admin_is_active())
+            {
+                admin_set_last_card(NULL, 0, NULL);
+            }
             /* Card removed: stop playback so controls don't act on a ghost
              * card. */
             state_lock();

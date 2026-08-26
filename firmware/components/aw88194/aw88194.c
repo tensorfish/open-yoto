@@ -572,3 +572,22 @@ esp_err_t aw88194_start(void)
     ESP_LOGI(TAG, "0x%02x factory SmartPA ready", I2C_ADDR_SPKR_AMP_L);
     return ESP_OK;
 }
+
+esp_err_t aw88194_set_muted(bool muted)
+{
+    esp_err_t err;
+
+    if (!s_identified)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* SYSCTRL.0 is the factory run_pwd control: clear = run, set = power down
+     * the speaker output without changing the I2S stream for headphones. */
+    err = aw88194_update_bits(I2C_ADDR_SPKR_AMP_L, AW88194_REG_SYSCTRL,
+                              0xFFFE, muted ? 0x0001 : 0x0000);
+    if (err == ESP_OK && !muted)
+    {
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    return err;
+}

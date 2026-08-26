@@ -398,11 +398,15 @@ void admin_set_card_write_callback(admin_card_write_cb_t cb)
 void admin_set_path_callbacks(admin_path_cb_t play_sound,
                               admin_path_cb_t display_image,
                               admin_action_cb_t stop_sound,
+                              admin_action_cb_t pause_sound,
+                              admin_action_cb_t resume_sound,
                               admin_action_cb_t clear_display)
 {
     (void)play_sound;
     (void)display_image;
     (void)stop_sound;
+    (void)pause_sound;
+    (void)resume_sound;
     (void)clear_display;
 }
 
@@ -1068,16 +1072,17 @@ int main(void)
         CHECK(last_frame() != WINK_FACE_FRAMES[0]
               && last_frame() != WINK_FACE_FRAMES[1],
               "admin: a wink must not cover the access code");
-        /* Remote image/clear actions must also be rejected while admin owns
-         * the password; otherwise the browser can hide the code directly. */
+        /* Remote image display may temporarily replace the code in admin mode;
+         * this host fixture has no SD image, so the open fails without
+         * repainting the access code. Clear must restore the code successfully. */
         codes = s_access_code_count;
         CHECK(remote_display_image("/sdcard/media/cover.img")
-              == ESP_ERR_INVALID_STATE && s_access_code_count == codes + 1,
-              "admin: remote image must not replace the access code");
+              == ESP_ERR_NOT_FOUND && s_access_code_count == codes,
+              "admin: failed remote image must not repaint the access code");
         codes = s_access_code_count;
-        CHECK(remote_clear_display() == ESP_ERR_INVALID_STATE
+        CHECK(remote_clear_display() == ESP_OK
               && s_access_code_count == codes + 1,
-              "admin: remote clear must not blank the access code");
+              "admin: remote clear must restore the access code");
 
         /* And once admin stops, the face comes back. */
         s_admin_active = false;

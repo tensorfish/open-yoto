@@ -6,15 +6,15 @@
  * ../../components/display/display.c into this translation unit so the
  * geometry constants and the fill_rect call budget under test are the shipped
  * ones. The GC9306 driver is stubbed: gc9306_fill_rect() records every call,
- * and the test reconstructs the 144-column bar from those rects to assert:
+ * and the test reconstructs the 168-column bar to assert:
  *
  *   1. at most 4 fill_rect calls per display_draw_volume_overlay() call;
- *   2. every rect is 12 px tall and inside panel x 48..191, y 199..210;
- *   3. the volume-100 bar is centred: its rect union is exactly x 48..191;
+ *   2. every rect is 16 px tall and inside panel x 36..203, y 195..210;
+ *   3. the volume-100 bar is centred: its rect union is exactly x 36..203;
  *   4. volume 0 is all black; volume 100 has no black and the three band
  *      colours 0x168BFF / 0x20D060 / 0xFF3B30;
- *   5. the coloured column count is monotonic and equals volume * 144 / 100;
- *   6. volume 25 grows from panel x 191 leftwards, all 0x168BFF;
+ *   5. the coloured column count is monotonic and equals volume * 168 / 100;
+ *   6. volume 25 grows from panel x 203 leftwards, all 0x168BFF;
  *   7. drawing 100 then 25 covers the previously lit columns in black.
  */
 
@@ -28,11 +28,11 @@
 #include "../../components/display/display.c"
 
 /* Panel geometry under test (derived from DISPLAY_TFT_* in display.c). */
-#define BAR_X0     48
-#define BAR_X1     191
-#define BAR_Y0     199
+#define BAR_X0     36
+#define BAR_X1     203
+#define BAR_Y0     195
 #define BAR_Y1     210
-#define BAR_WIDTH  144
+#define BAR_WIDTH  168
 
 #define MAX_RECTS 4096
 
@@ -323,8 +323,8 @@ int main(void)
             }
         }
         CHECK(black == 0, "volume 100 has %d black/uncovered column(s)", black);
-        CHECK(blue == 48 && green == 48 && red == 48,
-              "volume 100 band split blue=%d green=%d red=%d (want 48 each)",
+        CHECK(blue == 56 && green == 56 && red == 56,
+              "volume 100 band split blue=%d green=%d red=%d (want 56 each)",
               blue, green, red);
     }
 

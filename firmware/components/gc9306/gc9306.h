@@ -12,13 +12,12 @@ esp_err_t gc9306_fill_rect(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
                            uint32_t color);
 
 /**
- * Render a 16x16 RGBA frame with alpha-premultiplication and 12×
- * nearest-neighbour scaling. The replacement places its 192px test frame at
- * (24,24) after the measured vertical calibration, then writes RGB666.
+ * Render a 16x16 RGBA frame with alpha-premultiplication and 15×
+ * nearest-neighbour scaling into the visible 240x240 canvas.
  */
 esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4]);
 
-/** Stretch a 16x16 RGB565 image across the complete 240x320 physical panel. */
+/** Scale a 16x16 RGB565 image to the visible 240x240 rev-04 canvas. */
 esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16]);
 
 /** Stream a 64x64 RGB565 frame scaled 3x into the 192x192 content window. */

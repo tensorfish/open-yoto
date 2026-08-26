@@ -12,6 +12,7 @@
 #include "aw88194.h"
 #include "board_pins.h"
 #include "codec_es8156.h"
+#include "iox.h"
 
 #include "driver/i2s_std.h"
 #include "esp_log.h"
@@ -46,6 +47,9 @@ static const char *TAG = "audio";
  * stop/pause while still providing natural backpressure on a full DMA. */
 #define AUDIO_I2S_WRITE_TICK_MS 20
 #define AUDIO_I2S_SILENCE_SAMPLES 256
+#define AUDIO_HP_POLL_MS          100
+/* The jack switch pulls hpdetect low when a plug is present. */
+#define AUDIO_HPDETECT_ACTIVE_LOW 1
 
 /* Decode task stack size in bytes (ESP-IDF FreeRTOS convention). */
 #define AUDIO_DECODE_STACK_BYTES 20480
@@ -96,6 +100,11 @@ static unsigned char s_encoded_input[AUDIO_INPUT_BUF_SIZE];
 /* File path for the current playback request, installed before the PLAY
  * notification is issued to the decode task. */
 static char s_path[AUDIO_PATH_MAX];
+
+/* Headphone routing is sampled by the decode task while I2S is active. */
+static TickType_t s_headphone_poll_ticks;
+static bool s_headphone_state_valid;
+static bool s_headphone_inserted;
 
 /**
  * Configure the I2S std TX channel exactly as the stock playback pipeline
@@ -214,6 +223,54 @@ static esp_err_t audio_i2s_clear(void)
     return err;
 }
 
+/* Mute only the SmartPA when a headphone plug is inserted; I2S continues to
+ * feed the ES8156 headphone DAC. A transient IOX read failure leaves the
+ * current speaker state untouched. */
+static void audio_update_headphone_route(bool force)
+{
+    TickType_t now = xTaskGetTickCount();
+    uint8_t port;
+    bool level;
+    bool inserted;
+    esp_err_t err;
+
+    if (!force && s_headphone_state_valid
+        && now - s_headphone_poll_ticks < pdMS_TO_TICKS(AUDIO_HP_POLL_MS))
+    {
+        return;
+    }
+    s_headphone_poll_ticks = now;
+    if (iox_read_port(IOX_EXP(IOX_AUDIO_HPDETECT),
+                      IOX_PORT(IOX_AUDIO_HPDETECT), &port) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "headphone detect read failed");
+        return;
+    }
+    level = (port & (1u << IOX_BIT(IOX_AUDIO_HPDETECT))) != 0;
+#if AUDIO_HPDETECT_ACTIVE_LOW
+    inserted = !level;
+#else
+    inserted = level;
+#endif
+    if (s_headphone_state_valid && inserted == s_headphone_inserted)
+    {
+        return;
+    }
+
+    err = aw88194_set_muted(inserted);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "speaker %s failed: %s",
+                 inserted ? "mute" : "unmute", esp_err_to_name(err));
+        return;
+    }
+    s_headphone_inserted = inserted;
+    s_headphone_state_valid = true;
+    ESP_LOGI(TAG, "headphones %s: speaker %s",
+             inserted ? "inserted" : "removed",
+             inserted ? "muted" : "enabled");
+}
+
 /**
  * Skip an ID3v2 header at the front of an MP3 stream.
  *
@@ -309,6 +366,7 @@ static bool audio_write_pcm(const int16_t *pcm, size_t samples)
 
     while (offset < samples)
     {
+        audio_update_headphone_route(false);
         const int16_t *output;
         size_t chunk_samples = samples - offset;
         size_t chunk_offset = 0;
@@ -1211,6 +1269,7 @@ static void audio_decode_task(void *arg)
             format_name = format == AUDIO_FORMAT_M4A ? "M4A/AAC-LC"
                         : format == AUDIO_FORMAT_AAC_ADTS ? "AAC/ADTS"
                         : "MP3";
+            audio_update_headphone_route(true);
             codec_es8156_unmute();
             s_playing = true;
             ESP_LOGI(TAG, "playing \"%s\" (%s)", s_path, format_name);

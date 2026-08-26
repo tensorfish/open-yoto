@@ -31,6 +31,8 @@
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
+#include "esp_vfs_fat.h"
 #include "esp_wifi_default.h"
 #include "mbedtls/base64.h"
 #include "cJSON.h"
@@ -82,6 +84,7 @@ static esp_err_t admin_send_oom(httpd_req_t *req, const char *where)
 #define ADMIN_WEBUI_PATH        ADMIN_WEBUI_DIR "/index.html"
 #define ADMIN_WEBUI_TMP_PATH    ADMIN_WEBUI_DIR "/index.html.tmp"
 #define ADMIN_WEBUI_BAK_PATH    ADMIN_WEBUI_DIR "/index.html.bak"
+#define ADMIN_UPLOAD_BUFFER_SIZE (32 * 1024)
 
 /* Active-session state. */
 static bool             s_active;
@@ -96,6 +99,8 @@ static admin_code_cb_t  s_code_cb;
 static admin_path_cb_t  s_play_sound_cb;
 static admin_path_cb_t  s_display_image_cb;
 static admin_action_cb_t s_stop_sound_cb;
+static admin_action_cb_t s_pause_sound_cb;
+static admin_action_cb_t s_resume_sound_cb;
 static admin_action_cb_t s_clear_display_cb;
 static admin_card_write_cb_t s_write_card_cb;
 
@@ -1671,6 +1676,10 @@ static esp_err_t admin_webui_upload_handler(httpd_req_t *req)
         size_t wanted = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
         int received = httpd_req_recv(req, (char *)buffer, wanted);
 
+        if (received == HTTPD_SOCK_ERR_TIMEOUT)
+        {
+            continue;
+        }
         if (received <= 0
             || fwrite(buffer, 1, (size_t)received, fp) != (size_t)received)
         {
@@ -2359,6 +2368,16 @@ static esp_err_t admin_stop_sound_handler(httpd_req_t *req)
 {
     return admin_action_handler(req, s_stop_sound_cb);
 }
+static esp_err_t admin_pause_sound_handler(httpd_req_t *req)
+{
+    return admin_action_handler(req, s_pause_sound_cb);
+}
+
+static esp_err_t admin_resume_sound_handler(httpd_req_t *req)
+{
+    return admin_action_handler(req, s_resume_sound_cb);
+}
+
 
 static esp_err_t admin_clear_display_handler(httpd_req_t *req)
 {
@@ -2555,10 +2574,14 @@ static esp_err_t admin_fs_upload_handler(httpd_req_t *req)
 {
     char logical[ADMIN_PATH_MAX];
     char absolute[ADMIN_PATH_MAX];
+    char response[128];
     FILE *fp;
-    uint8_t buffer[ADMIN_FS_UPLOAD_CHUNK_SIZE];
+    uint8_t *buffer;
     size_t remaining = req->content_len;
+    size_t buffered = 0;
     size_t written_total = 0;
+    int64_t started_us;
+    int64_t elapsed_us;
 
     if (!admin_require_session(req))
     {
@@ -2572,40 +2595,128 @@ static esp_err_t admin_fs_upload_handler(httpd_req_t *req)
                             "invalid upload path");
         return ESP_FAIL;
     }
+    buffer = malloc(ADMIN_UPLOAD_BUFFER_SIZE);
+    if (buffer == NULL)
+    {
+        return admin_send_oom(req, "allocating upload buffer");
+    }
     fp = fopen(absolute, "wb");
     if (fp == NULL)
     {
         int error_number = errno;
+        free(buffer);
         return admin_send_fs_errno(req, "open upload", absolute, error_number);
     }
+
+    started_us = esp_timer_get_time();
     while (remaining > 0)
     {
-        size_t wanted = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
-        int got = httpd_req_recv(req, (char *)buffer, wanted);
+        size_t wanted = remaining;
+        int got;
 
-        if (got <= 0 || fwrite(buffer, 1, (size_t)got, fp) != (size_t)got)
+        if (wanted > ADMIN_UPLOAD_BUFFER_SIZE - buffered)
+        {
+            wanted = ADMIN_UPLOAD_BUFFER_SIZE - buffered;
+        }
+        got = httpd_req_recv(req, (char *)buffer + buffered, wanted);
+        if (got == HTTPD_SOCK_ERR_TIMEOUT)
+        {
+            continue;
+        }
+        if (got <= 0)
         {
             fclose(fp);
             unlink(absolute);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                "upload failed while writing");
-            return ESP_FAIL;
+            free(buffer);
+            return admin_send_fs_errno(req, "receive upload", absolute, EIO);
         }
+        buffered += (size_t)got;
         remaining -= (size_t)got;
-        written_total += (size_t)got;
+
+        if (buffered == ADMIN_UPLOAD_BUFFER_SIZE || remaining == 0)
+        {
+            if (fwrite(buffer, 1, buffered, fp) != buffered)
+            {
+                int error_number = errno;
+                fclose(fp);
+                unlink(absolute);
+                free(buffer);
+                return admin_send_fs_errno(req, "write upload", absolute,
+                                           error_number);
+            }
+            written_total += buffered;
+            buffered = 0;
+        }
     }
     if (fclose(fp) != 0)
     {
+        int error_number = errno;
         unlink(absolute);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                            "upload failed while closing");
-        return ESP_FAIL;
+        free(buffer);
+        return admin_send_fs_errno(req, "close upload", absolute, error_number);
     }
-    ESP_LOGI(TAG, "uploaded %s (%u bytes)", absolute, (unsigned)written_total);
+    free(buffer);
+
+    elapsed_us = esp_timer_get_time() - started_us;
+    if (elapsed_us < 1)
+    {
+        elapsed_us = 1;
+    }
+    ESP_LOGI(TAG, "uploaded %s: %u bytes in %lld ms (%u B/s)", absolute,
+             (unsigned)written_total, (long long)(elapsed_us / 1000),
+             (unsigned)((written_total * 1000000ULL) / (uint64_t)elapsed_us));
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"bytes\":%u,\"elapsed_ms\":%lld,\"bytes_per_sec\":%u}",
+             (unsigned)written_total, (long long)(elapsed_us / 1000),
+             (unsigned)((written_total * 1000000ULL) / (uint64_t)elapsed_us));
     httpd_resp_set_status(req, "201 Created");
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":true}");
+    return httpd_resp_sendstr(req, response);
 }
+
+static esp_err_t admin_diagnostics_handler(httpd_req_t *req)
+{
+    char response[384];
+    wifi_config_t ap_config = { 0 };
+    wifi_sta_list_t stations = { 0 };
+    uint64_t sd_total_bytes = 0;
+    uint64_t sd_free_bytes = 0;
+    int8_t tx_power = 0;
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    if (esp_wifi_get_config(WIFI_IF_AP, &ap_config) != ESP_OK)
+    {
+        ap_config.ap.channel = 0;
+    }
+    if (esp_wifi_ap_get_sta_list(&stations) != ESP_OK)
+    {
+        stations.num = 0;
+    }
+    (void)esp_wifi_get_max_tx_power(&tx_power);
+    bool sd_info_ok = esp_vfs_fat_info(CONTENT_MOUNT_POINT, &sd_total_bytes,
+                                       &sd_free_bytes) == ESP_OK;
+    snprintf(response, sizeof(response),
+             "{\"ap_channel\":%u,\"connected_clients\":%u,\"tx_power_quarter_dbm\":%d,\"internal_free\":%lu,\"internal_min\":%lu,\"internal_largest\":%lu,\"psram_free\":%lu,\"sd_info_ok\":%s,\"sd_total_bytes\":%llu,\"sd_free_bytes\":%llu}",
+             (unsigned)ap_config.ap.channel, (unsigned)stations.num,
+             (int)tx_power,
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL
+                                                    | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_minimum_free_size(
+                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_largest_free_block(
+                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             sd_info_ok ? "true" : "false",
+             (unsigned long long)sd_total_bytes,
+             (unsigned long long)sd_free_bytes);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, response);
+}
+
 
 static esp_err_t admin_fs_mkdir_handler(httpd_req_t *req)
 {
@@ -2644,6 +2755,81 @@ static esp_err_t admin_fs_mkdir_handler(httpd_req_t *req)
     httpd_resp_set_status(req, created ? "201 Created" : "200 OK");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+/*
+ * Atomically reserve a new destination directory for a folder upload. A
+ * concurrent upload cannot make the browser's collision check stale.
+ */
+static esp_err_t admin_fs_mkdir_unique_handler(httpd_req_t *req)
+{
+    cJSON *root;
+    char logical[ADMIN_PATH_MAX];
+    char absolute[ADMIN_PATH_MAX];
+    char candidate[ADMIN_PATH_MAX];
+    char response[ADMIN_PATH_MAX + 32];
+    const char *base;
+    size_t parent_len;
+    unsigned int suffix;
+
+    if (!admin_require_session(req))
+    {
+        return ESP_FAIL;
+    }
+    root = admin_read_json(req);
+    if (root == NULL
+        || !admin_json_string(root, "path", logical, sizeof(logical))
+        || !admin_resolve_sd_path(logical, absolute, sizeof(absolute))
+        || strcmp(absolute, CONTENT_MOUNT_POINT) == 0)
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
+        return ESP_FAIL;
+    }
+    cJSON_Delete(root);
+
+    base = strrchr(absolute, '/');
+    if (base == NULL || base[1] == '\0')
+    {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid path");
+    }
+    base++;
+    parent_len = (size_t)(base - absolute - 1);
+
+    for (suffix = 0; suffix < 10000; suffix++)
+    {
+        int written;
+
+        if (suffix == 0)
+        {
+            written = snprintf(candidate, sizeof(candidate), "%s", absolute);
+        }
+        else
+        {
+            written = snprintf(candidate, sizeof(candidate), "%.*s/%s(%u)",
+                               (int)parent_len, absolute, base, suffix);
+        }
+        if (written < 0 || (size_t)written >= sizeof(candidate))
+        {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "folder name too long");
+        }
+        if (mkdir(candidate, 0755) == 0)
+        {
+            snprintf(response, sizeof(response),
+                     "{\"ok\":true,\"path\":\"%s\"}", candidate);
+            httpd_resp_set_status(req, "201 Created");
+            httpd_resp_set_type(req, "application/json");
+            return httpd_resp_sendstr(req, response);
+        }
+        if (errno != EEXIST)
+        {
+            return admin_send_fs_errno(req, "create upload directory",
+                                       candidate, errno);
+        }
+    }
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "could not allocate upload folder name");
 }
 
 static esp_err_t admin_fs_rename_handler(httpd_req_t *req)
@@ -2802,6 +2988,8 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
           .handler = admin_webui_upload_handler },
         { .uri = "/api/list", .method = HTTP_GET,
           .handler = admin_list_handler },
+        { .uri = "/api/diagnostics", .method = HTTP_GET,
+          .handler = admin_diagnostics_handler },
         { .uri = "/api/last-card", .method = HTTP_GET,
           .handler = admin_last_card_handler },
         { .uri = "/api/card/write", .method = HTTP_POST,
@@ -2818,6 +3006,10 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
           .handler = admin_display_handler },
         { .uri = "/api/control/stop", .method = HTTP_POST,
           .handler = admin_stop_sound_handler },
+        { .uri = "/api/control/pause", .method = HTTP_POST,
+          .handler = admin_pause_sound_handler },
+        { .uri = "/api/control/resume", .method = HTTP_POST,
+          .handler = admin_resume_sound_handler },
         { .uri = "/api/control/clear", .method = HTTP_POST,
           .handler = admin_clear_display_handler },
         { .uri = "/api/fs/list", .method = HTTP_GET,
@@ -2830,6 +3022,8 @@ static esp_err_t admin_register_handlers(httpd_handle_t server)
           .handler = admin_fs_create_handler },
         { .uri = "/api/fs/mkdir", .method = HTTP_POST,
           .handler = admin_fs_mkdir_handler },
+        { .uri = "/api/fs/mkdir-unique", .method = HTTP_POST,
+          .handler = admin_fs_mkdir_unique_handler },
         { .uri = "/api/fs/rename", .method = HTTP_POST,
           .handler = admin_fs_rename_handler },
         { .uri = "/api/fs/delete", .method = HTTP_POST,
@@ -3013,8 +3207,8 @@ esp_err_t admin_start(char *code_out, size_t code_size)
     s_wifi_started = true;
 
     httpd_cfg = (httpd_config_t)HTTPD_DEFAULT_CONFIG();
-    /* Root, recovery uploader, and all management APIs require 22 handlers. */
-    httpd_cfg.max_uri_handlers = 24;
+    /* Root, recovery uploader, storage diagnostics, and management APIs need 24. */
+    httpd_cfg.max_uri_handlers = 28;
     httpd_cfg.max_open_sockets = 4;
     httpd_cfg.stack_size = 16384;
     httpd_cfg.lru_purge_enable = true;
@@ -3117,10 +3311,14 @@ void admin_set_card_write_callback(admin_card_write_cb_t cb)
 void admin_set_path_callbacks(admin_path_cb_t play_sound,
                               admin_path_cb_t display_image,
                               admin_action_cb_t stop_sound,
+                              admin_action_cb_t pause_sound,
+                              admin_action_cb_t resume_sound,
                               admin_action_cb_t clear_display)
 {
     s_play_sound_cb = play_sound;
     s_display_image_cb = display_image;
     s_stop_sound_cb = stop_sound;
+    s_pause_sound_cb = pause_sound;
+    s_resume_sound_cb = resume_sound;
     s_clear_display_cb = clear_display;
 }

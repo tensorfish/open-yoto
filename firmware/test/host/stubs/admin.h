@@ -30,6 +30,8 @@ void admin_set_card_write_callback(admin_card_write_cb_t cb);
 void admin_set_path_callbacks(admin_path_cb_t play_sound,
                               admin_path_cb_t display_image,
                               admin_action_cb_t stop_sound,
+                              admin_action_cb_t pause_sound,
+                              admin_action_cb_t resume_sound,
                               admin_action_cb_t clear_display);
 
 #endif /* HOST_STUB_ADMIN_H */

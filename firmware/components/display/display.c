@@ -222,8 +222,9 @@ esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Browser-generated OYIM artwork is deliberately full-bleed. Icon and
-     * animation rendering remains on the calibrated 192x192 RGBA path. */
+    /* Browser-generated OYIM artwork fills the visible square canvas without
+     * stretching into the cropped lower panel rows. Icon and animation
+     * rendering remains on the calibrated 192x192 RGBA path. */
     err = gc9306_draw_rgb56516_full(pixels);
     if (err == ESP_OK)
     {
@@ -356,11 +357,9 @@ void display_show_access_code(
 }
 
 /*
- * The volume bar is 144 px wide and 12 px tall, centred horizontally in the
- * 192 px icon window, with its bottom edge on DISPLAY_TFT_OFFSET_Y + 183.
- * It spans panel x 48..191 and y 199..210, entirely inside the icon window
- * (panel y 24..215), so gc9306_draw_rgba16() erases it on the next full
- * frame.
+ * The volume bar is 168 px wide and 16 px tall, centred in the visible
+ * canvas with its bottom edge on the original feedback baseline. It spans
+ * panel x 36..203 and y 195..210.
  *
  * The bar used to be drawn one 1-px column at a time, but gc9306_fill_rect()
  * toggles the TFT CS/DC pins through the IOX over I2C around every rect, so
@@ -368,8 +367,8 @@ void display_show_access_code(
  * full-height rects (three colour bands plus a black remainder) removes the
  * I2C chatter.
  */
-#define VOLUME_BAR_WIDTH  144
-#define VOLUME_BAR_HEIGHT 12
+#define VOLUME_BAR_WIDTH  168
+#define VOLUME_BAR_HEIGHT 16
 #define VOLUME_BAR_X0 \
     (DISPLAY_TFT_OFFSET_X + (16 * DISPLAY_TFT_SCALE - VOLUME_BAR_WIDTH) / 2)
 #define VOLUME_BAR_X1 (VOLUME_BAR_X0 + VOLUME_BAR_WIDTH - 1)

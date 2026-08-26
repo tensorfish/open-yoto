@@ -140,6 +140,19 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "not found"}, 404)
         elif path == "/api/list":
             self._json(MAPPINGS)
+        elif path == "/api/diagnostics":
+            self._json({
+                "ap_channel": 1,
+                "connected_clients": 1,
+                "tx_power_quarter_dbm": 80,
+                "internal_free": 143000,
+                "internal_min": 120000,
+                "internal_largest": 78000,
+                "psram_free": 4000000,
+                "sd_info_ok": True,
+                "sd_total_bytes": 8 * 1024 * 1024 * 1024,
+                "sd_free_bytes": 5 * 1024 * 1024 * 1024,
+            })
         elif path == "/api/last-card":
             card = dict(LAST_CARD)
             card["exists"] = any(
@@ -231,11 +244,35 @@ class Handler(BaseHTTPRequestHandler):
                 TREE[parent].append({"name": name, "path": target,
                                      "type": "directory", "size": 0})
             self._json({"ok": True})
+        elif path == "/api/fs/mkdir-unique":
+            try:
+                target = json.loads(body or b"{}").get("path", "")
+            except json.JSONDecodeError:
+                target = ""
+            parent, name = target.rsplit("/", 1)
+            if parent not in TREE or not name:
+                self._json({"error": "bad path"}, 400)
+                return
+            suffix = 0
+            while True:
+                candidate_name = name if suffix == 0 else f"{name}({suffix})"
+                candidate = parent + "/" + candidate_name
+                if candidate not in TREE and not any(
+                    entry["path"] == candidate
+                    for entries in TREE.values() for entry in entries
+                ):
+                    break
+                suffix += 1
+            TREE[candidate] = []
+            TREE[parent].append({
+                "name": candidate_name,
+                "path": candidate,
+                "type": "directory",
+                "size": 0,
+            })
+            self._json({"ok": True, "path": candidate})
         elif path == "/api/fs/upload":
             target = (query.get("path") or [""])[0]
-            if len(body) > 4 * 1024 * 1024:           # ADMIN_BODY_MAX
-                self._json({"error": "too large"}, 400)
-                return
             parent = target.rsplit("/", 1)[0]
             if parent not in TREE:
                 self._json({"error": "parent missing"}, 400)
@@ -246,7 +283,12 @@ class Handler(BaseHTTPRequestHandler):
                                  "size": len(body)})
             if target.endswith(".img"):
                 IMAGES[target] = body
-            self._json({"ok": True})
+            self._json({
+                "ok": True,
+                "bytes": len(body),
+                "elapsed_ms": 1,
+                "bytes_per_sec": len(body) * 1000,
+            })
         elif path == "/api/fs/delete":
             try:
                 request = json.loads(body or b"{}")

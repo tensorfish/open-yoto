@@ -334,18 +334,13 @@ esp_err_t gc9306_fill_rect(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
 esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
 {
     enum {
-        STOCK_SCALE = 12,
-        STOCK_X = 24,
-        /* The physical panel remains bottom-biased after the first 20px
-         * adjustment; boot rendering calibrates its visual center 40px up. */
-        PANEL_Y_BIAS = -40,
-        STOCK_Y = (320 - 16 * STOCK_SCALE) / 2 + PANEL_Y_BIAS,
-        STOCK_SIZE = 16 * STOCK_SCALE,
+        CANVAS_SCALE = 15,
+        CANVAS_SIZE = 16 * CANVAS_SCALE,
     };
     uint8_t b[4];
     esp_err_t err;
     size_t sent = 0;
-    const size_t total = STOCK_SIZE * STOCK_SIZE;
+    const size_t total = CANVAS_SIZE * CANVAS_SIZE;
 
     if (rgba == NULL)
     {
@@ -363,9 +358,9 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
     if (err == ESP_OK)
     {
         b[0] = 0x00;
-        b[1] = STOCK_X;
+        b[1] = 0x00;
         b[2] = 0x00;
-        b[3] = STOCK_X + STOCK_SIZE - 1;
+        b[3] = CANVAS_SIZE - 1;
         err = gc9306_tx_dc(b, 4, true);
     }
     if (err == ESP_OK)
@@ -376,9 +371,9 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
     if (err == ESP_OK)
     {
         b[0] = 0x00;
-        b[1] = STOCK_Y;
+        b[1] = 0x00;
         b[2] = 0x00;
-        b[3] = STOCK_Y + STOCK_SIZE - 1;
+        b[3] = CANVAS_SIZE - 1;
         err = gc9306_tx_dc(b, 4, true);
     }
     if (err == ESP_OK)
@@ -405,8 +400,8 @@ esp_err_t gc9306_draw_rgba16(const uint8_t rgba[16 * 16 * 4])
         for (size_t i = 0; i < n; i++)
         {
             size_t pixel = sent + i;
-            size_t sx = 15 - ((pixel % STOCK_SIZE) / STOCK_SCALE);
-            size_t sy = (pixel / STOCK_SIZE) / STOCK_SCALE;
+            size_t sx = 15 - ((pixel % CANVAS_SIZE) / CANVAS_SCALE);
+            size_t sy = (pixel / CANVAS_SIZE) / CANVAS_SCALE;
             const uint8_t *src = &rgba[(sy * 16 + sx) * 4];
             uint8_t alpha = src[3];
 
@@ -437,7 +432,9 @@ esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16])
     uint8_t b[4];
     esp_err_t err;
     size_t sent = 0;
-    const size_t total = GC9306_PANEL_W * GC9306_PANEL_H;
+    /* The visible rev-04 canvas is square. Keeping 16:16 artwork at 15x15
+     * preserves its aspect ratio and avoids driving the cropped lower rows. */
+    const size_t total = GC9306_PANEL_W * GC9306_PANEL_W;
 
     if (pixels == NULL)
     {
@@ -469,8 +466,8 @@ esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16])
     {
         b[0] = 0x00;
         b[1] = 0x00;
-        b[2] = (GC9306_PANEL_H - 1) >> 8;
-        b[3] = (GC9306_PANEL_H - 1) & 0xFF;
+        b[2] = (GC9306_PANEL_W - 1) >> 8;
+        b[3] = (GC9306_PANEL_W - 1) & 0xFF;
         err = gc9306_tx_dc(b, 4, true);
     }
     if (err == ESP_OK)
@@ -498,7 +495,7 @@ esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16])
             size_t pixel = sent + i;
             size_t x = pixel % GC9306_PANEL_W;
             size_t y = pixel / GC9306_PANEL_W;
-            uint16_t color = pixels[(y / 20) * 16 + 15 - (x / 15)];
+            uint16_t color = pixels[(y / 15) * 16 + 15 - (x / 15)];
 
             gc9306_store_rgb(i, (uint8_t)(((color >> 11) & 0x1F) << 3),
                               (uint8_t)(((color >> 5) & 0x3F) << 2),

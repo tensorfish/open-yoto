@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include "esp_err.h"
 
 /**
@@ -16,3 +17,9 @@ esp_err_t aw88194_init(void);
  * register table, DSP firmware/config, VCALB, status/PLL checks, and unmute.
  */
 esp_err_t aw88194_start(void);
+
+/**
+ * Power down or resume the SmartPA output while preserving its programmed DSP
+ * state. Used to keep the speaker silent while headphones are connected.
+ */
+esp_err_t aw88194_set_muted(bool muted);
