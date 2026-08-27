@@ -1,5 +1,5 @@
 [project]
-site_url = "https://open-yoto.example/"
+site_url = "https://docs.openyoto.com"
 site_name = "open-yoto"
 site_description = "Custom firmware, reverse engineering, and research for the Yoto Player ESP32"
 site_author = "open-yoto"
