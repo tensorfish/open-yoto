@@ -218,8 +218,9 @@ firmware/
 **TODO**:
 
 - HT16D35x frame format + 6-bit-gray fan-out [rev #05].
-- AW88194A runtime headphone insertion/removal routing and per-path volume
-  curves; cold-start SmartK data and speaker activation are implemented.
+- Separate speaker/headphone volume curves. Insertion and removal are already
+  handled (100 ms `hpdetect` poll, SmartPA muted while a plug is in), but both
+  paths share one PCM gain.
 - Translation of stock `/sdcard/cards` metadata into open-yoto playlists.
 
 ## Hardware revision caveat
