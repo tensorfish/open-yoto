@@ -308,9 +308,11 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
 - **Low battery** = charge < 15% **or** voltage < 3.3 V.
 - The battery screen comes from `firmware/icons/battery-*.png`. Each icon covers
   the ten points up to its label — `battery-10.png` is 0–10%, `battery-20.png`
-  is 11–20%, through `battery-100.png` for 91–100% — `battery-charging.png`
-  replaces all of them while charging, and `battery-empty.png` appears only when
-  the gauge reading is unavailable.
+  is 11–20%, through `battery-100.png` for 91–100% — and `battery-empty.png`
+  appears only when the gauge reading is unavailable. While charging, the
+  charge-level animation is shown instead: `battery-charging-0.png` for 0–9%,
+  `battery-charging-10.png` for 10–19%, and so on to `battery-charging-100.png`
+  at 100%.
 - Battery info never fights the face. Charging is announced as a glimpse on the
   not-charging → charging **edge**, at boot, and on power-on; it covers the base
   screen for 5 s and then hands it back. The 30 s re-check only logs while

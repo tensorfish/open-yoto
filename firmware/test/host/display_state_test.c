@@ -662,7 +662,7 @@ int main(void)
 
         for (int i = mark; i < s_frame_count; i++)
         {
-            if (s_frames[i] == BATTERY_ICON_CHARGING)
+            if (s_frames[i] == battery_charging_icon_for(s_soc))
             {
                 saw_charging = true;
             }
@@ -704,7 +704,7 @@ int main(void)
 
         for (int i = mark; i < s_frame_count; i++)
         {
-            if (s_frames[i] == BATTERY_ICON_CHARGING)
+            if (s_frames[i] == battery_charging_icon_for(s_soc))
             {
                 glimpse_count++;
             }
@@ -750,7 +750,7 @@ int main(void)
 
         CHECK(s_battery_visual_deadline != 0,
               "wink-over-battery: glimpse should arm s_battery_visual_deadline");
-        CHECK(last_frame() == BATTERY_ICON_CHARGING,
+        CHECK(last_frame() == battery_charging_icon_for(s_soc),
               "wink-over-battery: glimpse should show the charging icon");
 
         skip_track(1);
@@ -864,7 +864,7 @@ int main(void)
         state_lock();
         display_show_battery_glimpse_locked();
         state_unlock();
-        CHECK(last_frame() == BATTERY_ICON_CHARGING,
+        CHECK(last_frame() == battery_charging_icon_for(s_soc),
               "volume: charging glimpse expected while the overlay is live");
 
         /* (b) every icon frame drawn while the overlay was live is immediately
@@ -926,9 +926,29 @@ int main(void)
         }
         CHECK(battery_icon_for(-1) == BATTERY_ICON_EMPTY,
               "battery icon: soc -1 should map to BATTERY_ICON_EMPTY");
+
+        /*
+         * Charging maps each ten-point band to its charging frame:
+         * battery-charging-0.png for 0..9%, battery-charging-10.png for
+         * 10..19%, ... battery-charging-100.png at 100%; unknown reads as 0%.
+         */
+        {
+            static const int socs[] =
+                { 0, 9, 10, 19, 20, 50, 90, 99, 100, -1 };
+            static const int expected[] =
+                { 0, 0, 1, 1, 2, 5, 9, 9, 10, 0 };
+
+            for (size_t i = 0; i < sizeof(socs) / sizeof(socs[0]); i++)
+            {
+                CHECK(battery_charging_icon_for(socs[i]) ==
+                          BATTERY_ICON_FRAMES[11 + expected[i]],
+                      "charging icon: soc %d should map to frame 11+%d",
+                      socs[i], expected[i]);
+            }
+        }
         set_charging(true);
-        CHECK(battery_icon_now() == BATTERY_ICON_CHARGING,
-              "battery icon: charging must map to BATTERY_ICON_CHARGING");
+        CHECK(battery_icon_now() == battery_charging_icon_for(s_soc),
+              "battery icon: charging must map to battery_charging_icon_for");
     }
 
     /* ------------------------------------------- 9. POWER OFF / ON -------- */

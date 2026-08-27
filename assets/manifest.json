@@ -960,7 +960,7 @@
       "sha256": "41d27ca3fa8d9c78c7556239fffc7b4f84f8ce689f29aa4fd44a019233fdc64b"
     },
     {
-      "file": "factory-087-0x067D15-16x16.png",
+      "file": "battery-charging-0.png",
       "flash_offset": "0x067D15",
       "bytes": 258,
       "width": 16,
@@ -971,7 +971,7 @@
       "sha256": "89f3037ff1e3ca7509535a53575a557d1645cfc7d1b8d33534880c436c198b7b"
     },
     {
-      "file": "factory-088-0x067E1C-16x16.png",
+      "file": "battery-charging-10.png",
       "flash_offset": "0x067E1C",
       "bytes": 264,
       "width": 16,
@@ -982,7 +982,7 @@
       "sha256": "0df7f5d324dc0affc66a9e43fcfc4928c416e68a41f368229cd7f820fdbfb3df"
     },
     {
-      "file": "factory-089-0x067F29-16x16.png",
+      "file": "battery-charging-20.png",
       "flash_offset": "0x067F29",
       "bytes": 266,
       "width": 16,
@@ -993,7 +993,7 @@
       "sha256": "07f39fe9a93f341344e444afbb7967547b393554fdc3ecbc6b6363088ad62ea8"
     },
     {
-      "file": "factory-090-0x068038-16x16.png",
+      "file": "battery-charging-30.png",
       "flash_offset": "0x068038",
       "bytes": 267,
       "width": 16,
@@ -1004,7 +1004,7 @@
       "sha256": "9c1909048e0cdbed5198237f8692b78f79694042b38e0c24ef041dde6268eae8"
     },
     {
-      "file": "factory-091-0x068148-16x16.png",
+      "file": "battery-charging-40.png",
       "flash_offset": "0x068148",
       "bytes": 269,
       "width": 16,
@@ -1015,7 +1015,7 @@
       "sha256": "10ad702f4500a1caa9fa815708661f1baf7786cc2c5c07402d24356d7030e118"
     },
     {
-      "file": "factory-092-0x06825A-16x16.png",
+      "file": "battery-charging-50.png",
       "flash_offset": "0x06825A",
       "bytes": 269,
       "width": 16,
@@ -1026,7 +1026,7 @@
       "sha256": "10ad702f4500a1caa9fa815708661f1baf7786cc2c5c07402d24356d7030e118"
     },
     {
-      "file": "factory-093-0x06836C-16x16.png",
+      "file": "battery-charging-60.png",
       "flash_offset": "0x06836C",
       "bytes": 271,
       "width": 16,
@@ -1037,7 +1037,7 @@
       "sha256": "50c6002834a2a2c1c4ca596177cf4076ea75e07cb97782dff3ccbee161ca4b1e"
     },
     {
-      "file": "factory-094-0x068480-16x16.png",
+      "file": "battery-charging-70.png",
       "flash_offset": "0x068480",
       "bytes": 274,
       "width": 16,
@@ -1048,7 +1048,7 @@
       "sha256": "e7208ca03cb051c411a66b3f4a5faf2f364b2e099008c1e6d885fa9415a284fa"
     },
     {
-      "file": "factory-095-0x068597-16x16.png",
+      "file": "battery-charging-80.png",
       "flash_offset": "0x068597",
       "bytes": 269,
       "width": 16,
@@ -1059,7 +1059,7 @@
       "sha256": "769eb8339447d7e4d842654b901f02c084cc0f012f1f90a14d1a9d5320b9b44e"
     },
     {
-      "file": "factory-096-0x0686A9-16x16.png",
+      "file": "battery-charging-90.png",
       "flash_offset": "0x0686A9",
       "bytes": 267,
       "width": 16,
@@ -1070,7 +1070,7 @@
       "sha256": "66a542ca3c20863865cda79dc869e7bcfde7dd52b44d33d3b9c6cacf189547f2"
     },
     {
-      "file": "factory-097-0x0687B9-16x16.png",
+      "file": "battery-charging-100.png",
       "flash_offset": "0x0687B9",
       "bytes": 269,
       "width": 16,

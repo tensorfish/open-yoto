@@ -456,12 +456,40 @@ static const uint8_t *battery_icon_for(int soc)
     return BATTERY_ICON_FRAMES[level];
 }
 
-/* The icon the battery currently warrants: the charging bolt while charging,
- * otherwise the icon covering the state of charge. */
+/*
+ * Pick the charging icon for a state of charge. Each frame covers the ten
+ * points up to its label: battery-charging-0.png is 0..9%, battery-charging-10.png
+ * is 10..19%, and so on to battery-charging-100.png at 100%. An unavailable
+ * reading falls back to the 0% frame.
+ *
+ * @param[in] soc state of charge 0..100; negative means unknown.
+ */
+static const uint8_t *battery_charging_icon_for(int soc)
+{
+    int level;
+
+    if (soc < 0)
+    {
+        soc = 0;
+    }
+    if (soc > 100)
+    {
+        soc = 100;
+    }
+    level = soc / 10;
+    /* Frames 11..21 are battery-charging-0.png through battery-charging-100.png. */
+    return BATTERY_ICON_FRAMES[11 + level];
+}
+
+/* The icon the battery currently warrants: the charge-level charging icon while
+ * charging, otherwise the icon covering the state of charge. */
 static const uint8_t *battery_icon_now(void)
 {
-    return battery_is_charging() ? BATTERY_ICON_CHARGING
-                                 : battery_icon_for(battery_soc());
+    if (battery_is_charging())
+    {
+        return battery_charging_icon_for(battery_soc());
+    }
+    return battery_icon_for(battery_soc());
 }
 
 static void display_render_battery_locked(void)

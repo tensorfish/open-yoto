@@ -134,7 +134,7 @@ firmware/
 │   ├── test_main.c           # boot test firmware (display + beep)
 │   ├── boot_face_rgba.h      # generated: face-01..face-08 animation frames
 │   ├── wink_face_rgba.h      # generated: the two wink faces
-│   ├── battery_icons_rgba.h  # generated: charging, 10..100, empty icons
+│   ├── battery_icons_rgba.h  # generated: charging 0..100, 10..100, empty icons
 │   ├── Kconfig.projbuild     # CONFIG_APP_TEST_MODE switch
 │   └── CMakeLists.txt
 ├── test/host/                # host tests (no hardware): volume-bar geometry
@@ -172,9 +172,10 @@ firmware/
 - **Boot faces, winks, and battery icons**: `icons/face-01.png`…`face-08.png`
   play at 16 fps and rest on `face-08`, the idle face; turning the right knob
   with no card loaded winks between `icons/face-wink-01.png` and
-  `face-wink-02.png`. The battery screen uses `icons/battery-charging.png`,
-  `icons/battery-10.png`…`battery-100.png` (SOC floored to ten), and
-  `icons/battery-empty.png` below 10%. All three sets are compiled in as
+  `face-wink-02.png`. The battery screen uses `icons/battery-10.png`…
+  `battery-100.png` (SOC floored to ten), `icons/battery-empty.png` below 10%,
+  and — while charging — `icons/battery-charging-0.png`…
+  `battery-charging-100.png` (SOC floored to ten). All three sets are compiled in as
   `main/boot_face_rgba.h`, `main/wink_face_rgba.h` and
   `main/battery_icons_rgba.h` by `tools/png_to_rgba_header.py`, which records
   each PNG and RGBA SHA-256 so a header can be audited against its icon.
