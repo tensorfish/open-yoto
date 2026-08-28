@@ -228,6 +228,11 @@ esp_err_t battery_init(void)
     return ESP_OK;
 }
 
+esp_err_t battery_service(void)
+{
+    return ESP_OK;
+}
+
 bool audio_is_playing(void)
 {
     return s_playing;

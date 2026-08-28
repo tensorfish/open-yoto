@@ -29,7 +29,7 @@
 #define I2C_ADDR_IOX_0              0x20   /* PI4IOE5V6416 #0 (buttons, charger, codec ctrl) */
 #define I2C_ADDR_IOX_1              0x21   /* PI4IOE5V6416 #1 (display CS, power ctrl)      */
 #define I2C_ADDR_FUEL_GAUGE         0x64   /* CW2215B battery fuel gauge                    */
-#define I2C_ADDR_CHARGER            0x6B   /* SGM41513 charger                              */
+#define I2C_ADDR_CHARGER            0x1A   /* SGM41513 charger                              */
 #define I2C_ADDR_ACCELEROMETER      0x18   /* LIS2DH12 accelerometer */
 #define I2C_ADDR_SPKR_AMP_L         0x34   /* aw881xx speaker amp (left) */
 #ifdef CONFIG_BOARD_REV_04
@@ -122,10 +122,13 @@
 #ifdef CONFIG_BOARD_REV_04
 #define IOX_BAT_ALERT               IOX_PIN(0, 1, 0)   /* IOX.1.0 */
 #define IOX_CHG_STAT                IOX_PIN(0, 1, 7)   /* IOX.1.7 */
-#define IOX_PLUG_STAT               IOX_PIN(0, 1, 5)   /* IOX.1.5 */
+#define IOX_USB_POWER_STAT          IOX_PIN(0, 1, 5)   /* plugstat, IOX.1.5 */
 #else
 #define IOX_BAT_ALERT               IOX_PIN(0, 0, 6)   /* IOX.0.6 */
 #define IOX_CHG_STAT                IOX_PIN(0, 1, 4)   /* IOX.1.4 */
+#define IOX_USB_POWER_STAT          IOX_PIN(0, 1, 0)   /* nvbusstat, IOX.1.0 */
+#define IOX_QI_CHARGE_ENABLE_N      IOX_PIN(1, 0, 6)   /* nqichgen, IOX.2.6 */
+#define IOX_USB_CHARGE_ENABLE_N     IOX_PIN(1, 0, 7)   /* nvbuschgen, IOX.2.7 */
 #endif
 #define IOX_BTN_POWER               IOX_PIN(0, 1, 3)   /* IOX.1.3 */
 #define IOX_AUDIO_HPDETECT          IOX_PIN(0, 1, 1)   /* IOX.1.1 */

@@ -5,7 +5,8 @@ it glanceable — detail belongs in `docs/`, not there.
 
 - `landing-page/` — standalone public landing page; plain HTML/CSS with no build step.
 - `docs/index.md` — documentation hub (published to https://docs.openyoto.com).
-- `docs/firmware/setup.md` — install, flash, and first-boot guide for users.
+- `docs/firmware/flash-custom-firmware.md` — supported hardware, backup, wiring, and firmware flashing guide.
+- `docs/firmware/post-flash-setup.md` — admin NFC card, hotspot, SD-hosted web UI, and local content setup.
 - `docs/build-setup.md` — ESP-IDF installation and verified Linux UART flash workflow.
 - `docs/open-yoto-firmware.md` — runtime architecture and behavior of this firmware.
 - `docs/hardware.md` — board revisions, pin maps, and physical interfaces.

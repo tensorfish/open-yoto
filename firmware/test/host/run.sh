@@ -23,6 +23,17 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o /tmp/display_state_test \
     display_state_test.c
 
+cc -std=c11 -Wall -Wextra -Werror \
+    -I stubs \
+    -o /tmp/battery_charge_rev04_test \
+    -DCONFIG_BOARD_REV_04 \
+    battery_charge_test.c
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I stubs \
+    -o /tmp/battery_charge_rev05_test \
+    battery_charge_test.c
+
 /tmp/volume_overlay_test
 echo "PASS: volume overlay geometry (rev04)"
 
@@ -35,4 +46,10 @@ echo "PASS: panel clear elision (rev04)"
 /tmp/display_state_test
 echo "PASS: display state machine (rev04)"
 
-echo "PASS: all host display tests"
+/tmp/battery_charge_rev04_test
+echo "PASS: charger hot-plug control (rev04)"
+
+/tmp/battery_charge_rev05_test
+echo "PASS: charger hot-plug control (rev05)"
+
+echo "PASS: all host firmware tests"

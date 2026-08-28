@@ -1447,6 +1447,10 @@ static void charge_edge_check(void)
     }
     s_charge_poll_ticks = now;
 
+    /* The charger loses its register state when external input disappears.
+     * Service hot-plug before sampling STAT so a later plug-in can charge. */
+    (void)battery_service();
+
     charging = battery_is_charging();
     if (charging != s_charge_sample)
     {
@@ -1693,6 +1697,9 @@ void app_main(void)
 
         if (s_powered_off)
         {
+            /* Charging must also initialize when USB is connected while the
+             * player is in software-off mode. */
+            (void)battery_service();
             /* Keep the I/O-expander button task alive while the main player
              * loop yields; all downstream rails are already disconnected. */
             vTaskDelay(pdMS_TO_TICKS(200));

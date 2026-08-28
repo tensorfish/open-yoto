@@ -36,8 +36,10 @@ Pretty far, as it turns out.
 
 Full write-up at **[docs.openyoto.com](https://docs.openyoto.com)**:
 
-- [Install & first boot](docs/firmware/setup.md)
-- [Build & flash](docs/build-setup.md) — ESP-IDF v5.5
+- [Flash custom firmware](docs/firmware/flash-custom-firmware.md)
+- [Post-flash setup](docs/firmware/post-flash-setup.md) — admin card, local
+  web UI, media, and cards
+- [Build environment](docs/build-setup.md) — ESP-IDF v5.5
 - [How it works](docs/open-yoto-firmware.md)
 - [Hardware & pin maps](docs/hardware.md) — the Yoto shipped several board
   revisions with different pins; check yours first

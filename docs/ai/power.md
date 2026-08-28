@@ -20,7 +20,7 @@ to rodata. Roles marked `[INFERENCE]` unless directly evidenced.
 | Function | Chips (by variant) | Interface | I2C addr (7-bit) | Evidence |
 |---|---|---|---|---|
 | Fuel gauge | **CW2215B** (#04/#05), **CW2015** (#00/#02), **ADC** (#01) | I2C / SAR-ADC | CW2215B `0x64`, CW2015 `0x62` | decompiled `FUN_seg4__400e83c8` calls I2C helper w/ `100`=0x64; `FUN_seg4__400e7d38` w/ `0x62` (§4.1) |
-| Charger | **SGM41513** (#04/#05), **SGM41511** (#02), **ETA6003** (#00/#01) | I2C | SGM `0x6b`; second charger path `0x1a` | `FUN_seg4__400e5c78` branches on charger type: type 2 → `0x6b`, type 3 → `0x1a` (§4.2) |
+| Charger | **SGM41513** (#04/#05), **SGM41511** (#02), **ETA6003** (#00/#01) | I2C | SGM41513 `0x1a`; SGM41511 `0x6b` | `FUN_seg4__400e5c78` branches on charger type: type 2 → `0x6b`, type 3 → `0x1a`; the SGM41513 datasheet specifies `0x1a` (§4.2) |
 | USB-C PD sink | **HUSB238** (#02/#05) | I2C | `0x08` `[INFERENCE]` (datasheet; not in config) | config key `usbc.type="HUSB238"` |
 | Qi wireless RX | **CV8013N** (#05), **CV8085** (#02) | I2C | CV8085 `0x13` (explicit), CV8013N `null` → `0x50` `[INFERENCE]` (datasheet) | `hwconfig_02` `qi.i2caddr="0x13"`; `hwconfig_05` `qi.i2caddr=null` |
 | IO expander | **PI4IOE5V6416** ×1 or ×2 (`iox.type` `"ET6416"`/`"PI4IOE5V6416"`) | I2C | (shared bus, see audio/storage docs) | all `iox` blocks |

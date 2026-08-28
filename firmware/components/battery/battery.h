@@ -1,9 +1,10 @@
 /*
- * battery.h — CW2215B fuel gauge + SGM41513 charger monitoring.
+ * battery.h — CW2215B fuel gauge + SGM41513 charger control.
  *
  * Reads battery voltage and state of charge from the CW2215B over the shared
  * I2C bus installed by iox_init(). Rev #04/#05 have no ADC battery pin.
- * Charger and battery-alert status come from the IO expander.
+ * External-power and charger status come from the IO expander; the SGM41513
+ * is configured whenever external power appears.
  */
 #pragma once
 
@@ -21,6 +22,15 @@
  *         otherwise the gauge initialization error.
  */
 esp_err_t battery_init(void);
+
+/**
+ * Detect external-power changes and configure the SGM41513 after each plug-in.
+ *
+ * Safe to call periodically. The charger is powered only while VBUS is present,
+ * so unplugging clears its cached state and a later plug-in re-runs the exact
+ * board-specific initialization.
+ */
+esp_err_t battery_service(void);
 
 /**
  * Battery voltage in millivolts from the CW2215B VCELL register. Returns 0

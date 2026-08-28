@@ -13,9 +13,10 @@ site_author = "open-yoto"
 nav = [
   { "open-yoto Firmware" = [
       { "Overview" = "index.md" },
-      { "Installation & Setup" = "firmware/setup.md" },
+      { "Flash Custom Firmware" = "firmware/flash-custom-firmware.md" },
+      { "Post-Flash Setup" = "firmware/post-flash-setup.md" },
       { "How It Works" = "open-yoto-firmware.md" },
-      { "Build & Flash" = "build-setup.md" },
+      { "Build Environment" = "build-setup.md" },
   ]},
   { "Reverse Engineering" = [
       { "Overview" = "reverse-engineering.md" },

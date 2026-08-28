@@ -4,15 +4,17 @@ icon: lucide/cog
 
 # open-yoto Firmware
 
-A from-scratch, offline firmware for the Yoto Player's ESP32. It plays local
-SD-card media from NFC cards and exposes an authenticated administration UI on
-demand. No cloud account or Yoto service is required.
+A from-scratch, service-independent firmware for the Yoto Player's ESP32. It
+plays local SD-card media from NFC cards and exposes an authenticated
+administration UI on demand. No cloud account or Yoto service is required.
 
 ## Start here
 
-- [Installation & setup](firmware/setup.md) — hardware, toolchain, first boot,
-  and media setup outline.
-- [Build & flash](build-setup.md) — verified ESP-IDF and UART flashing workflow.
+- [Flash custom firmware](firmware/flash-custom-firmware.md) — supported
+  hardware, backups, wiring, and flashing.
+- [Post-flash setup](firmware/post-flash-setup.md) — make the admin card,
+  install the local web UI, add media, and create cards.
+- [Build environment](build-setup.md) — verified ESP-IDF and UART workflow.
 - [How it works](open-yoto-firmware.md) — runtime architecture and behavior.
 - [Hardware & ports](hardware.md) — board revisions and recovered pin maps.
 
@@ -45,8 +47,10 @@ outside admin mode.
 
 ## Documentation map
 
-- **[Installation & setup](firmware/setup.md)** — practical getting-started
-  guide outline.
+- **[Flash custom firmware](firmware/flash-custom-firmware.md)** — prepare,
+  back up, connect, and flash a supported player.
+- **[Post-flash setup](firmware/post-flash-setup.md)** — enter admin mode and
+  set up local media and cards.
 - **[Firmware behavior](open-yoto-firmware.md)** — boot, playback, controls,
   card mappings, and admin API.
 - **[Reverse engineering](reverse-engineering.md)** — stock image layout and

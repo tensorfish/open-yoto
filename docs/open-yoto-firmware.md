@@ -17,15 +17,14 @@ understanding of the *original* firmware is elsewhere (see
 ```mermaid
 flowchart TD
   A[boot] --> B[init hardware + mount SD]
-  B --> C[start openyoto hotspot + authenticated web server]
-  C --> D{main loop}
+  B --> D{main loop}
   D -->|powered off| D
   D --> E[check battery]
   D --> F[poll NFC]
   F -->|magic URL| G[toggle admin server]
   F -->|content card| H[look up content]
   H --> I[show image + play track]
-  C --> J[remote control + SD file manager]
+  G --> J[authenticated web UI + SD file manager]
 ```
 
 ## What it does
@@ -78,9 +77,10 @@ On power-up, in order:
 6. Rotary encoders + buttons.
 7. SD card + optional content catalog.
 8. Audio and stock welcome playback.
-9. `openyoto` SoftAP, six-character code, and HTTP server.
 
-The web server remains in the background while the NFC/encoder main loop runs.
+Admin services remain off at boot. Scanning the exact admin magic URL starts
+the `openyoto` SoftAP, creates a six-character code, and starts the HTTP server
+on demand.
 
 ## The main loop (the state machine)
 
@@ -218,13 +218,20 @@ SD / VFS M4A ──> MP4 tables + AAC┘   ─> mono 44.1 kHz PCM
   manual bring-up option and never runs alongside the configured welcome-only
   startup.
 
-## Boot-enabled admin web UI
+## On-demand admin web UI
 
-Every normal boot starts an open Wi-Fi hotspot named `openyoto`, assigns the
-player `192.168.4.1`, and starts the embedded web server. The landing page
-contains only the login form until the six-character alphanumeric code shown
-on the player display is exchanged for an HttpOnly, SameSite session cookie.
-Every API and file read requires that cookie.
+Scanning a card containing the exact URI `https://openyoto.com/admin` starts
+an open Wi-Fi hotspot named `openyoto`, assigns the player `192.168.4.1`, and
+shows a random six-character alphanumeric code. Visiting
+`http://192.168.4.1` and entering that code exchanges it for an HttpOnly,
+SameSite session cookie. Every API and file read requires that cookie.
+
+If `/sdcard/webui/index.html` does not exist, the root redirects to an embedded
+installer. After login, the user uploads the provided
+[`index.html`](https://raw.githubusercontent.com/tensorfish/open-yoto/main/firmware/components/admin/html/index.html).
+The player then serves that SD-hosted file on future visits, allowing the page
+to be customized or replaced without rebuilding the firmware. See
+[Post-flash setup](firmware/post-flash-setup.md) for the complete walkthrough.
 
 The unlocked responsive UI has four areas:
 
@@ -319,10 +326,11 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   charging. A right-knob twist with no card loaded winks and rests on the face,
   taking the display back from the charging icon. Only a **low** battery
   re-asserts itself over whatever is on screen.
-- `IOX_CHG_STAT` is the active-low charging signal even when the SGM41513 I²C
-  device does not ACK. Because that line is open-drain and can blink, a
+- On every USB plug-in, the firmware selects the USB charge path and restores
+  the stock SGM41513 settings at I²C address `0x1A`; unplugging invalidates that
+  state so a later connection configures the charger again. `IOX_CHG_STAT` is
+  the active-low charging signal. Because it is open-drain and can blink, a
   transition counts only after four consecutive 500 ms samples agree, and a
-  charging glimpse is shown at most once every 30 s — a blinking STAT must never
-  hold the face off the panel.
+  charging glimpse is shown at most once every 30 s.
 - "Off" is software standby: audio and the admin server stop and the display
   blanks. True deep sleep is not implemented yet.
