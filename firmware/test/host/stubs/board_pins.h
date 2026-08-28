@@ -10,6 +10,7 @@
 #define I2C_PORT 0
 #define I2C_ADDR_FUEL_GAUGE 0x64
 #define I2C_ADDR_CHARGER 0x1A
+#define I2C_ADDR_PD_SINK 0x08
 
 #define IOX_BAT_ALERT 1
 #define IOX_CHG_STAT 2

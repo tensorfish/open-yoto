@@ -38,6 +38,10 @@ static const char *TAG = "battery";
 #define SGM41513_CHG_CONFIG          0x10
 #define SGM41513_Q1_FULLON           0x40
 #define SGM41513_ICHG_MASK           0x3F
+#define SGM41513_IINDPM_MASK         0x1F
+#define SGM41513_IINDPM_BASE_MA      100
+#define SGM41513_IINDPM_STEP_MA      100
+#define SGM41513_IINDPM_MAX_MA       2400
 #define SGM41513_VRECHG              0x01
 #define SGM41513_WATCHDOG_MASK       0x30
 #define SGM41513_BATFET_DIS          0x20
@@ -56,6 +60,20 @@ static const char *TAG = "battery";
 #else
 #define SGM41513_ICHG_CODE           0x28
 #define SGM41513_OVP_VINDPM_VALUE    0x45
+#endif
+
+/* The rev #05 HUSB238 reports the Type-C/PD contract current. This is the
+ * only reliable authority for raising the charger's input-current limit:
+ * the SGM41513's source detector can otherwise leave it at USB-default
+ * current even when a 1.5 A, 2.4 A, or 3 A Type-C source is attached. */
+#ifndef CONFIG_BOARD_REV_04
+#define HUSB238_REG_PD_STATUS0       0x00
+#define HUSB238_REG_PD_STATUS1       0x01
+#define HUSB238_ATTACHED              0x40
+#define HUSB238_PD_RESPONSE_MASK      0x38
+#define HUSB238_PD_RESPONSE_SUCCESS   0x08
+#define HUSB238_5V_CONTRACT           0x04
+#define HUSB238_5V_CURRENT_MASK       0x03
 #endif
 
 /* ---- CW2215B fuel gauge (CellWise CW2215B datasheet) ---- */
@@ -394,6 +412,52 @@ static bool sgm41513_status_has_input(uint8_t status)
     return (status & SGM41513_PG_STAT) != 0;
 }
 
+#ifndef CONFIG_BOARD_REV_04
+/* Return the contract current in mA, capped to the SGM41513's stock 2.4 A
+ * input setting. Zero means the HUSB238 has no usable source contract, so
+ * the charger must retain its own conservative source-detection limit. */
+static unsigned husb238_input_current_limit_ma(void)
+{
+    uint8_t status0;
+    uint8_t status1;
+    unsigned current_ma;
+
+    if (i2c_master_write_read_device(I2C_PORT, I2C_ADDR_PD_SINK,
+                                     (uint8_t[]){ HUSB238_REG_PD_STATUS1 }, 1,
+                                     &status1, 1,
+                                     pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS))
+            != ESP_OK
+        || (status1 & HUSB238_ATTACHED) == 0)
+    {
+        return 0;
+    }
+
+    if ((status1 & HUSB238_PD_RESPONSE_MASK) == HUSB238_PD_RESPONSE_SUCCESS)
+    {
+        if (i2c_master_write_read_device(
+                I2C_PORT, I2C_ADDR_PD_SINK,
+                (uint8_t[]){ HUSB238_REG_PD_STATUS0 }, 1, &status0, 1,
+                pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS)) != ESP_OK)
+        {
+            return 0;
+        }
+        current_ma = 500 + 250 * (status0 & 0x0F);
+    }
+    else if ((status1 & HUSB238_5V_CONTRACT) != 0)
+    {
+        static const unsigned type_c_current_ma[] = { 500, 1500, 2400, 3000 };
+        current_ma = type_c_current_ma[status1 & HUSB238_5V_CURRENT_MASK];
+    }
+    else
+    {
+        return 0;
+    }
+
+    return current_ma < SGM41513_IINDPM_MAX_MA
+        ? current_ma : SGM41513_IINDPM_MAX_MA;
+}
+#endif
+
 static esp_err_t battery_enable_usb_charge_path(void)
 {
 #ifdef CONFIG_BOARD_REV_04
@@ -414,10 +478,26 @@ static esp_err_t sgm41513_configure(void)
 {
     esp_err_t err;
 
-    /* Leave input high-impedance mode, select the normal charge path (not
-     * boost/OTG), and preserve the detected input-current limit. */
-    err = sgm41513_update_reg(SGM41513_REG_INPUT_SOURCE,
-                              SGM41513_EN_HIZ | SGM41513_STAT_CTRL_MASK, 0);
+    /* Leave input high-impedance mode and select the normal charge path. Rev
+     * #04's stock 2220 mA charge request requires its 2.4 A input setting;
+     * source detection can otherwise leave it at USB-default current. Rev
+     * #05 raises IINDPM only when the HUSB238 reports a usable contract. */
+    uint8_t input_mask = SGM41513_EN_HIZ | SGM41513_STAT_CTRL_MASK;
+    uint8_t input_value = 0;
+#ifdef CONFIG_BOARD_REV_04
+    unsigned input_current_ma = SGM41513_IINDPM_MAX_MA;
+#else
+    unsigned input_current_ma = husb238_input_current_limit_ma();
+#endif
+    if (input_current_ma != 0)
+    {
+        input_mask |= SGM41513_IINDPM_MASK;
+        input_value = (uint8_t)((input_current_ma - SGM41513_IINDPM_BASE_MA)
+                                / SGM41513_IINDPM_STEP_MA);
+    }
+
+    err = sgm41513_update_reg(SGM41513_REG_INPUT_SOURCE, input_mask,
+                              input_value);
     if (err != ESP_OK) return err;
 
     err = sgm41513_update_reg(SGM41513_REG_POWER_ON,
@@ -445,6 +525,11 @@ static esp_err_t sgm41513_configure(void)
     err = sgm41513_update_reg(SGM41513_REG_OVP_VINDPM, 0xCF,
                               SGM41513_OVP_VINDPM_VALUE);
     if (err != ESP_OK) return err;
+    if (input_current_ma != 0)
+    {
+        ESP_LOGI(TAG, "SGM41513 USB input current limit set to %u mA",
+                 input_current_ma);
+    }
 
     /* BATFET_DIS=0 keeps the battery connected to the charger/system path. */
     err = sgm41513_update_reg(SGM41513_REG_MISC_CONTROL,

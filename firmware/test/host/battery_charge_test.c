@@ -27,7 +27,9 @@ static int s_failures;
 static TickType_t s_tick_ms;
 static bool s_iox_levels[16];
 static uint8_t s_charger_registers[256];
+static uint8_t s_pd_registers[256];
 static bool s_charger_responds;
+static bool s_pd_responds;
 static unsigned s_charger_reads;
 static unsigned s_charger_writes;
 static uint8_t s_set_pins[16];
@@ -83,15 +85,22 @@ esp_err_t i2c_master_write_read_device(i2c_port_t port, uint8_t address,
 {
     (void)port;
     (void)timeout;
-    if (address != 0x1A || !s_charger_responds
-        || write_size != 1 || read_size != 1)
+    if (write_size != 1 || read_size != 1)
     {
         return ESP_FAIL;
     }
-
-    s_charger_reads++;
-    read_buffer[0] = s_charger_registers[write_buffer[0]];
-    return ESP_OK;
+    if (address == I2C_ADDR_CHARGER && s_charger_responds)
+    {
+        s_charger_reads++;
+        read_buffer[0] = s_charger_registers[write_buffer[0]];
+        return ESP_OK;
+    }
+    if (address == I2C_ADDR_PD_SINK && s_pd_responds)
+    {
+        read_buffer[0] = s_pd_registers[write_buffer[0]];
+        return ESP_OK;
+    }
+    return ESP_FAIL;
 }
 
 esp_err_t i2c_master_write_to_device(i2c_port_t port, uint8_t address,
@@ -117,9 +126,11 @@ static void reset_model(void)
     s_tick_ms = 0;
     memset(s_iox_levels, 0, sizeof(s_iox_levels));
     memset(s_charger_registers, 0, sizeof(s_charger_registers));
+    memset(s_pd_registers, 0, sizeof(s_pd_registers));
     memset(s_set_pins, 0, sizeof(s_set_pins));
     memset(s_set_levels, 0, sizeof(s_set_levels));
     s_charger_responds = true;
+    s_pd_responds = true;
     s_charger_reads = 0;
     s_charger_writes = 0;
     s_set_count = 0;
@@ -127,6 +138,13 @@ static void reset_model(void)
     /* Active-low VBUS and STAT both start inactive. */
     s_iox_levels[IOX_USB_POWER_STAT] = true;
     s_iox_levels[IOX_CHG_STAT] = true;
+
+#ifndef CONFIG_BOARD_REV_04
+    /* A 5 V Type-C source advertises 3 A; the firmware caps this to the
+     * SGM41513's stock 2.4 A input limit. */
+    s_pd_registers[HUSB238_REG_PD_STATUS1] =
+        HUSB238_ATTACHED | HUSB238_5V_CONTRACT | 0x03;
+#endif
 
     s_gauge_present = false;
     s_gauge_data_valid = false;
@@ -157,9 +175,15 @@ static void test_configures_only_when_power_appears(void)
     CHECK(battery_service() == ESP_OK, "plug-in configuration failed");
     CHECK(s_charger_present && s_charger_configured,
           "charger was not marked configured");
+#ifdef CONFIG_BOARD_REV_04
     CHECK((s_charger_registers[SGM41513_REG_INPUT_SOURCE]
-           & (SGM41513_EN_HIZ | SGM41513_STAT_CTRL_MASK)) == 0,
-          "input remained disabled or STAT output was not selected");
+           & SGM41513_IINDPM_MASK) == 0x17,
+          "rev04 did not apply its stock 2.4 A input limit");
+#else
+    CHECK((s_charger_registers[SGM41513_REG_INPUT_SOURCE]
+           & SGM41513_IINDPM_MASK) == 0x17,
+          "rev05 did not apply the 2.4 A USB-C contract limit");
+#endif
     CHECK((s_charger_registers[SGM41513_REG_POWER_ON]
            & (SGM41513_OTG_CONFIG | SGM41513_CHG_CONFIG))
               == SGM41513_CHG_CONFIG,
@@ -233,6 +257,32 @@ static void test_probe_failure_recovers(void)
     CHECK(s_charger_configured, "recovered charger was not configured");
 }
 
+static void test_rev05_uses_advertised_input_limit(void)
+{
+#ifdef CONFIG_BOARD_REV_04
+    return;
+#else
+    reset_model();
+    s_charger_registers[SGM41513_REG_INPUT_SOURCE] = 0x05;
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_PG_STAT;
+    s_pd_registers[HUSB238_REG_PD_STATUS1] =
+        HUSB238_ATTACHED | HUSB238_5V_CONTRACT | 0x01;
+    CHECK(battery_service() == ESP_OK, "1.5 A USB-C configuration failed");
+    CHECK((s_charger_registers[SGM41513_REG_INPUT_SOURCE]
+           & SGM41513_IINDPM_MASK) == 0x0E,
+          "rev05 did not respect the advertised 1.5 A limit");
+
+    reset_model();
+    s_charger_registers[SGM41513_REG_INPUT_SOURCE] = 0x05;
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_PG_STAT;
+    s_pd_responds = false;
+    CHECK(battery_service() == ESP_OK, "legacy-source configuration failed");
+    CHECK((s_charger_registers[SGM41513_REG_INPUT_SOURCE]
+           & SGM41513_IINDPM_MASK) == 0x05,
+          "legacy source did not retain the safe detector limit");
+#endif
+}
+
 static void test_charging_status_uses_charger_state(void)
 {
     reset_model();
@@ -257,6 +307,7 @@ int main(void)
     test_configures_only_when_power_appears();
     test_unplug_replug_reconfigures();
     test_probe_failure_recovers();
+    test_rev05_uses_advertised_input_limit();
     test_charging_status_uses_charger_state();
 
     if (s_failures != 0)

@@ -30,6 +30,9 @@
 #define I2C_ADDR_IOX_1              0x21   /* PI4IOE5V6416 #1 (display CS, power ctrl)      */
 #define I2C_ADDR_FUEL_GAUGE         0x64   /* CW2215B battery fuel gauge                    */
 #define I2C_ADDR_CHARGER            0x1A   /* SGM41513 charger                              */
+#ifndef CONFIG_BOARD_REV_04
+#define I2C_ADDR_PD_SINK            0x08   /* HUSB238 USB-C PD sink controller                */
+#endif
 #define I2C_ADDR_ACCELEROMETER      0x18   /* LIS2DH12 accelerometer */
 #define I2C_ADDR_SPKR_AMP_L         0x34   /* aw881xx speaker amp (left) */
 #ifdef CONFIG_BOARD_REV_04

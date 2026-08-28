@@ -327,11 +327,15 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   taking the display back from the charging icon. Only a **low** battery
   re-asserts itself over whatever is on screen.
 - On every USB plug-in, the firmware uses the SGM41513 `PG_STAT` bit as the
-  authoritative power-source signal, restores the stock charger settings at
-  I²C address `0x1A`, and clears that cached configuration when power-good
-  disappears. Charging UI uses the SGM41513 `CHRG_STAT` state instead of the
-  unreliable board `plugstat`/`chgstat` lines. A transition counts only after
-  four consecutive 500 ms samples agree, and a glimpse appears at most once
-  every 30 s.
+  authoritative power-source signal, restores the board-specific charger
+  settings at I²C address `0x1A`, and clears that cached configuration when
+  power-good disappears. Rev #04 explicitly sets its 2.4 A input-current limit
+  to support the stock 2220 mA battery-charge request; it must use a suitable
+  USB power supply. Rev #05 derives a limit up to 2.4 A from the attached
+  HUSB238 Type-C/PD contract and retains the charger's conservative detected
+  limit if no contract can be read. Charging UI uses the SGM41513 `CHRG_STAT`
+  state instead of the unreliable board `plugstat`/`chgstat` lines. A
+  transition counts only after four consecutive 500 ms samples agree, and a
+  glimpse appears at most once every 30 s.
 - "Off" is software standby: audio and the admin server stop and the display
   blanks. True deep sleep is not implemented yet.
