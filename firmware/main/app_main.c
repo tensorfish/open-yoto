@@ -1594,18 +1594,6 @@ void app_main(void)
     }
     boot_require(BOOT_STAGE_DISPLAY, display_init());
 
-    /* Play the boot face animation and settle on the idle face. */
-    state_lock();
-    display_play_boot_animation_locked();
-    /* Show the battery icon after a low-power resume, or when boot state
-     * otherwise warrants it. */
-    s_charging_latched = battery_is_charging();
-    if (resumed_from_power_off || battery_is_low() || s_charging_latched)
-    {
-        display_show_battery_glimpse_locked();
-    }
-    state_unlock();
-
     /* Speaker, codec, I2S, and NFC are required for normal player operation.
      * A failed boot is retried through the bounded full-system recovery gate. */
     boot_require(BOOT_STAGE_AUDIO, audio_init());
@@ -1617,6 +1605,35 @@ void app_main(void)
         ESP_LOGE(TAG, "speaker test tone failed to start");
     }
 #endif
+
+    /*
+     * The welcome decoder runs independently. Queue it before the synchronous
+     * face loop so its first PCM frame and animation frame zero start together.
+     * The asset is provided by yoto_vfs, so an SD/content mount is not needed.
+     */
+    esp_err_t startup_err = audio_play(YOTO_WELCOME_PATH);
+    if (startup_err == ESP_OK)
+    {
+        ESP_LOGI(TAG, "stock welcome queued: %s", YOTO_WELCOME_PATH);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "stock welcome unavailable at %s: %s",
+                 YOTO_WELCOME_PATH, esp_err_to_name(startup_err));
+    }
+
+    /* Run the visual half of the welcome after queueing its audio half. */
+    state_lock();
+    display_play_boot_animation_locked();
+    /* Show the battery icon after a low-power resume, or when boot state
+     * otherwise warrants it. */
+    s_charging_latched = battery_is_charging();
+    if (resumed_from_power_off || battery_is_low() || s_charging_latched)
+    {
+        display_show_battery_glimpse_locked();
+    }
+    state_unlock();
+
     boot_require(BOOT_STAGE_NFC, cr95hf_init());
     boot_require(BOOT_STAGE_ENCODER, encoder_init());
     encoder_register_cb(encoder_cb);
@@ -1650,19 +1667,6 @@ void app_main(void)
     {
         ESP_LOGW(TAG, "SD/content initialization failed: %s",
                  esp_err_to_name(content_err));
-    }
-    if (content_err == ESP_OK)
-    {
-        esp_err_t startup_err = audio_play(YOTO_WELCOME_PATH);
-        if (startup_err == ESP_OK)
-        {
-            ESP_LOGI(TAG, "stock welcome queued: %s", YOTO_WELCOME_PATH);
-        }
-        else
-        {
-            ESP_LOGW(TAG, "stock welcome unavailable at %s: %s",
-                     YOTO_WELCOME_PATH, esp_err_to_name(startup_err));
-        }
     }
     /* These registrations remain installed across admin start/stop cycles. */
     admin_set_code_callback(show_admin_code);

@@ -108,15 +108,6 @@ esp_err_t iox_init(void)
         }
     }
 
-#ifndef CONFIG_BOARD_REV_04
-    /* Rev #05 can accept USB-C or Qi input. Select USB-C explicitly instead
-     * of relying on reset-latch values: both source enables are active-low. */
-    err = iox_set_pin(IOX_QI_CHARGE_ENABLE_N, true);
-    if (err != ESP_OK) return err;
-    err = iox_set_pin(IOX_USB_CHARGE_ENABLE_N, false);
-    if (err != ESP_OK) return err;
-#endif
-
     /* Exact stock run-state transitions from app_main @ 0x400daa89 and
      * 0x400daad1: hold VIN, retain active-low PWREN, then enable the board
      * level convertor. Without the final HIGH transition, the display-side
