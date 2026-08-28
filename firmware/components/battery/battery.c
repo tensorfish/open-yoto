@@ -41,6 +41,10 @@ static const char *TAG = "battery";
 #define SGM41513_VRECHG              0x01
 #define SGM41513_WATCHDOG_MASK       0x30
 #define SGM41513_BATFET_DIS          0x20
+#define SGM41513_CHRG_STAT_MASK      0x18
+#define SGM41513_CHRG_STAT_PRECHARGE 0x08
+#define SGM41513_CHRG_STAT_FAST      0x10
+#define SGM41513_PG_STAT             0x04
 
 /* Exact stock init requests recovered from FUN_seg4__400e6830 and its
  * SGM41513 (type 3, address 0x1A) helpers. Rev #04 requests 2220 mA
@@ -83,9 +87,6 @@ static const char *TAG = "battery";
  * schematic. 3300 mV is a conservative single-cell "low" threshold. */
 #define BATTERY_LOW_VOLTAGE_MV  3300
 
-/* Charger STAT line: open-drain, active-low while charging. TODO: confirm
- * polarity against the schematic. */
-#define BATTERY_CHG_STAT_ACTIVE_LOW 1
 
 static bool s_gauge_present = false;
 static bool s_gauge_data_valid = false;
@@ -95,6 +96,7 @@ static bool s_external_power_present = false;
 static bool s_charger_retry_pending = false;
 static bool s_charger_probe_warned = false;
 static TickType_t s_charger_retry_ticks = 0;
+static uint8_t s_charger_status = 0;
 
 /* Read a single 8-bit register from the CW2215B over the shared I2C bus. */
 static esp_err_t cw2215b_read_reg(uint8_t reg, uint8_t *val)
@@ -387,10 +389,9 @@ static esp_err_t sgm41513_update_reg(uint8_t reg, uint8_t mask, uint8_t value)
     return sgm41513_write_reg(reg, updated);
 }
 
-static bool battery_external_power_present(void)
+static bool sgm41513_status_has_input(uint8_t status)
 {
-    /* Both rev #04 plugstat and rev #05 nvbusstat assert low. */
-    return !iox_get_pin(IOX_USB_POWER_STAT);
+    return (status & SGM41513_PG_STAT) != 0;
 }
 
 static esp_err_t battery_enable_usb_charge_path(void)
@@ -466,8 +467,29 @@ static esp_err_t sgm41513_configure(void)
 
 esp_err_t battery_service(void)
 {
-    bool external_power = battery_external_power_present();
     TickType_t now = xTaskGetTickCount();
+    uint8_t status = 0;
+    esp_err_t err = sgm41513_read_reg(SGM41513_REG_STATUS, &status);
+
+    if (err != ESP_OK)
+    {
+        if (!s_charger_probe_warned)
+        {
+            ESP_LOGW(TAG, "SGM41513 status read failed: %s",
+                     esp_err_to_name(err));
+            s_charger_probe_warned = true;
+        }
+        s_charger_present = false;
+        s_charger_configured = false;
+        s_external_power_present = false;
+        s_charger_status = 0;
+        return err;
+    }
+
+    s_charger_present = true;
+    s_charger_probe_warned = false;
+    s_charger_status = status;
+    bool external_power = sgm41513_status_has_input(status);
 
     if (!external_power)
     {
@@ -476,10 +498,8 @@ esp_err_t battery_service(void)
             ESP_LOGI(TAG, "external power removed");
         }
         s_external_power_present = false;
-        s_charger_present = false;
         s_charger_configured = false;
         s_charger_retry_pending = false;
-        s_charger_probe_warned = false;
         return ESP_OK;
     }
 
@@ -502,26 +522,11 @@ esp_err_t battery_service(void)
     s_charger_retry_pending = true;
     s_charger_retry_ticks = now;
 
-    esp_err_t err = battery_enable_usb_charge_path();
+    err = battery_enable_usb_charge_path();
     if (err != ESP_OK)
     {
         return err;
     }
-
-    uint8_t probe;
-    err = sgm41513_read_reg(SGM41513_REG_INPUT_SOURCE, &probe);
-    if (err != ESP_OK)
-    {
-        s_charger_present = false;
-        if (!s_charger_probe_warned)
-        {
-            ESP_LOGW(TAG, "VBUS present but SGM41513 did not respond: %s",
-                     esp_err_to_name(err));
-            s_charger_probe_warned = true;
-        }
-        return err;
-    }
-    s_charger_present = true;
 
     err = sgm41513_configure();
     if (err != ESP_OK)
@@ -532,13 +537,14 @@ esp_err_t battery_service(void)
     }
 
     s_charger_configured = true;
-    s_charger_probe_warned = false;
-    uint8_t status = 0;
     uint8_t fault = 0;
-    (void)sgm41513_read_reg(SGM41513_REG_STATUS, &status);
+    if (sgm41513_read_reg(SGM41513_REG_STATUS, &status) == ESP_OK)
+    {
+        s_charger_status = status;
+    }
     (void)sgm41513_read_reg(SGM41513_REG_FAULT, &fault);
     ESP_LOGI(TAG, "SGM41513 charging enabled (status=0x%02x fault=0x%02x)",
-             status, fault);
+             s_charger_status, fault);
     return ESP_OK;
 }
 
@@ -556,6 +562,7 @@ esp_err_t battery_init(void)
     s_charger_retry_pending = false;
     s_charger_probe_warned = false;
     s_charger_retry_ticks = 0;
+    s_charger_status = 0;
 
     /* CW2215B fuel gauge over I2C: detect, load the board-specific stock
      * profile when needed, activate the IC, then read VCELL and SOC. */
@@ -673,17 +680,9 @@ bool battery_is_low(void)
 
 bool battery_is_charging(void)
 {
-    /* STAT may float or retain a low level without VBUS. Gate it with the
-     * board's external-power signal before treating active-low STAT as charge. */
-    if (!battery_external_power_present())
-    {
-        return false;
-    }
-    bool level = iox_get_pin(IOX_CHG_STAT);
+    uint8_t charge_state = s_charger_status & SGM41513_CHRG_STAT_MASK;
 
-#if BATTERY_CHG_STAT_ACTIVE_LOW
-    return !level;
-#else
-    return level;
-#endif
+    return s_external_power_present
+        && (charge_state == SGM41513_CHRG_STAT_PRECHARGE
+            || charge_state == SGM41513_CHRG_STAT_FAST);
 }

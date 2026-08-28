@@ -11,7 +11,7 @@
  *   #05 (LED, dual IOX):    0x09 (ES8156), 0x18 (LIS2DH12),
  *                           0x20 + 0x21 (IOX x2), 0x34 + 0x37 (aw881xx),
  *                           0x51 (RTC), 0x64 (CW2215B)
- *   SGM41513 charger (0x6b) only answers when VBUS is present (USB plugged).
+ *   SGM41513 charger (0x1a) responds on this board when USB power is present.
  */
 #include "esp_log.h"
 #include "esp_err.h"

@@ -326,11 +326,12 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   charging. A right-knob twist with no card loaded winks and rests on the face,
   taking the display back from the charging icon. Only a **low** battery
   re-asserts itself over whatever is on screen.
-- On every USB plug-in, the firmware selects the USB charge path and restores
-  the stock SGM41513 settings at I²C address `0x1A`; unplugging invalidates that
-  state so a later connection configures the charger again. `IOX_CHG_STAT` is
-  the active-low charging signal. Because it is open-drain and can blink, a
-  transition counts only after four consecutive 500 ms samples agree, and a
-  charging glimpse is shown at most once every 30 s.
+- On every USB plug-in, the firmware uses the SGM41513 `PG_STAT` bit as the
+  authoritative power-source signal, restores the stock charger settings at
+  I²C address `0x1A`, and clears that cached configuration when power-good
+  disappears. Charging UI uses the SGM41513 `CHRG_STAT` state instead of the
+  unreliable board `plugstat`/`chgstat` lines. A transition counts only after
+  four consecutive 500 ms samples agree, and a glimpse appears at most once
+  every 30 s.
 - "Off" is software standby: audio and the admin server stop and the display
   blanks. True deep sleep is not implemented yet.

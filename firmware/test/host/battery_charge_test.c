@@ -136,6 +136,7 @@ static void reset_model(void)
     s_charger_retry_pending = false;
     s_charger_probe_warned = false;
     s_charger_retry_ticks = 0;
+    s_charger_status = 0;
 }
 
 static void test_configures_only_when_power_appears(void)
@@ -148,10 +149,11 @@ static void test_configures_only_when_power_appears(void)
     s_charger_registers[SGM41513_REG_MISC_CONTROL] = SGM41513_BATFET_DIS;
 
     CHECK(battery_service() == ESP_OK, "service without VBUS failed");
-    CHECK(s_charger_reads == 0 && s_charger_writes == 0,
-          "charger touched without external power");
+    CHECK(s_charger_reads == 1 && s_charger_writes == 0,
+          "charger status was not sampled exactly once without VBUS");
 
-    s_iox_levels[IOX_USB_POWER_STAT] = false;
+    /* REG08 PG_STAT is authoritative; the board plug-status pin is not. */
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_PG_STAT;
     CHECK(battery_service() == ESP_OK, "plug-in configuration failed");
     CHECK(s_charger_present && s_charger_configured,
           "charger was not marked configured");
@@ -198,18 +200,18 @@ static void test_configures_only_when_power_appears(void)
 static void test_unplug_replug_reconfigures(void)
 {
     reset_model();
-    s_iox_levels[IOX_USB_POWER_STAT] = false;
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_PG_STAT;
     CHECK(battery_service() == ESP_OK, "initial plug-in failed");
 
-    s_iox_levels[IOX_USB_POWER_STAT] = true;
+    s_charger_registers[SGM41513_REG_STATUS] = 0;
     CHECK(battery_service() == ESP_OK, "unplug service failed");
-    CHECK(!s_charger_present && !s_charger_configured,
-          "unplug did not invalidate charger state");
+    CHECK(s_charger_present && !s_charger_configured,
+          "unplug did not invalidate charger configuration");
 
     /* The real charger loses power here, including CHG_CONFIG. */
     memset(s_charger_registers, 0, sizeof(s_charger_registers));
     unsigned writes = s_charger_writes;
-    s_iox_levels[IOX_USB_POWER_STAT] = false;
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_PG_STAT;
     CHECK(battery_service() == ESP_OK, "replug configuration failed");
     CHECK(s_charger_writes > writes,
           "replug did not restore charger registers");
@@ -218,35 +220,34 @@ static void test_unplug_replug_reconfigures(void)
           "charging remained disabled after replug");
 }
 
-static void test_probe_failure_retries(void)
+static void test_probe_failure_recovers(void)
 {
     reset_model();
-    s_iox_levels[IOX_USB_POWER_STAT] = false;
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_PG_STAT;
     s_charger_responds = false;
     CHECK(battery_service() != ESP_OK, "missing charger unexpectedly succeeded");
     CHECK(!s_charger_configured, "missing charger was marked configured");
 
     s_charger_responds = true;
-    s_tick_ms = BATTERY_CHARGER_RETRY_MS - 1;
-    CHECK(battery_service() == ESP_OK, "retry delay service failed");
-    CHECK(!s_charger_configured, "charger retried before the bounded delay");
-
-    s_tick_ms = BATTERY_CHARGER_RETRY_MS;
-    CHECK(battery_service() == ESP_OK, "delayed charger retry failed");
-    CHECK(s_charger_configured, "charger did not recover after retry delay");
+    CHECK(battery_service() == ESP_OK, "charger did not recover on next poll");
+    CHECK(s_charger_configured, "recovered charger was not configured");
 }
 
-static void test_charging_status_requires_vbus(void)
+static void test_charging_status_uses_charger_state(void)
 {
     reset_model();
-    s_iox_levels[IOX_CHG_STAT] = false;
-    CHECK(!battery_is_charging(), "low STAT without VBUS reported charging");
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_CHRG_STAT_FAST;
+    CHECK(battery_service() == ESP_OK, "no-input status service failed");
+    CHECK(!battery_is_charging(), "charge state without PG_STAT reported charging");
 
-    s_iox_levels[IOX_USB_POWER_STAT] = false;
-    CHECK(battery_is_charging(), "active-low STAT with VBUS was not charging");
+    s_charger_registers[SGM41513_REG_STATUS] =
+        SGM41513_PG_STAT | SGM41513_CHRG_STAT_FAST;
+    CHECK(battery_service() == ESP_OK, "fast-charge status service failed");
+    CHECK(battery_is_charging(), "fast-charge status was not reported");
 
-    s_iox_levels[IOX_CHG_STAT] = true;
-    CHECK(!battery_is_charging(), "inactive STAT with VBUS reported charging");
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_PG_STAT;
+    CHECK(battery_service() == ESP_OK, "disabled-charge status service failed");
+    CHECK(!battery_is_charging(), "disabled charger reported charging");
 }
 
 int main(void)
@@ -255,8 +256,8 @@ int main(void)
           "SGM41513 must use its stock 7-bit address 0x1A");
     test_configures_only_when_power_appears();
     test_unplug_replug_reconfigures();
-    test_probe_failure_retries();
-    test_charging_status_requires_vbus();
+    test_probe_failure_recovers();
+    test_charging_status_uses_charger_state();
 
     if (s_failures != 0)
     {
