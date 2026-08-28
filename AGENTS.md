@@ -3,6 +3,7 @@
 `README.md` is the human entrypoint: short pitch, status table, doc links. Keep
 it glanceable — detail belongs in `docs/`, not there.
 
+- `landing-page/` — standalone public landing page; plain HTML/CSS with no build step.
 - `docs/index.md` — documentation hub (published to https://docs.openyoto.com).
 - `docs/firmware/setup.md` — install, flash, and first-boot guide for users.
 - `docs/build-setup.md` — ESP-IDF installation and verified Linux UART flash workflow.
