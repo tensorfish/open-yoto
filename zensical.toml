@@ -21,6 +21,7 @@ nav = [
   { "Reverse Engineering" = [
       { "Overview" = "reverse-engineering.md" },
       { "Subsystems" = [
+          { "Overview" = "subsystems/index.md" },
           { "NFC / RFID (CR95HF)" = "subsystems/nfc.md" },
           { "SD Card & Storage" = "subsystems/storage.md" },
           { "Display" = "subsystems/display.md" },
