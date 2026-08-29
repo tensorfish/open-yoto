@@ -193,6 +193,8 @@ void esp_restart(void)
 static int s_deep_sleep_count;
 static int s_wake_gpio;
 static int s_wake_level;
+static int s_isolated_gpio;
+static int s_rtc_isolate_count;
 
 esp_err_t esp_sleep_enable_ext0_wakeup(int gpio_num, int level)
 {
@@ -204,6 +206,13 @@ esp_err_t esp_sleep_enable_ext0_wakeup(int gpio_num, int level)
 void esp_deep_sleep_start(void)
 {
     s_deep_sleep_count++;
+}
+
+esp_err_t rtc_gpio_isolate(int gpio_num)
+{
+    s_isolated_gpio = gpio_num;
+    s_rtc_isolate_count++;
+    return ESP_OK;
 }
 
 const char *esp_err_to_name(esp_err_t err)
@@ -218,6 +227,8 @@ static bool s_low;
 static int s_soc = 50;
 static float s_voltage = 3700.0f;
 static bool s_playing;
+static bool s_snapshot_valid = true;
+static bool s_external_power_present;
 
 bool battery_is_charging(void)
 {
@@ -246,6 +257,18 @@ esp_err_t battery_init(void)
 
 esp_err_t battery_service(void)
 {
+    return ESP_OK;
+}
+
+esp_err_t battery_get_snapshot(battery_snapshot_t *snapshot)
+{
+    if (!s_snapshot_valid)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    snapshot->external_power_present = s_external_power_present;
+    snapshot->soc_percent = s_soc;
+    snapshot->voltage_mv = (int)s_voltage;
     return ESP_OK;
 }
 
@@ -648,8 +671,15 @@ static void reset_state(void)
     s_deep_sleep_count = 0;
     s_wake_gpio = -1;
     s_wake_level = -1;
+    s_isolated_gpio = -1;
+    s_rtc_isolate_count = 0;
+    s_snapshot_valid = true;
+    s_external_power_present = false;
+    s_battery_critical_check_ticks = 0;
+    s_battery_critical_samples = 0;
     s_last_activity_ticks = 0;
 
+    s_admin_lifecycle_mutex = xSemaphoreCreateMutex();
     s_state_mutex = xSemaphoreCreateMutex();
 
     s_frame_count = 0;
@@ -1182,6 +1212,8 @@ int main(void)
               "idle power: rev04 did not clear both IOX input ports");
         CHECK(s_wake_gpio == PIN_IOX_INT && s_wake_level == 0,
               "idle power: active-low IOX wake was not armed");
+        CHECK(s_rtc_isolate_count == 1 && s_isolated_gpio == GPIO_NUM_12,
+              "idle power: ESP32-WROVER GPIO12 was not isolated");
     }
 
     /* Active playback restarts the full inactivity window. */
@@ -1203,6 +1235,44 @@ int main(void)
         idle_power_check();
         CHECK(s_deep_sleep_count == 1,
               "idle power: did not shut down 30 minutes after playback");
+    }
+
+    /* Critical cutoff requires two valid, battery-only SOC samples. */
+    {
+        reset_state();
+        s_admin_active = true;
+        s_soc = BATTERY_CRITICAL_SOC_PCT;
+        s_voltage = 3200.0f;
+        s_tick_ms = BATTERY_CRITICAL_CHECK_PERIOD_MS;
+        CHECK(!battery_critical_check() && s_deep_sleep_count == 0,
+              "critical battery: first sample must only arm confirmation");
+        s_tick_ms += BATTERY_CRITICAL_CHECK_PERIOD_MS;
+        CHECK(battery_critical_check() && s_deep_sleep_count == 1,
+              "critical battery: second sample did not shut down in admin mode");
+    }
+
+    /* Unknown power/gauge state and external power break consecutiveness. */
+    {
+        reset_state();
+        s_soc = BATTERY_CRITICAL_SOC_PCT;
+        s_tick_ms = BATTERY_CRITICAL_CHECK_PERIOD_MS;
+        CHECK(!battery_critical_check(), "critical reset: first sample failed");
+
+        s_snapshot_valid = false;
+        s_tick_ms += BATTERY_CRITICAL_CHECK_PERIOD_MS;
+        CHECK(!battery_critical_check() && s_battery_critical_samples == 0,
+              "critical reset: invalid snapshot did not clear confirmation");
+
+        s_snapshot_valid = true;
+        s_external_power_present = true;
+        s_tick_ms += BATTERY_CRITICAL_CHECK_PERIOD_MS;
+        CHECK(!battery_critical_check() && s_battery_critical_samples == 0,
+              "critical reset: external power did not inhibit cutoff");
+
+        s_external_power_present = false;
+        s_tick_ms += BATTERY_CRITICAL_CHECK_PERIOD_MS;
+        CHECK(!battery_critical_check() && s_deep_sleep_count == 0,
+              "critical reset: stale samples caused immediate shutdown");
     }
 
     if (s_failures != 0)

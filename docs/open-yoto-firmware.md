@@ -18,9 +18,12 @@ understanding of the *original* firmware is elsewhere (see
 flowchart TD
   A[boot] --> B[init hardware + mount SD]
   B --> D{main loop}
-  D -->|powered off| D
   D --> E[check battery]
   D --> F[poll NFC]
+  D --> K[check 30-minute inactivity deadline]
+  D -->|3-second power hold| L[stop services + disconnect rails]
+  K -->|inactive| L
+  L --> M[release VIN_HOLD + deep sleep]
   F -->|magic URL| G[toggle admin server]
   F -->|content card| H[look up content]
   H --> I[show image + play track]
@@ -58,7 +61,7 @@ flowchart TD
 | `encoder` | the two rotary knobs + push buttons + power button |
 | `content` | the SD card + optional `mapping.json` catalog |
 | `audio` + `codec_es8156` + Espressif decoders | MP3/AAC/M4A playback → I²S |
-| `admin` | boot-time hotspot, authenticated API, remote control, SD manager |
+| `admin` | on-demand hotspot, authenticated API, remote control, SD manager |
 | `yoto_vfs` | read-only embedded `/system` assets |
 | `main` | ties it all together (the state machine) |
 
@@ -84,11 +87,14 @@ on demand.
 
 ## The main loop (the state machine)
 
-The loop keeps physical controls active while the web server runs:
+The loop handles deferred physical-control work first, then:
 
-1. **Powered off?** → sleep 200 ms; button events remain active.
-2. **Poll NFC** every ~100 ms.
-3. Periodically check battery state when the access-code screen is not pinned.
+1. **Poll NFC** every ~100 ms.
+2. Refresh charger state and run the unconditional five-second critical-battery
+   policy, including while admin mode owns the display.
+3. Update noncritical battery warnings when the access-code screen is not pinned.
+4. Maintain display-transient deadlines.
+5. Check the 30-minute inactivity deadline.
 
 A card is "new" on a rising edge or when its UID changes (a swap within one
 poll window):
@@ -112,12 +118,18 @@ The knobs/buttons are handled as events (not polled in the main loop):
 | Right knob turn | skip track (wraps around); with no card, winks the face |
 | Either knob press (short) | play / pause |
 | Power button press | toggle only the screen; screen-on shows the current battery icon |
-| Power button hold (3 s) | disconnect downstream peripheral rails and enter low-power mode; a second 3 s hold restores rails, restarts the ESP32, and shows the battery icon |
+| Power button hold (3 s) | stop playback/admin, blank the display, disconnect the amp and downstream rails, release `VIN_HOLD`, and enter deep sleep if external power keeps the ESP32 supplied |
 
-The dedicated power button remains readable through the IO expander while the
-downstream rails are disconnected. The main player loop yields in its
-low-activity off state; restoring power performs a clean restart so the
-display, audio, SD, and NFC peripherals cold-initialize.
+Encoder actions and card insertion/removal reset the inactivity deadline.
+Playback and an active admin session continuously defer it. After 30 minutes
+without any of those activities, the firmware runs the same shutdown sequence
+as the three-second power hold.
+
+On battery, releasing `VIN_HOLD` removes system power; the next power-button
+press starts a cold boot through the board's hardware latch. On USB power, the
+ESP32 may remain supplied, so it arms the active-low IO-expander interrupt on
+GPIO34, isolates GPIO12 to prevent ESP32-WROVER pad leakage, and enters deep
+sleep rather than keeping FreeRTOS and I²C polling.
 
 The display carries one **base screen** (idle face, card art, admin code, or a
 low-battery warning) plus **transients** that expire back onto it: the wink
@@ -313,6 +325,10 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   80-byte profile, activating the gauge, and waiting for ready state. VCELL and
   SOC are read only after initialization succeeds.
 - **Low battery** = charge < 15% **or** voltage < 3.3 V.
+- **Critical battery** = two consecutive valid five-second readings at or below
+  3% SOC while a fresh charger status read confirms no external power. This
+  shutdown policy runs even in admin mode. Invalid reads, external power, or a
+  recovered SOC reset confirmation instead of being treated as an empty cell.
 - The battery screen comes from `firmware/icons/battery-*.png`. Each icon covers
   the ten points up to its label — `battery-10.png` is 0–10%, `battery-20.png`
   is 11–20%, through `battery-100.png` for 91–100% — and `battery-empty.png`
@@ -329,15 +345,19 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
 - On every USB plug-in, the firmware uses the SGM41513 `PG_STAT` bit as the
   authoritative power-source signal, restores the board-specific charger
   settings at I²C address `0x1A`, and clears that cached configuration when
-  power-good disappears. Rev #04 preserves the SGM41513's D+/D−
+  a successful status read shows power-good has disappeared. A bus error is
+  unknown state, not an unplug event. Rev #04 preserves the SGM41513's D+/D−
   source-detected input-current limit while applying the stock 2220 mA
   battery-charge request; this avoids input-voltage DPM cycling on weak USB
   supplies. Rev #05 derives a limit up to 2.4 A from the attached HUSB238
   Type-C/PD contract and retains the charger's conservative detected limit if
-  no contract can be read. Charging UI uses the SGM41513 `CHRG_STAT` state
-  instead of the unreliable board `plugstat`/`chgstat` lines. A transition
-  counts only after four consecutive 500 ms samples agree, and a glimpse
-  appears at most once every 30 s.
+  no contract can be read.
+- While power-good stays asserted, a masked audit checks the charger every
+  30 seconds and repairs reset/watchdog drift without overwriting IINDPM or
+  clearing a latched `BATFET_DIS` protection. Charging UI uses the SGM41513
+  `CHRG_STAT` state instead of the unreliable board `plugstat`/`chgstat` lines.
+  A transition counts only after four consecutive 500 ms samples agree, and a
+  glimpse appears at most once every 30 s.
 - A three-second power-button hold, or 30 minutes without input, playback, or
   an active admin session, runs the stock-style shutdown path: stop audio and
   admin, blank the display, disable the amplifier and downstream rails, clear

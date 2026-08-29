@@ -19,6 +19,7 @@ static const char *TAG = "battery";
 
 #define BATTERY_I2C_TIMEOUT_MS  100
 #define BATTERY_CHARGER_RETRY_MS 2000
+#define BATTERY_CHARGER_AUDIT_MS 30000
 
 /* ---- SGM41513 charger (register map shared by #04/#05) ---- */
 #define SGM41513_REG_INPUT_SOURCE    0x00
@@ -115,6 +116,8 @@ static bool s_charger_retry_pending = false;
 static bool s_charger_probe_warned = false;
 static TickType_t s_charger_retry_ticks = 0;
 static uint8_t s_charger_status = 0;
+static TickType_t s_charger_audit_ticks = 0;
+static bool s_batfet_fault_warned = false;
 
 /* Read a single 8-bit register from the CW2215B over the shared I2C bus. */
 static esp_err_t cw2215b_read_reg(uint8_t reg, uint8_t *val)
@@ -479,7 +482,8 @@ static esp_err_t battery_enable_usb_charge_path(void)
 #endif
 }
 
-static esp_err_t sgm41513_configure(void)
+static esp_err_t sgm41513_configure(bool update_input_current,
+                                    bool allow_batfet_enable)
 {
     esp_err_t err;
 
@@ -491,9 +495,11 @@ static esp_err_t sgm41513_configure(void)
     uint8_t input_mask = SGM41513_EN_HIZ | SGM41513_STAT_CTRL_MASK;
     uint8_t input_value = 0;
 #ifdef CONFIG_BOARD_REV_04
+    (void)update_input_current;
     unsigned input_current_ma = 0;
 #else
-    unsigned input_current_ma = husb238_input_current_limit_ma();
+    unsigned input_current_ma =
+        update_input_current ? husb238_input_current_limit_ma() : 0;
 #endif
     if (input_current_ma != 0)
     {
@@ -537,10 +543,15 @@ static esp_err_t sgm41513_configure(void)
                  input_current_ma);
     }
 
-    /* BATFET_DIS=0 keeps the battery connected to the charger/system path. */
-    err = sgm41513_update_reg(SGM41513_REG_MISC_CONTROL,
-                              SGM41513_BATFET_DIS, 0);
-    if (err != ESP_OK) return err;
+    /* BATFET_DIS can also be latched by discharge over-current protection.
+     * Clear it only on an explicit fresh-input initialization, never during
+     * periodic configuration repair. */
+    if (allow_batfet_enable)
+    {
+        err = sgm41513_update_reg(SGM41513_REG_MISC_CONTROL,
+                                  SGM41513_BATFET_DIS, 0);
+        if (err != ESP_OK) return err;
+    }
 
 #ifdef CONFIG_BOARD_REV_04
     /* The no-PD #04 path applies these two additional stock writes. */
@@ -554,6 +565,98 @@ static esp_err_t sgm41513_configure(void)
     return sgm41513_update_reg(SGM41513_REG_POWER_ON,
                                SGM41513_CHG_CONFIG,
                                SGM41513_CHG_CONFIG);
+}
+
+static esp_err_t sgm41513_audit_reg(uint8_t reg, uint8_t mask,
+                                    uint8_t expected, bool *drift)
+{
+    uint8_t value;
+    esp_err_t err = sgm41513_read_reg(reg, &value);
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    if ((value & mask) != (expected & mask))
+    {
+        *drift = true;
+    }
+    return ESP_OK;
+}
+
+/*
+ * Detect a charger watchdog/reset without touching autonomous status or
+ * source-detected IINDPM. A mismatch triggers the complete owned-register
+ * configuration, but BATFET_DIS remains untouched: that bit can be a latched
+ * over-current protection response rather than configuration drift.
+ */
+static esp_err_t sgm41513_audit_configuration(void)
+{
+    bool drift = false;
+    uint8_t misc;
+    esp_err_t err;
+
+    err = sgm41513_audit_reg(
+        SGM41513_REG_INPUT_SOURCE,
+        SGM41513_EN_HIZ | SGM41513_STAT_CTRL_MASK, 0, &drift);
+    if (err != ESP_OK) return err;
+    err = sgm41513_audit_reg(
+        SGM41513_REG_POWER_ON,
+        SGM41513_OTG_CONFIG | SGM41513_CHG_CONFIG,
+        SGM41513_CHG_CONFIG, &drift);
+    if (err != ESP_OK) return err;
+    err = sgm41513_audit_reg(
+        SGM41513_REG_CHARGE_CURRENT,
+        SGM41513_Q1_FULLON | SGM41513_ICHG_MASK,
+        SGM41513_Q1_FULLON | SGM41513_ICHG_CODE, &drift);
+    if (err != ESP_OK) return err;
+    err = sgm41513_audit_reg(
+        SGM41513_REG_CHARGE_VOLTAGE,
+        SGM41513_VRECHG, SGM41513_VRECHG, &drift);
+    if (err != ESP_OK) return err;
+#ifdef CONFIG_BOARD_REV_04
+    err = sgm41513_audit_reg(
+        SGM41513_REG_TIMER_CONTROL,
+        SGM41513_WATCHDOG_MASK | 0x01, 0, &drift);
+#else
+    err = sgm41513_audit_reg(
+        SGM41513_REG_TIMER_CONTROL,
+        SGM41513_WATCHDOG_MASK, 0, &drift);
+#endif
+    if (err != ESP_OK) return err;
+    err = sgm41513_audit_reg(
+        SGM41513_REG_OVP_VINDPM, 0xCF,
+        SGM41513_OVP_VINDPM_VALUE, &drift);
+    if (err != ESP_OK) return err;
+#ifdef CONFIG_BOARD_REV_04
+    err = sgm41513_audit_reg(
+        SGM41513_REG_STOCK_CONTROL, 0xFF, 0x45, &drift);
+    if (err != ESP_OK) return err;
+#endif
+
+    err = sgm41513_read_reg(SGM41513_REG_MISC_CONTROL, &misc);
+    if (err != ESP_OK) return err;
+    if ((misc & SGM41513_BATFET_DIS) != 0)
+    {
+        if (!s_batfet_fault_warned)
+        {
+            ESP_LOGE(TAG,
+                     "SGM41513 BATFET is latched off; leaving protection asserted");
+            s_batfet_fault_warned = true;
+        }
+    }
+    else
+    {
+        s_batfet_fault_warned = false;
+    }
+
+    if (!drift)
+    {
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "SGM41513 configuration drift detected; restoring settings");
+    return sgm41513_configure(false, false);
 }
 
 esp_err_t battery_service(void)
@@ -570,10 +673,9 @@ esp_err_t battery_service(void)
                      esp_err_to_name(err));
             s_charger_probe_warned = true;
         }
+        /* A bus error is unknown, not proof of unplug. Keep the last
+         * successfully observed power/configuration state and retry. */
         s_charger_present = false;
-        s_charger_configured = false;
-        s_external_power_present = false;
-        s_charger_status = 0;
         return err;
     }
 
@@ -591,6 +693,8 @@ esp_err_t battery_service(void)
         s_external_power_present = false;
         s_charger_configured = false;
         s_charger_retry_pending = false;
+        s_charger_audit_ticks = 0;
+        s_batfet_fault_warned = false;
         return ESP_OK;
     }
 
@@ -602,7 +706,19 @@ esp_err_t battery_service(void)
     }
     if (s_charger_configured)
     {
-        return ESP_OK;
+        if ((TickType_t)(now - s_charger_audit_ticks)
+                < pdMS_TO_TICKS(BATTERY_CHARGER_AUDIT_MS))
+        {
+            return ESP_OK;
+        }
+        s_charger_audit_ticks = now;
+        err = sgm41513_audit_configuration();
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "SGM41513 configuration audit failed: %s",
+                     esp_err_to_name(err));
+        }
+        return err;
     }
     if (s_charger_retry_pending
         && (TickType_t)(now - s_charger_retry_ticks)
@@ -619,7 +735,7 @@ esp_err_t battery_service(void)
         return err;
     }
 
-    err = sgm41513_configure();
+    err = sgm41513_configure(true, true);
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "SGM41513 configuration failed: %s",
@@ -628,6 +744,7 @@ esp_err_t battery_service(void)
     }
 
     s_charger_configured = true;
+    s_charger_audit_ticks = now;
     uint8_t fault = 0;
     if (sgm41513_read_reg(SGM41513_REG_STATUS, &status) == ESP_OK)
     {
@@ -654,6 +771,8 @@ esp_err_t battery_init(void)
     s_charger_probe_warned = false;
     s_charger_retry_ticks = 0;
     s_charger_status = 0;
+    s_charger_audit_ticks = 0;
+    s_batfet_fault_warned = false;
 
     /* CW2215B fuel gauge over I2C: detect, load the board-specific stock
      * profile when needed, activate the IC, then read VCELL and SOC. */
@@ -731,6 +850,34 @@ esp_err_t battery_init(void)
     return init_err;
 }
 
+esp_err_t battery_get_snapshot(battery_snapshot_t *snapshot)
+{
+    uint8_t status;
+    int soc;
+    int voltage_mv;
+
+    if (snapshot == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *snapshot = (battery_snapshot_t){ 0 };
+    if (!s_gauge_present || !s_gauge_data_valid)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (sgm41513_read_reg(SGM41513_REG_STATUS, &status) != ESP_OK
+        || !cw2215b_read_soc(&soc)
+        || !cw2215b_read_vcell_mv(&voltage_mv))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    snapshot->external_power_present = sgm41513_status_has_input(status);
+    snapshot->soc_percent = soc;
+    snapshot->voltage_mv = voltage_mv;
+    return ESP_OK;
+}
+
 float battery_voltage(void)
 {
     int mv = 0;
@@ -766,7 +913,10 @@ bool battery_is_low(void)
     {
         return true;
     }
-    return (battery_voltage() < (float)BATTERY_LOW_VOLTAGE_MV);
+
+    float voltage_mv = battery_voltage();
+    return voltage_mv > 0.0f
+        && voltage_mv < (float)BATTERY_LOW_VOLTAGE_MV;
 }
 
 bool battery_is_charging(void)

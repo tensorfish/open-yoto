@@ -9,6 +9,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -31,6 +32,22 @@ esp_err_t battery_init(void);
  * board-specific settings.
  */
 esp_err_t battery_service(void);
+
+typedef struct
+{
+    bool external_power_present;
+    int soc_percent;
+    int voltage_mv;
+} battery_snapshot_t;
+
+/**
+ * Read one fresh, validity-bearing power snapshot.
+ *
+ * All three fields are populated only when REG08, SOC, and VCELL reads
+ * succeed. Unlike the scalar convenience getters, an I2C error cannot be
+ * mistaken for absent external power or an empty battery.
+ */
+esp_err_t battery_get_snapshot(battery_snapshot_t *snapshot);
 
 /**
  * Battery voltage in millivolts from the CW2215B VCELL register. Returns 0

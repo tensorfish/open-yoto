@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_sleep.h"
+#include "driver/rtc_io.h"
 #include "esp_random.h"
 #include "esp_attr.h"
 #include "board_pins.h"
@@ -286,9 +287,19 @@ static bool s_powered_off = false;
 /* Thirty minutes matches the stock player's inactivity shutdown policy. */
 #define IDLE_POWER_OFF_MS (30u * 60u * 1000u)
 static TickType_t s_last_activity_ticks;
+/* The stock image refuses normal startup below 4% SOC. Require two fresh
+ * battery-only readings at or below 3% before releasing the power latch. */
+#define BATTERY_CRITICAL_CHECK_PERIOD_MS 5000
+#define BATTERY_CRITICAL_SOC_PCT            3
+#define BATTERY_CRITICAL_SAMPLES            2
+static TickType_t s_battery_critical_check_ticks;
+static unsigned s_battery_critical_samples;
 static char s_current_url[CR95HF_URL_MAX + 1];
 static int s_track_index = 0;
 static int s_track_count = 0;
+/* Serializes admin start/stop without blocking HTTP callbacks on the player
+ * state mutex. */
+static SemaphoreHandle_t s_admin_lifecycle_mutex;
 static SemaphoreHandle_t s_state_mutex;
 typedef enum {
     DISPLAY_BASE_OFF,
@@ -353,6 +364,16 @@ static void state_lock(void)
 static void state_unlock(void)
 {
     xSemaphoreGive(s_state_mutex);
+}
+
+static void admin_lifecycle_lock(void)
+{
+    xSemaphoreTake(s_admin_lifecycle_mutex, portMAX_DELAY);
+}
+
+static void admin_lifecycle_unlock(void)
+{
+    xSemaphoreGive(s_admin_lifecycle_mutex);
 }
 
 /* Wake the gesture task; safe to call with the state mutex held. */
@@ -717,6 +738,9 @@ static void power_off(bool wait_for_button_release)
 {
     esp_err_t err;
 
+    /* Publish shutdown under the state lock, then release it before stopping
+     * HTTP. An in-flight admin callback may need this same mutex before
+     * httpd_stop() can join its task. */
     state_lock();
     if (s_powered_off)
     {
@@ -724,14 +748,28 @@ static void power_off(bool wait_for_button_release)
         return;
     }
     s_powered_off = true;
+    state_unlock();
+
+    /* Serialize lifecycle teardown separately from player state. HTTP handlers
+     * may finish under s_state_mutex while admin_stop() joins the server task. */
+    admin_lifecycle_lock();
+    if (admin_is_active())
+    {
+        err = admin_stop();
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "could not stop admin service: %s",
+                     esp_err_to_name(err));
+        }
+    }
+    admin_lifecycle_unlock();
+
+    /* With admin quiesced, finalize player/display state. */
+    state_lock();
     audio_stop();
     s_track_count = 0;
     s_track_index = 0;
     s_current_url[0] = '\0';
-    if (admin_is_active())
-    {
-        admin_stop();
-    }
     s_display_base = DISPLAY_BASE_OFF;
     s_battery_visual_deadline = 0;
     display_cancel_volume_locked();
@@ -771,6 +809,16 @@ static void power_off(bool wait_for_button_release)
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "could not arm power-button wake: %s",
+                 esp_err_to_name(err));
+    }
+
+    /* Espressif specifically requires isolating GPIO12 on ESP32-WROVER to
+     * avoid external/internal pull-resistor leakage in deep sleep. GPIO12 is
+     * rev #04 SD D2, so isolate it only after storage and rails are stopped. */
+    err = rtc_gpio_isolate(GPIO_NUM_12);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not isolate GPIO12 for deep sleep: %s",
                  esp_err_to_name(err));
     }
 
@@ -1413,6 +1461,51 @@ static void battery_periodic_check(void)
     state_unlock();
 }
 
+/*
+ * Protect the cell independently of display ownership and idle policy.
+ * Shutdown requires consecutive, fully valid snapshots and a fresh PG=0
+ * charger status; failed I2C reads and charge-complete states cannot be
+ * mistaken for battery-only critical power.
+ */
+static bool battery_critical_check(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    battery_snapshot_t snapshot;
+
+    if (s_powered_off)
+    {
+        return true;
+    }
+    if ((TickType_t)(now - s_battery_critical_check_ticks)
+            < pdMS_TO_TICKS(BATTERY_CRITICAL_CHECK_PERIOD_MS))
+    {
+        return false;
+    }
+    s_battery_critical_check_ticks = now;
+
+    if (battery_get_snapshot(&snapshot) != ESP_OK
+        || snapshot.external_power_present
+        || snapshot.soc_percent > BATTERY_CRITICAL_SOC_PCT)
+    {
+        s_battery_critical_samples = 0;
+        return false;
+    }
+
+    s_battery_critical_samples++;
+    if (s_battery_critical_samples < BATTERY_CRITICAL_SAMPLES)
+    {
+        ESP_LOGW(TAG, "critical battery candidate (%d%%, %d mV); confirming",
+                 snapshot.soc_percent, snapshot.voltage_mv);
+        return false;
+    }
+
+    ESP_LOGE(TAG, "critical battery confirmed (%d%%, %d mV); powering off",
+             snapshot.soc_percent, snapshot.voltage_mv);
+    s_battery_critical_samples = 0;
+    power_off(false);
+    return true;
+}
+
 
 /*
  * Volume feedback task: one blip per detent, so turning the knob gives
@@ -1620,9 +1713,10 @@ void app_main(void)
     /* Mutex serializing playback/track state between the encoder task and
      * this main loop. */
     s_state_mutex = xSemaphoreCreateMutex();
-    if (s_state_mutex == NULL)
+    s_admin_lifecycle_mutex = xSemaphoreCreateMutex();
+    if (s_state_mutex == NULL || s_admin_lifecycle_mutex == NULL)
     {
-        ESP_LOGE(TAG, "xSemaphoreCreateMutex failed");
+        ESP_LOGE(TAG, "player mutex creation failed");
         return;
     }
 
@@ -1774,6 +1868,12 @@ void app_main(void)
 
             if (strcmp(url, MAGIC_URL) == 0)
             {
+                admin_lifecycle_lock();
+                if (s_powered_off)
+                {
+                    admin_lifecycle_unlock();
+                    continue;
+                }
                 if (admin_is_active())
                 {
                     esp_err_t err = admin_stop();
@@ -1808,6 +1908,7 @@ void app_main(void)
                                  esp_err_to_name(err));
                     }
                 }
+                admin_lifecycle_unlock();
             }
             else if (admin_is_active())
             {
@@ -1850,14 +1951,18 @@ void app_main(void)
         /* Remember presence so a held card acts once, not every poll. */
         card_present = card;
 
-        /* Battery check only in normal mode (don't overwrite the admin code). */
+        /* Refresh charger state before any battery-only shutdown decision.
+         * Safety sampling runs even while admin owns the display. */
+        charge_edge_check();
+        if (battery_critical_check())
+        {
+            continue;
+        }
+        /* The warning icon remains suppressed while the admin code is pinned. */
         if (!admin_is_active())
         {
             battery_periodic_check();
         }
-        /* Edge-polled separately: the latch must track the charger even while
-         * the admin code owns the display. */
-        charge_edge_check();
 
         state_lock();
         display_maintain_locked();

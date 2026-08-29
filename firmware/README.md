@@ -157,11 +157,13 @@ firmware/
   direction bytes, followed by the recovered run-state transitions (rev #04:
   VINHOLD HIGH, active-low PWREN LOW, levelconvertor IOX.0.3 HIGH).
 - **Power and battery [rev #04/#05]**: CW2215B board profiles, SGM41513
-  hot-plug configuration with source-safe input limits, and stock charge-current
-  requests. A three-second power hold or 30 minutes of inactivity disables the
-  amp and peripheral rails, releases `VIN_HOLD`, and enters deep sleep when
-  external power keeps the ESP32 supplied; the host suite covers both shutdown
-  timing and charger register behavior.
+  hot-plug configuration with source-safe input limits, 30-second masked
+  configuration repair, and stock charge-current requests. Two valid
+  battery-only samples at or below 3% SOC force a protective shutdown. A
+  three-second power hold or 30 minutes of inactivity disables the amp and
+  peripheral rails, isolates ESP32-WROVER GPIO12, releases `VIN_HOLD`, and
+  enters deep sleep when external power keeps the ESP32 supplied. The host
+  suite covers shutdown timing, invalid-sample rejection, and charger drift.
 - **GC9306 TFT driver [rev #04]**: stock SPI2 mode 0/80MHz/no-dummy setup,
   stock reset and complete initialization tail, queue-1 1364-pixel RGB666
   transport, CASET/RASET/RAMWR framing, and 40 kHz GPIO26 backlight.
@@ -211,11 +213,11 @@ firmware/
   stock control-byte and Echo synchronization sequence. Admin-mode scans
   capture UID/URL without playback; authenticated writes compare the expected
   UID and verify URL read-back under one UART transaction.
-- Boot-enabled `openyoto` SoftAP and HTTP server with a random six-character
-  alphanumeric code. Its responsive UI provides remote player controls,
-  `/sdcard/media`-confined file CRUD, captured-card read/write, mapping
-  inspection, whole-folder track upload with browser-side PNG/JPEG conversion,
-  and a lazy recursive track catalog.
+- On-demand `openyoto` SoftAP and HTTP server with a random six-character
+  alphanumeric code, started only by scanning the exact admin magic URL. Its
+  responsive UI provides remote player controls, `/sdcard/media`-confined file
+  CRUD, captured-card read/write, mapping inspection, whole-folder track upload
+  with browser-side PNG/JPEG conversion, and a lazy recursive track catalog.
 - Admin memory is request-driven: default-directory listing at login,
   per-directory streamed JSON, tab-scoped card/track loading, lazy card-index
   parsing, playback-scoped decoder state, a 16 KiB HTTP task stack, and a

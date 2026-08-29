@@ -155,6 +155,8 @@ static void reset_model(void)
     s_charger_probe_warned = false;
     s_charger_retry_ticks = 0;
     s_charger_status = 0;
+    s_charger_audit_ticks = 0;
+    s_batfet_fault_warned = false;
 }
 
 static void test_configures_only_when_power_appears(void)
@@ -300,6 +302,71 @@ static void test_charging_status_uses_charger_state(void)
     CHECK(!battery_is_charging(), "disabled charger reported charging");
 }
 
+static void test_periodic_audit_repairs_owned_configuration(void)
+{
+    reset_model();
+    s_charger_registers[SGM41513_REG_INPUT_SOURCE] = 0x05;
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_PG_STAT;
+    CHECK(battery_service() == ESP_OK, "audit setup configuration failed");
+
+    uint8_t detected_iindpm =
+        s_charger_registers[SGM41513_REG_INPUT_SOURCE]
+        & SGM41513_IINDPM_MASK;
+    unsigned writes = s_charger_writes;
+    s_tick_ms += BATTERY_CHARGER_AUDIT_MS;
+    CHECK(battery_service() == ESP_OK, "stable charger audit failed");
+    CHECK(s_charger_writes == writes,
+          "stable charger audit performed unnecessary writes");
+
+    s_charger_registers[SGM41513_REG_CHARGE_CURRENT] = 0;
+    s_charger_registers[SGM41513_REG_TIMER_CONTROL] |=
+        SGM41513_WATCHDOG_MASK;
+#ifndef CONFIG_BOARD_REV_04
+    /* An unrelated repair must not rewrite IINDPM if the reported contract
+     * changes after initial source selection. */
+    s_pd_registers[HUSB238_REG_PD_STATUS1] =
+        HUSB238_ATTACHED | HUSB238_5V_CONTRACT | 0x01;
+#endif
+    s_charger_registers[SGM41513_REG_MISC_CONTROL] |= SGM41513_BATFET_DIS;
+#ifdef CONFIG_BOARD_REV_04
+    s_charger_registers[SGM41513_REG_STOCK_CONTROL] = 0x75;
+#endif
+    s_tick_ms += BATTERY_CHARGER_AUDIT_MS;
+    CHECK(battery_service() == ESP_OK, "drift repair failed");
+    CHECK((s_charger_registers[SGM41513_REG_CHARGE_CURRENT]
+           & (SGM41513_Q1_FULLON | SGM41513_ICHG_MASK))
+              == (SGM41513_Q1_FULLON | SGM41513_ICHG_CODE),
+          "audit did not restore charge current");
+    CHECK((s_charger_registers[SGM41513_REG_TIMER_CONTROL]
+           & SGM41513_WATCHDOG_MASK) == 0,
+          "audit did not restore watchdog-disable state");
+    CHECK((s_charger_registers[SGM41513_REG_MISC_CONTROL]
+           & SGM41513_BATFET_DIS) != 0,
+          "audit unsafely cleared latched BATFET protection");
+    CHECK((s_charger_registers[SGM41513_REG_INPUT_SOURCE]
+           & SGM41513_IINDPM_MASK) == detected_iindpm,
+          "audit overwrote the source-authoritative input limit");
+#ifdef CONFIG_BOARD_REV_04
+    CHECK(s_charger_registers[SGM41513_REG_STOCK_CONTROL] == 0x45,
+          "audit did not restore rev04 stock temperature control");
+#endif
+}
+
+static void test_status_read_failure_preserves_known_state(void)
+{
+    reset_model();
+    s_charger_registers[SGM41513_REG_STATUS] = SGM41513_PG_STAT;
+    CHECK(battery_service() == ESP_OK, "failure-state setup failed");
+
+    s_charger_responds = false;
+    CHECK(battery_service() != ESP_OK, "status failure unexpectedly succeeded");
+    CHECK(s_charger_configured && s_external_power_present,
+          "status failure was misclassified as unplug/configuration loss");
+
+    s_charger_responds = true;
+    CHECK(battery_service() == ESP_OK, "status failure did not recover");
+}
+
 int main(void)
 {
     CHECK(I2C_ADDR_CHARGER == 0x1A,
@@ -309,6 +376,8 @@ int main(void)
     test_probe_failure_recovers();
     test_rev05_uses_advertised_input_limit();
     test_charging_status_uses_charger_state();
+    test_periodic_audit_repairs_owned_configuration();
+    test_status_read_failure_preserves_known_state();
 
     if (s_failures != 0)
     {

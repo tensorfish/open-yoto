@@ -9,5 +9,5 @@ endif()
 idf_component_register(
     SRCS "${app_main_src}"
     INCLUDE_DIRS "."
-    REQUIRES board iox battery lis2dh12 display ht16d35x gc9306 cr95hf encoder content audio admin yoto_vfs nvs_flash esp_driver_ledc
+    REQUIRES board iox battery lis2dh12 display ht16d35x gc9306 cr95hf encoder content audio admin yoto_vfs nvs_flash esp_driver_gpio esp_driver_ledc
 )
