@@ -45,15 +45,16 @@ identifiers are part of the original image.
 
 ## 2. Connect the UART adapter
 
-The verified automatic-control wiring is:
+Connect the USB-UART adapter as follows:
 
 | USB-UART line | Player signal |
 |---|---|
 | GND | GND |
 | Adapter RX | ESP32 UART0 TX |
 | Adapter TX | ESP32 UART0 RX |
-| RTS | BOOT/GPIO0 |
-| DTR | RESET/EN |
+
+Keep the **BOOT/GPIO0** and **RESET/EN** controls accessible. You will operate
+them manually while `idf.py` connects.
 
 Do not connect a 5 V UART signal to the ESP32. Confirm the connector location
 and pinout for your board revision before applying power.
@@ -72,23 +73,22 @@ idf.py build
 
 ## 4. Flash the firmware
 
-From the repository root, with the ESP-IDF environment loaded:
+From the `firmware/` directory, with the ESP-IDF environment loaded, start the
+flash:
 
 ```bash
-python3 tools/flash_esp32.py
+idf.py flash
 ```
 
-The helper builds the firmware, enters the ROM bootloader using RTS/DTR, flashes
-the image, resets the player, and captures its UART output. Its default Linux
-serial port is `/dev/ttyUSB0`; use `--port` when yours differs:
+While `idf.py` is trying to connect:
 
-```bash
-python3 tools/flash_esp32.py --port /dev/ttyUSB1
-```
+1. Press and hold **BOOT**.
+2. While continuing to hold **BOOT**, press and release **RESET**.
+3. Release **BOOT**.
 
-For a conventional adapter or a manually controlled boot sequence, the detailed
-`idf.py` and `esptool.py` alternatives are in
-[Build environment setup](../build-setup.md#flash).
+This starts the ESP32 ROM bootloader. Leave `idf.py` running; it will connect
+and flash the firmware. When the flash completes, press and release **RESET**
+once more to boot Open Yoto.
 
 ## 5. Check the first boot
 
