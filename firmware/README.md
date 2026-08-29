@@ -159,11 +159,13 @@ firmware/
 - **Power and battery [rev #04/#05]**: CW2215B board profiles, SGM41513
   hot-plug configuration with source-safe input limits, 30-second masked
   configuration repair, and stock charge-current requests. Two valid
-  battery-only samples at or below 3% SOC force a protective shutdown. A
+  battery-only samples at or below 3% SOC force a protective hard cutoff. A
   three-second power hold or 30 minutes of inactivity disables the amp and
-  peripheral rails, isolates ESP32-WROVER GPIO12, releases `VIN_HOLD`, and
-  enters deep sleep when external power keeps the ESP32 supplied. The host
-  suite covers shutdown timing, invalid-sample rejection, and charger drift.
+  peripheral rails but retains `VIN_HOLD`, then uses timer-backed light sleep
+  so a one-second hold reliably restarts. Rev #05 also unmasks the IOX
+  power-button IRQ; rev #04's ET6416 rejects that optional register path. Only
+  confirmed critical battery releases the latch. The host suite covers
+  shutdown timing, wake fallback, invalid-sample rejection, and charger drift.
 - **GC9306 TFT driver [rev #04]**: stock SPI2 mode 0/80MHz/no-dummy setup,
   stock reset and complete initialization tail, queue-1 1364-pixel RGB666
   transport, CASET/RASET/RAMWR framing, and 40 kHz GPIO26 backlight.

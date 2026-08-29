@@ -25,6 +25,13 @@ esp_err_t iox_set_pin(uint8_t pin, bool level);
  */
 esp_err_t iox_set_peripherals_powered(bool powered);
 
+/**
+ * Unmask only the active-low power-button input on PI4IOE5V6416 interrupt
+ * output and clear stale transitions. Rev #04 ET6416 returns
+ * ESP_ERR_NOT_SUPPORTED; its shutdown path uses timer-backed button polling.
+ */
+esp_err_t iox_prepare_power_button_wake(void);
+
 /** Read a single expander pin (use IOX_PIN(...) from board_pins.h). */
 bool iox_get_pin(uint8_t pin);
 

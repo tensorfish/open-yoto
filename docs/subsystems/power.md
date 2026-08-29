@@ -130,13 +130,16 @@ one shutdown path:
 1. Publish shutdown, stop the admin server without holding the player mutex,
    stop audio, and blank the display.
 2. Wait for a held power button to be released.
-3. Disable the amplifier and downstream rails, then clear IOX interrupts.
-4. Arm GPIO34 for the active-low IOX wake interrupt.
-5. Isolate GPIO12 as Espressif recommends for ESP32-WROVER deep sleep.
-6. Release `VIN_HOLD`.
-7. Enter ESP32 deep sleep if USB power keeps the processor supplied.
+3. Disable the amplifier and downstream rails; on rev #05, unmask only the
+   `IOX.1.3` interrupt and clear stale IOX transitions.
+4. Arm GPIO34 for the active-low IOX interrupt where supported.
+5. Retain `VIN_HOLD` and use 100 ms timer-backed light sleep. Rev #04's ET6416
+   does not accept the PI4IOE5V6416 interrupt-mask registers, so the timer is
+   its primary wake path. A one-second button hold restores the rails and
+   restarts the ESP32.
 
-On battery, releasing `VIN_HOLD` disconnects system power completely. Playback
+Normal manual/inactivity shutdown deliberately retains the latch: rev #04
+cannot observe its IOX-only power button after a physical power cut. Playback
 and an active admin session defer inactivity shutdown; encoder events and NFC
 card insertion/removal restart the full 30-minute interval.
 
@@ -145,6 +148,10 @@ five-second samples at or below 3% SOC force shutdown only when a successful
 contemporaneous SGM41513 read reports `PG_STAT=0`. Invalid I²C samples,
 noncritical SOC, and external power clear the confirmation streak, so read
 sentinels or charge-complete state cannot masquerade as a critical battery.
+
+After critical battery is confirmed, the safety path isolates GPIO12, releases
+`VIN_HOLD`, and enters deep sleep as a fallback. This hard cutoff is
+intentionally non-wakeable until external power is attached.
 
 ## Original firmware reference
 

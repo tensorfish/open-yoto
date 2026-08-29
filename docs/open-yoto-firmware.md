@@ -118,18 +118,22 @@ The knobs/buttons are handled as events (not polled in the main loop):
 | Right knob turn | skip track (wraps around); with no card, winks the face |
 | Either knob press (short) | play / pause |
 | Power button press | toggle only the screen; screen-on shows the current battery icon |
-| Power button hold (3 s) | stop playback/admin, blank the display, disconnect the amp and downstream rails, release `VIN_HOLD`, and enter deep sleep if external power keeps the ESP32 supplied |
+| Power button hold (3 s) | stop playback/admin, blank the display, disconnect the amp and downstream rails, retain `VIN_HOLD`, and wait in timer-backed light sleep for a one-second wake hold |
 
 Encoder actions and card insertion/removal reset the inactivity deadline.
 Playback and an active admin session continuously defer it. After 30 minutes
 without any of those activities, the firmware runs the same shutdown sequence
 as the three-second power hold.
 
-On battery, releasing `VIN_HOLD` removes system power; the next power-button
-press starts a cold boot through the board's hardware latch. On USB power, the
-ESP32 may remain supplied, so it arms the active-low IO-expander interrupt on
-GPIO34, isolates GPIO12 to prevent ESP32-WROVER pad leakage, and enters deep
-sleep rather than keeping FreeRTOS and I²C polling.
+Normal manual and inactivity shutdown retains `VIN_HOLD`; rev #04 cannot wake
+after a physical power cut because its power button is behind the ET6416.
+Both revisions therefore use a timer-backed light-sleep loop as the reliable
+wake path. Holding power for one second restores the peripheral rails before
+restarting. Rev #05 additionally unmasks the `IOX.1.3` interrupt and arms its
+active-low GPIO34 output, while the 100 ms timer covers missed interrupts.
+
+Only confirmed critical battery shutdown releases `VIN_HOLD`, isolates GPIO12,
+and becomes intentionally non-wakeable until external power is attached.
 
 The display carries one **base screen** (idle face, card art, admin code, or a
 low-battery warning) plus **transients** that expire back onto it: the wink
@@ -359,9 +363,7 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   A transition counts only after four consecutive 500 ms samples agree, and a
   glimpse appears at most once every 30 s.
 - A three-second power-button hold, or 30 minutes without input, playback, or
-  an active admin session, runs the stock-style shutdown path: stop audio and
-  admin, blank the display, disable the amplifier and downstream rails, clear
-  IO-expander interrupts, arm the active-low IOX interrupt as the wake source,
-  and release `VIN_HOLD`. Battery power is physically disconnected; if USB
-  keeps the ESP32 supplied, it enters deep sleep instead of polling in software
-  standby.
+  an active admin session, stops audio/admin, blanks the display, disables the
+  amplifier and downstream rails, retains `VIN_HOLD`, and enters timer-backed
+  light sleep. A one-second hold restores the rails and restarts. Only confirmed
+  critical battery releases the latch for a hard power cut.

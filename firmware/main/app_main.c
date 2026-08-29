@@ -727,14 +727,61 @@ static void play_pause_toggle(void)
     state_unlock();
 }
 
+#define POWER_OFF_WAKE_POLL_US       100000u
+#define POWER_OFF_WAKE_HOLD_SAMPLES      10u
+
 /*
- * The stock firmware does not implement "off" as a polling loop. It stops the
- * player, disconnects downstream rails, unlatches VIN_HOLD, then enters deep
- * sleep for the externally-powered case where the ESP32 remains supplied.
- * On battery, dropping VIN_HOLD removes power completely; the physical power
- * button subsequently starts a cold boot.
+ * Rev #04 must retain VIN_HOLD because its power button is behind an ET6416
+ * without usable pin-specific wake IRQs. Stay in timer-backed light sleep so
+ * the task can poll the I2C button; rev #05's expander IRQ can wake sooner,
+ * while the timer remains a guaranteed fallback.
  */
-static void power_off(bool wait_for_button_release)
+static void power_off_wait_for_button(void)
+{
+    unsigned held_samples = 0;
+
+    while (true)
+    {
+        esp_err_t err = esp_sleep_enable_timer_wakeup(POWER_OFF_WAKE_POLL_US);
+        if (err == ESP_OK)
+        {
+            err = esp_light_sleep_start();
+        }
+        if (err != ESP_OK)
+        {
+            vTaskDelay(pdMS_TO_TICKS(
+                POWER_OFF_WAKE_POLL_US / 1000u));
+        }
+
+        if (iox_get_pin(IOX_BTN_POWER))
+        {
+            held_samples = 0;
+            continue;
+        }
+        held_samples++;
+        if (held_samples < POWER_OFF_WAKE_HOLD_SAMPLES)
+        {
+            /* EXT0 is level-sensitive and returns immediately while held. */
+            vTaskDelay(pdMS_TO_TICKS(
+                POWER_OFF_WAKE_POLL_US / 1000u));
+            continue;
+        }
+
+        ESP_LOGI(TAG, "power button held; restoring VIN_HOLD and restarting");
+        (void)iox_set_pin(IOX_POWER_VINHOLD, true);
+        (void)iox_set_peripherals_powered(true);
+        esp_restart();
+        return;
+    }
+}
+
+/*
+ * Normal manual/inactivity off remains wakeable: stop the player, disconnect
+ * downstream rails, retain VIN_HOLD, and timer-poll the IOX button in light
+ * sleep. Only confirmed critical battery releases VIN_HOLD and becomes
+ * intentionally non-wakeable until external power is attached.
+ */
+static void power_off(bool wait_for_button_release, bool hard_power_cut)
 {
     esp_err_t err;
 
@@ -749,6 +796,7 @@ static void power_off(bool wait_for_button_release)
     }
     s_powered_off = true;
     state_unlock();
+
 
     /* Serialize lifecycle teardown separately from player state. HTTP handlers
      * may finish under s_state_mutex while admin_stop() joins the server task. */
@@ -796,6 +844,13 @@ static void power_off(bool wait_for_button_release)
                  esp_err_to_name(err));
     }
 
+    err = iox_prepare_power_button_wake();
+    if (err != ESP_OK && err != ESP_ERR_NOT_SUPPORTED)
+    {
+        ESP_LOGW(TAG, "could not unmask IOX power-button wake: %s",
+                 esp_err_to_name(err));
+    }
+
     /* Reading every input port clears pending PI4IOE5V6416 interrupts before
      * GPIO34 is armed as the active-low wake source. */
     uint8_t ignored;
@@ -812,24 +867,32 @@ static void power_off(bool wait_for_button_release)
                  esp_err_to_name(err));
     }
 
-    /* Espressif specifically requires isolating GPIO12 on ESP32-WROVER to
-     * avoid external/internal pull-resistor leakage in deep sleep. GPIO12 is
-     * rev #04 SD D2, so isolate it only after storage and rails are stopped. */
-    err = rtc_gpio_isolate(GPIO_NUM_12);
-    if (err != ESP_OK)
+    if (hard_power_cut)
     {
-        ESP_LOGW(TAG, "could not isolate GPIO12 for deep sleep: %s",
-                 esp_err_to_name(err));
+        /* Critical battery is the only path allowed to become intentionally
+         * non-wakeable until external power is attached. */
+        err = rtc_gpio_isolate(GPIO_NUM_12);
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "could not isolate GPIO12 for deep sleep: %s",
+                     esp_err_to_name(err));
+        }
+        ESP_LOGE(TAG, "critical power cut: releasing VIN_HOLD");
+        err = iox_set_pin(IOX_POWER_VINHOLD, false);
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "could not release VIN_HOLD: %s",
+                     esp_err_to_name(err));
+        }
+        esp_deep_sleep_start();
+        return;
     }
 
-    ESP_LOGI(TAG, "powering off: rails disconnected, VIN_HOLD released");
-    err = iox_set_pin(IOX_POWER_VINHOLD, false);
-    if (err != ESP_OK)
-    {
-        ESP_LOGW(TAG, "could not release VIN_HOLD: %s",
-                 esp_err_to_name(err));
-    }
-    esp_deep_sleep_start();
+    /* Rev #04 has no wake-capable direct power-button GPIO and its ET6416
+     * cannot route a pin-specific IRQ. Retain VIN_HOLD and use timer-backed
+     * light sleep so manual and inactivity shutdown remain wakeable. */
+    ESP_LOGI(TAG, "low-power mode: rails off, VIN_HOLD retained");
+    power_off_wait_for_button();
 }
 
 static void activity_note(void)
@@ -857,7 +920,7 @@ static void idle_power_check(void)
     }
 
     ESP_LOGI(TAG, "30 minutes inactive; powering off");
-    power_off(false);
+    power_off(false, false);
 }
 
 /* Short power presses blank or restore only the panel; rails stay powered. */
@@ -1124,7 +1187,7 @@ static void encoder_actions_pump(void)
 
     if (power)
     {
-        power_off(true);
+        power_off(true, false);
     }
     if (screen_toggle_pending)
     {
@@ -1502,7 +1565,7 @@ static bool battery_critical_check(void)
     ESP_LOGE(TAG, "critical battery confirmed (%d%%, %d mV); powering off",
              snapshot.soc_percent, snapshot.voltage_mv);
     s_battery_critical_samples = 0;
-    power_off(false);
+    power_off(false, true);
     return true;
 }
 

@@ -20,6 +20,11 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I stubs \
+    -o /tmp/iox_wake_test \
+    iox_wake_test.c
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I stubs \
     -o /tmp/display_state_test \
     display_state_test.c
 
@@ -42,6 +47,9 @@ echo "PASS: volume overlay geometry (rev05)"
 
 /tmp/panel_clear_test
 echo "PASS: panel clear elision (rev04)"
+
+/tmp/iox_wake_test
+echo "PASS: IOX power-button wake fallback (rev04)"
 
 /tmp/display_state_test
 echo "PASS: display state machine (rev04)"

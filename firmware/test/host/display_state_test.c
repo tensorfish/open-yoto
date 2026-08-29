@@ -195,11 +195,32 @@ static int s_wake_gpio;
 static int s_wake_level;
 static int s_isolated_gpio;
 static int s_rtc_isolate_count;
+static uint64_t s_timer_wakeup_us;
+static int s_light_sleep_count;
+static int s_press_after_light_sleeps;
+static bool s_force_power_button_pressed;
 
 esp_err_t esp_sleep_enable_ext0_wakeup(int gpio_num, int level)
 {
     s_wake_gpio = gpio_num;
     s_wake_level = level;
+    return ESP_OK;
+}
+
+esp_err_t esp_sleep_enable_timer_wakeup(uint64_t time_in_us)
+{
+    s_timer_wakeup_us = time_in_us;
+    return ESP_OK;
+}
+
+esp_err_t esp_light_sleep_start(void)
+{
+    s_light_sleep_count++;
+    if (s_press_after_light_sleeps > 0
+        && s_light_sleep_count >= s_press_after_light_sleeps)
+    {
+        s_force_power_button_pressed = true;
+    }
     return ESP_OK;
 }
 
@@ -331,10 +352,16 @@ esp_err_t iox_init(void)
 static bool s_iox_peripherals_powered;
 static bool s_iox_levels[16];
 static int s_iox_port_reads;
+static int s_iox_wake_prepare_count;
+static int s_iox_power_off_count;
 
 esp_err_t iox_set_peripherals_powered(bool powered)
 {
     s_iox_peripherals_powered = powered;
+    if (!powered)
+    {
+        s_iox_power_off_count++;
+    }
     return ESP_OK;
 }
 
@@ -344,8 +371,18 @@ esp_err_t iox_set_pin(uint8_t pin, bool level)
     return ESP_OK;
 }
 
+esp_err_t iox_prepare_power_button_wake(void)
+{
+    s_iox_wake_prepare_count++;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 bool iox_get_pin(uint8_t pin)
 {
+    if (pin == IOX_BTN_POWER && s_force_power_button_pressed)
+    {
+        return false;
+    }
     return s_iox_levels[pin];
 }
 
@@ -667,12 +704,19 @@ static void reset_state(void)
     s_iox_levels[IOX_BTN_POWER] = true;
     s_iox_levels[IOX_AUDIO_PACTRL] = true;
     s_iox_levels[IOX_POWER_VINHOLD] = true;
+    s_iox_levels[IOX_USB_POWER_STAT] = true;
     s_iox_port_reads = 0;
     s_deep_sleep_count = 0;
     s_wake_gpio = -1;
     s_wake_level = -1;
     s_isolated_gpio = -1;
     s_rtc_isolate_count = 0;
+    s_timer_wakeup_us = 0;
+    s_light_sleep_count = 0;
+    s_press_after_light_sleeps = 0;
+    s_force_power_button_pressed = false;
+    s_iox_wake_prepare_count = 0;
+    s_iox_power_off_count = 0;
     s_snapshot_valid = true;
     s_external_power_present = false;
     s_battery_critical_check_ticks = 0;
@@ -1036,17 +1080,18 @@ int main(void)
     /* --------------------------------------------- 9. MANUAL POWER OFF ---- */
     {
         reset_state();
-        power_off(true);
+        s_press_after_light_sleeps = 1;
+        power_off(true, false);
         CHECK(s_powered_off, "power: a hold must start power-off");
         CHECK(s_display_base == DISPLAY_BASE_OFF,
               "power: off should park the base at OFF, got %d",
               (int)s_display_base);
         CHECK(s_clear_count > 0 && s_flush_count > 0,
               "power: off must blank the panel");
-        CHECK(!s_iox_peripherals_powered,
+        CHECK(s_iox_power_off_count == 1,
               "power: off must disconnect downstream peripheral rails");
-        CHECK(s_deep_sleep_count == 1,
-              "power: off must enter deep sleep, not software standby");
+        CHECK(s_restart_count == 1 && s_deep_sleep_count == 0,
+              "power: wakeable off mode must light-sleep then restart");
     }
 
     /* ------------------------------ 10. ENCODER DOES NO HEAVY WORK -------- */
@@ -1101,6 +1146,7 @@ int main(void)
         encoder_event(ENCODER_ID_POWER, 0, ENCODER_EVT_LONG_PRESS);
         CHECK(s_pending_power && !s_powered_off,
               "encoder: a power hold must be recorded, not executed inline");
+        s_press_after_light_sleeps = 1;
         encoder_actions_pump();
         CHECK(s_powered_off,
               "encoder: the pump must apply the deferred power transition");
@@ -1191,29 +1237,29 @@ int main(void)
               "admin: stopping admin must restore the idle face");
     }
 
-    /* ---------------------------------------- 12. REAL POWER-OFF ---------- */
+    /* ------------------------------- 12. INACTIVITY OFF REMAINS WAKEABLE -- */
     {
         reset_state();
         s_tick_ms = IDLE_POWER_OFF_MS - 1;
         idle_power_check();
-        CHECK(s_deep_sleep_count == 0,
+        CHECK(s_light_sleep_count == 0,
               "idle power: shut down before the 30-minute deadline");
 
+        s_press_after_light_sleeps = 1;
         s_tick_ms++;
         idle_power_check();
-        CHECK(s_deep_sleep_count == 1,
-              "idle power: did not enter deep sleep at 30 minutes");
-        CHECK(s_powered_off && !s_iox_peripherals_powered,
-              "idle power: shutdown state or peripheral rails are wrong");
-        CHECK(!s_iox_levels[IOX_AUDIO_PACTRL]
-              && !s_iox_levels[IOX_POWER_VINHOLD],
-              "idle power: amp or VIN_HOLD remained asserted");
+        CHECK(s_powered_off && s_iox_power_off_count == 1,
+              "idle power: shutdown state or peripheral rail cut is wrong");
+        CHECK(s_restart_count == 1 && s_deep_sleep_count == 0,
+              "idle power: 30-minute shutdown was not wakeable");
+        CHECK(s_iox_levels[IOX_POWER_VINHOLD],
+              "idle power: normal off mode released the wake-critical latch");
         CHECK(s_iox_port_reads == 2,
               "idle power: rev04 did not clear both IOX input ports");
         CHECK(s_wake_gpio == PIN_IOX_INT && s_wake_level == 0,
               "idle power: active-low IOX wake was not armed");
-        CHECK(s_rtc_isolate_count == 1 && s_isolated_gpio == GPIO_NUM_12,
-              "idle power: ESP32-WROVER GPIO12 was not isolated");
+        CHECK(s_rtc_isolate_count == 0,
+              "idle power: normal wakeable off mode isolated GPIO12");
     }
 
     /* Active playback restarts the full inactivity window. */
@@ -1232,9 +1278,10 @@ int main(void)
         CHECK(s_deep_sleep_count == 0,
               "idle power: shut down before 30 minutes after playback");
         s_tick_ms++;
+        s_press_after_light_sleeps = 1;
         idle_power_check();
-        CHECK(s_deep_sleep_count == 1,
-              "idle power: did not shut down 30 minutes after playback");
+        CHECK(s_restart_count == 1 && s_deep_sleep_count == 0,
+              "idle power: did not enter wakeable off mode after playback");
     }
 
     /* Critical cutoff requires two valid, battery-only SOC samples. */
@@ -1249,6 +1296,9 @@ int main(void)
         s_tick_ms += BATTERY_CRITICAL_CHECK_PERIOD_MS;
         CHECK(battery_critical_check() && s_deep_sleep_count == 1,
               "critical battery: second sample did not shut down in admin mode");
+        CHECK(!s_iox_levels[IOX_POWER_VINHOLD]
+              && s_rtc_isolate_count == 1,
+              "critical battery: hard cutoff kept the power latch asserted");
     }
 
     /* Unknown power/gauge state and external power break consecutiveness. */
@@ -1273,6 +1323,27 @@ int main(void)
         s_tick_ms += BATTERY_CRITICAL_CHECK_PERIOD_MS;
         CHECK(!battery_critical_check() && s_deep_sleep_count == 0,
               "critical reset: stale samples caused immediate shutdown");
+    }
+
+    /* Timer-backed off mode must work without an expander IRQ. */
+    {
+        reset_state();
+        s_press_after_light_sleeps = 1;
+        power_off(false, false);
+
+        CHECK(s_light_sleep_count == (int)POWER_OFF_WAKE_HOLD_SAMPLES,
+              "powered wake: hold was not qualified through light sleep");
+        CHECK(s_timer_wakeup_us == POWER_OFF_WAKE_POLL_US,
+              "powered wake: timer fallback was not armed");
+        CHECK(s_iox_wake_prepare_count == 1,
+              "powered wake: IOX wake preparation was not attempted");
+        CHECK(s_restart_count == 1 && s_deep_sleep_count == 0,
+              "powered wake: did not restart from light sleep");
+        CHECK(s_iox_levels[IOX_POWER_VINHOLD]
+              && s_iox_peripherals_powered,
+              "powered wake: rails/VIN_HOLD were not restored before restart");
+        CHECK(s_rtc_isolate_count == 0,
+              "powered wake: GPIO12 was deep-sleep isolated in light sleep");
     }
 
     if (s_failures != 0)

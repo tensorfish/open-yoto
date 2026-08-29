@@ -22,6 +22,8 @@ static const char *TAG = "iox";
 #define IOX_REG_PULLUP_EN_1  0x47
 #define IOX_REG_PULLUP_SEL_0 0x48
 #define IOX_REG_PULLUP_SEL_1 0x49
+#define IOX_REG_INT_MASK_0   0x4A   /* 1 = masked, 0 = interrupt enabled */
+#define IOX_REG_INT_MASK_1   0x4B
 
 #define IOX_TIMEOUT_MS       100
 
@@ -122,6 +124,35 @@ esp_err_t iox_init(void)
     ESP_LOGI(TAG, "%dx IO expander initialized (SDA=%d SCL=%d)",
              IOX_COUNT, PIN_I2C_SDA, PIN_I2C_SCL);
     return ESP_OK;
+}
+
+esp_err_t iox_prepare_power_button_wake(void)
+{
+#ifdef CONFIG_BOARD_REV_04
+    /* The rev #04 ET6416 rejects PI4IOE5V6416 interrupt-mask registers.
+     * Externally-powered off mode therefore uses its timer polling fallback. */
+    return ESP_ERR_NOT_SUPPORTED;
+#else
+    const uint8_t exp = IOX_EXP(IOX_BTN_POWER);
+    const uint8_t port = IOX_PORT(IOX_BTN_POWER);
+    const uint8_t bit = IOX_BIT(IOX_BTN_POWER);
+    uint8_t ignored;
+    esp_err_t err;
+
+    /* PI4IOE5V6416 interrupt masks power up as 0xFF. Without clearing the
+     * power-button bit, GPIO34 never asserts and ESP sleep cannot wake. */
+    err = iox_write_reg(exp, IOX_REG_INT_MASK_0, port == 0
+        ? (uint8_t)~(1u << bit) : 0xFF);
+    if (err != ESP_OK) return err;
+    err = iox_write_reg(exp, IOX_REG_INT_MASK_1, port == 1
+        ? (uint8_t)~(1u << bit) : 0xFF);
+    if (err != ESP_OK) return err;
+
+    /* Reading the input port clears any transition latched before wake was
+     * armed. The button-release wait in app_main guarantees the level is high. */
+    return iox_read_reg(exp, port == 0 ? IOX_REG_INPUT_0 : IOX_REG_INPUT_1,
+                        &ignored);
+#endif
 }
 
 esp_err_t iox_set_peripherals_powered(bool powered)
