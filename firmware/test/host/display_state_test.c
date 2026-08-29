@@ -190,6 +190,22 @@ void esp_restart(void)
     s_restart_count++;
 }
 
+static int s_deep_sleep_count;
+static int s_wake_gpio;
+static int s_wake_level;
+
+esp_err_t esp_sleep_enable_ext0_wakeup(int gpio_num, int level)
+{
+    s_wake_gpio = gpio_num;
+    s_wake_level = level;
+    return ESP_OK;
+}
+
+void esp_deep_sleep_start(void)
+{
+    s_deep_sleep_count++;
+}
+
 const char *esp_err_to_name(esp_err_t err)
 {
     return err == ESP_OK ? "ESP_OK" : "ESP_ERR";
@@ -290,9 +306,32 @@ esp_err_t iox_init(void)
 }
 
 static bool s_iox_peripherals_powered;
+static bool s_iox_levels[16];
+static int s_iox_port_reads;
+
 esp_err_t iox_set_peripherals_powered(bool powered)
 {
     s_iox_peripherals_powered = powered;
+    return ESP_OK;
+}
+
+esp_err_t iox_set_pin(uint8_t pin, bool level)
+{
+    s_iox_levels[pin] = level;
+    return ESP_OK;
+}
+
+bool iox_get_pin(uint8_t pin)
+{
+    return s_iox_levels[pin];
+}
+
+esp_err_t iox_read_port(uint8_t expander, uint8_t port, uint8_t *value)
+{
+    (void)expander;
+    (void)port;
+    *value = 0;
+    s_iox_port_reads++;
     return ESP_OK;
 }
 
@@ -597,11 +636,19 @@ static void reset_state(void)
     s_pending_skip = 0;
     s_pending_power = false;
     s_pending_screen_toggle = false;
-    s_power_resume_magic = 0;
     s_content_lookups = 0;
     s_admin_active = false;
     s_restart_count = 0;
     s_iox_peripherals_powered = true;
+    memset(s_iox_levels, 0, sizeof(s_iox_levels));
+    s_iox_levels[IOX_BTN_POWER] = true;
+    s_iox_levels[IOX_AUDIO_PACTRL] = true;
+    s_iox_levels[IOX_POWER_VINHOLD] = true;
+    s_iox_port_reads = 0;
+    s_deep_sleep_count = 0;
+    s_wake_gpio = -1;
+    s_wake_level = -1;
+    s_last_activity_ticks = 0;
 
     s_state_mutex = xSemaphoreCreateMutex();
 
@@ -956,13 +1003,11 @@ int main(void)
               "battery icon: charging must map to battery_charging_icon_for");
     }
 
-    /* ------------------------------------------- 9. POWER OFF / ON -------- */
+    /* --------------------------------------------- 9. MANUAL POWER OFF ---- */
     {
-        int restart_mark;
-
         reset_state();
-        power_toggle();
-        CHECK(s_powered_off, "power: the first hold must switch off");
+        power_off(true);
+        CHECK(s_powered_off, "power: a hold must start power-off");
         CHECK(s_display_base == DISPLAY_BASE_OFF,
               "power: off should park the base at OFF, got %d",
               (int)s_display_base);
@@ -970,16 +1015,8 @@ int main(void)
               "power: off must blank the panel");
         CHECK(!s_iox_peripherals_powered,
               "power: off must disconnect downstream peripheral rails");
-
-        restart_mark = s_restart_count;
-        power_toggle();
-        CHECK(!s_powered_off, "power: the second hold must switch on");
-        CHECK(s_iox_peripherals_powered,
-              "power: on must restore downstream peripheral rails");
-        CHECK(s_power_resume_magic == POWER_RESUME_MAGIC,
-              "power: on must mark the restart as a low-power resume");
-        CHECK(s_restart_count == restart_mark + 1,
-              "power: on must restart to cold-initialize every peripheral");
+        CHECK(s_deep_sleep_count == 1,
+              "power: off must enter deep sleep, not software standby");
     }
 
     /* ------------------------------ 10. ENCODER DOES NO HEAVY WORK -------- */
@@ -1122,6 +1159,50 @@ int main(void)
         state_unlock();
         CHECK(last_frame() == IDLE_FACE_RGBA,
               "admin: stopping admin must restore the idle face");
+    }
+
+    /* ---------------------------------------- 12. REAL POWER-OFF ---------- */
+    {
+        reset_state();
+        s_tick_ms = IDLE_POWER_OFF_MS - 1;
+        idle_power_check();
+        CHECK(s_deep_sleep_count == 0,
+              "idle power: shut down before the 30-minute deadline");
+
+        s_tick_ms++;
+        idle_power_check();
+        CHECK(s_deep_sleep_count == 1,
+              "idle power: did not enter deep sleep at 30 minutes");
+        CHECK(s_powered_off && !s_iox_peripherals_powered,
+              "idle power: shutdown state or peripheral rails are wrong");
+        CHECK(!s_iox_levels[IOX_AUDIO_PACTRL]
+              && !s_iox_levels[IOX_POWER_VINHOLD],
+              "idle power: amp or VIN_HOLD remained asserted");
+        CHECK(s_iox_port_reads == 2,
+              "idle power: rev04 did not clear both IOX input ports");
+        CHECK(s_wake_gpio == PIN_IOX_INT && s_wake_level == 0,
+              "idle power: active-low IOX wake was not armed");
+    }
+
+    /* Active playback restarts the full inactivity window. */
+    {
+        reset_state();
+        s_playing = true;
+        s_tick_ms = IDLE_POWER_OFF_MS;
+        idle_power_check();
+        CHECK(s_deep_sleep_count == 0
+              && s_last_activity_ticks == IDLE_POWER_OFF_MS,
+              "idle power: playback did not refresh activity");
+
+        s_playing = false;
+        s_tick_ms += IDLE_POWER_OFF_MS - 1;
+        idle_power_check();
+        CHECK(s_deep_sleep_count == 0,
+              "idle power: shut down before 30 minutes after playback");
+        s_tick_ms++;
+        idle_power_check();
+        CHECK(s_deep_sleep_count == 1,
+              "idle power: did not shut down 30 minutes after playback");
     }
 
     if (s_failures != 0)

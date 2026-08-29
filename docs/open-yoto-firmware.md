@@ -321,21 +321,27 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   `battery-charging-10.png` for 10–19%, and so on to `battery-charging-100.png`
   at 100%.
 - Battery info never fights the face. Charging is announced as a glimpse on the
-  not-charging → charging **edge**, at boot, and on power-on; it covers the base
-  screen for 5 s and then hands it back. The 30 s re-check only logs while
+  not-charging → charging **edge** and at boot; it covers the base screen for
+  5 s and then hands it back. The 30 s re-check only logs while
   charging. A right-knob twist with no card loaded winks and rests on the face,
   taking the display back from the charging icon. Only a **low** battery
   re-asserts itself over whatever is on screen.
 - On every USB plug-in, the firmware uses the SGM41513 `PG_STAT` bit as the
   authoritative power-source signal, restores the board-specific charger
   settings at I²C address `0x1A`, and clears that cached configuration when
-  power-good disappears. Rev #04 explicitly sets its 2.4 A input-current limit
-  to support the stock 2220 mA battery-charge request; it must use a suitable
-  USB power supply. Rev #05 derives a limit up to 2.4 A from the attached
-  HUSB238 Type-C/PD contract and retains the charger's conservative detected
-  limit if no contract can be read. Charging UI uses the SGM41513 `CHRG_STAT`
-  state instead of the unreliable board `plugstat`/`chgstat` lines. A
-  transition counts only after four consecutive 500 ms samples agree, and a
-  glimpse appears at most once every 30 s.
-- "Off" is software standby: audio and the admin server stop and the display
-  blanks. True deep sleep is not implemented yet.
+  power-good disappears. Rev #04 preserves the SGM41513's D+/D−
+  source-detected input-current limit while applying the stock 2220 mA
+  battery-charge request; this avoids input-voltage DPM cycling on weak USB
+  supplies. Rev #05 derives a limit up to 2.4 A from the attached HUSB238
+  Type-C/PD contract and retains the charger's conservative detected limit if
+  no contract can be read. Charging UI uses the SGM41513 `CHRG_STAT` state
+  instead of the unreliable board `plugstat`/`chgstat` lines. A transition
+  counts only after four consecutive 500 ms samples agree, and a glimpse
+  appears at most once every 30 s.
+- A three-second power-button hold, or 30 minutes without input, playback, or
+  an active admin session, runs the stock-style shutdown path: stop audio and
+  admin, blank the display, disable the amplifier and downstream rails, clear
+  IO-expander interrupts, arm the active-low IOX interrupt as the wake source,
+  and release `VIN_HOLD`. Battery power is physically disconnected; if USB
+  keeps the ESP32 supplied, it enters deep sleep instead of polling in software
+  standby.

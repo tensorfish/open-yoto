@@ -413,9 +413,9 @@ static bool sgm41513_status_has_input(uint8_t status)
 }
 
 #ifndef CONFIG_BOARD_REV_04
-/* Return the contract current in mA, capped to the SGM41513's stock 2.4 A
- * input setting. Zero means the HUSB238 has no usable source contract, so
- * the charger must retain its own conservative source-detection limit. */
+/* Return the negotiated contract current in mA, capped to the 2.4 A input
+ * limit used by the stock rev #05 power-source arbitration. Zero means the
+ * charger must retain its own source-detection result. */
 static unsigned husb238_input_current_limit_ma(void)
 {
     uint8_t status0;
@@ -434,6 +434,11 @@ static unsigned husb238_input_current_limit_ma(void)
 
     if ((status1 & HUSB238_PD_RESPONSE_MASK) == HUSB238_PD_RESPONSE_SUCCESS)
     {
+        static const unsigned pd_current_ma[] = {
+            500, 700, 1000, 1250, 1500, 1750, 2000, 2250,
+            2500, 2750, 3000, 3250, 3500, 4000, 4500, 5000,
+        };
+
         if (i2c_master_write_read_device(
                 I2C_PORT, I2C_ADDR_PD_SINK,
                 (uint8_t[]){ HUSB238_REG_PD_STATUS0 }, 1, &status0, 1,
@@ -441,7 +446,7 @@ static unsigned husb238_input_current_limit_ma(void)
         {
             return 0;
         }
-        current_ma = 500 + 250 * (status0 & 0x0F);
+        current_ma = pd_current_ma[status0 & 0x0F];
     }
     else if ((status1 & HUSB238_5V_CONTRACT) != 0)
     {
@@ -478,14 +483,15 @@ static esp_err_t sgm41513_configure(void)
 {
     esp_err_t err;
 
-    /* Leave input high-impedance mode and select the normal charge path. Rev
-     * #04's stock 2220 mA charge request requires its 2.4 A input setting;
-     * source detection can otherwise leave it at USB-default current. Rev
-     * #05 raises IINDPM only when the HUSB238 reports a usable contract. */
+    /* Stock init clears HIZ/STAT mode but preserves REG00 IINDPM on rev #04,
+     * leaving the charger's D+/D- source detector authoritative. Forcing
+     * 2.4 A from a weak adapter causes input-voltage DPM cycling and can make
+     * charging slower, not faster. Rev #05 may override IINDPM only from a
+     * valid HUSB238 contract. */
     uint8_t input_mask = SGM41513_EN_HIZ | SGM41513_STAT_CTRL_MASK;
     uint8_t input_value = 0;
 #ifdef CONFIG_BOARD_REV_04
-    unsigned input_current_ma = SGM41513_IINDPM_MAX_MA;
+    unsigned input_current_ma = 0;
 #else
     unsigned input_current_ma = husb238_input_current_limit_ma();
 #endif

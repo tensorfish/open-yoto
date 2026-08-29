@@ -177,8 +177,8 @@ static void test_configures_only_when_power_appears(void)
           "charger was not marked configured");
 #ifdef CONFIG_BOARD_REV_04
     CHECK((s_charger_registers[SGM41513_REG_INPUT_SOURCE]
-           & SGM41513_IINDPM_MASK) == 0x17,
-          "rev04 did not apply its stock 2.4 A input limit");
+           & SGM41513_IINDPM_MASK) == 0x05,
+          "rev04 overwrote the charger's source-detected input limit");
 #else
     CHECK((s_charger_registers[SGM41513_REG_INPUT_SOURCE]
            & SGM41513_IINDPM_MASK) == 0x17,

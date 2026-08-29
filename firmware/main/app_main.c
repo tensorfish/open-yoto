@@ -16,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_sleep.h"
 #include "esp_random.h"
 #include "esp_attr.h"
 #include "board_pins.h"
@@ -279,11 +280,12 @@ static void show_admin_code(
 
 /* ------------------------------------------------------------- encoder --- */
 /* Playback/power state, guarded by s_state_mutex (shared by the encoder task
- * and the main loop). */
+ * and the main loop). Set before rail shutdown so concurrent tasks stop
+ * producing work while the ESP32 is entering deep sleep. */
 static bool s_powered_off = false;
-/* Survives the restart used to exit low-power mode. */
-#define POWER_RESUME_MAGIC 0x4f595057u
-static RTC_DATA_ATTR uint32_t s_power_resume_magic;
+/* Thirty minutes matches the stock player's inactivity shutdown policy. */
+#define IDLE_POWER_OFF_MS (30u * 60u * 1000u)
+static TickType_t s_last_activity_ticks;
 static char s_current_url[CR95HF_URL_MAX + 1];
 static int s_track_index = 0;
 static int s_track_count = 0;
@@ -705,63 +707,109 @@ static void play_pause_toggle(void)
 }
 
 /*
- * A deliberate power-button hold disconnects downstream rails and leaves the
- * ESP32 in its low-activity idle state. Waking restores the rails then
- * restarts, which is the only safe way to cold-initialize the codec, NFC
- * reader, SD bus, and display.
+ * The stock firmware does not implement "off" as a polling loop. It stops the
+ * player, disconnects downstream rails, unlatches VIN_HOLD, then enters deep
+ * sleep for the externally-powered case where the ESP32 remains supplied.
+ * On battery, dropping VIN_HOLD removes power completely; the physical power
+ * button subsequently starts a cold boot.
  */
-static void power_toggle(void)
+static void power_off(bool wait_for_button_release)
 {
-    bool restart = false;
     esp_err_t err;
 
     state_lock();
-    s_powered_off = !s_powered_off;
     if (s_powered_off)
     {
-        audio_stop();
-        s_track_count = 0;
-        s_track_index = 0;
-        s_current_url[0] = '\0';
-        if (admin_is_active())
-        {
-            admin_stop();
-        }
-        s_display_base = DISPLAY_BASE_OFF;
-        s_battery_visual_deadline = 0;
-        display_cancel_volume_locked();
-        s_idle_wink_deadline = 0;
-        display_render_base_locked();
-        err = iox_set_peripherals_powered(false);
-        if (err != ESP_OK)
-        {
-            ESP_LOGW(TAG, "could not disconnect peripheral rails: %s",
-                     esp_err_to_name(err));
-        }
-        ESP_LOGI(TAG, "powered off; peripheral rails disconnected");
+        state_unlock();
+        return;
     }
-    else
+    s_powered_off = true;
+    audio_stop();
+    s_track_count = 0;
+    s_track_index = 0;
+    s_current_url[0] = '\0';
+    if (admin_is_active())
     {
-        err = iox_set_peripherals_powered(true);
-        if (err != ESP_OK)
-        {
-            ESP_LOGE(TAG, "could not restore peripheral rails: %s",
-                     esp_err_to_name(err));
-        }
-        else
-        {
-            restart = true;
-            ESP_LOGI(TAG, "peripheral rails restored; restarting");
-            s_power_resume_magic = POWER_RESUME_MAGIC;
-        }
+        admin_stop();
     }
+    s_display_base = DISPLAY_BASE_OFF;
+    s_battery_visual_deadline = 0;
+    display_cancel_volume_locked();
+    s_idle_wink_deadline = 0;
+    display_render_base_locked();
     state_unlock();
 
-    if (restart)
+    if (wait_for_button_release)
     {
-        vTaskDelay(pdMS_TO_TICKS(20));
-        esp_restart();
+        /* The expander IRQ is level-low until its input port is read. Waiting
+         * for release prevents an externally-powered unit from immediately
+         * waking from the same long press that requested shutdown. */
+        while (!iox_get_pin(IOX_BTN_POWER))
+        {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
     }
+
+    (void)iox_set_pin(IOX_AUDIO_PACTRL, false);
+    err = iox_set_peripherals_powered(false);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not disconnect peripheral rails: %s",
+                 esp_err_to_name(err));
+    }
+
+    /* Reading every input port clears pending PI4IOE5V6416 interrupts before
+     * GPIO34 is armed as the active-low wake source. */
+    uint8_t ignored;
+    (void)iox_read_port(0, 0, &ignored);
+    (void)iox_read_port(0, 1, &ignored);
+#ifndef CONFIG_BOARD_REV_04
+    (void)iox_read_port(1, 0, &ignored);
+    (void)iox_read_port(1, 1, &ignored);
+#endif
+    err = esp_sleep_enable_ext0_wakeup(PIN_IOX_INT, 0);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not arm power-button wake: %s",
+                 esp_err_to_name(err));
+    }
+
+    ESP_LOGI(TAG, "powering off: rails disconnected, VIN_HOLD released");
+    err = iox_set_pin(IOX_POWER_VINHOLD, false);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not release VIN_HOLD: %s",
+                 esp_err_to_name(err));
+    }
+    esp_deep_sleep_start();
+}
+
+static void activity_note(void)
+{
+    s_last_activity_ticks = xTaskGetTickCount();
+}
+
+static void idle_power_check(void)
+{
+    TickType_t now = xTaskGetTickCount();
+
+    if (s_powered_off)
+    {
+        return;
+    }
+    if (audio_is_playing() || admin_is_active())
+    {
+        s_last_activity_ticks = now;
+        return;
+    }
+    if ((TickType_t)(now - s_last_activity_ticks)
+            < pdMS_TO_TICKS(IDLE_POWER_OFF_MS))
+    {
+        return;
+    }
+
+    ESP_LOGI(TAG, "30 minutes inactive; powering off");
+    power_off(false);
 }
 
 /* Short power presses blank or restore only the panel; rails stay powered. */
@@ -904,14 +952,11 @@ static bool gesture_debounced(uint32_t *last, uint32_t window_ms)
  */
 static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
 {
-    bool power_gesture =
-        event == ENCODER_EVT_LONG_PRESS && encoder_id == ENCODER_ID_POWER;
-
-    /* While "off", ignore everything except the power-toggle gestures. */
-    if (s_powered_off && !power_gesture)
+    if (s_powered_off)
     {
         return;
     }
+    activity_note();
 
     if (event == ENCODER_EVT_TURN)
     {
@@ -1031,7 +1076,7 @@ static void encoder_actions_pump(void)
 
     if (power)
     {
-        power_toggle();
+        power_off(true);
     }
     if (screen_toggle_pending)
     {
@@ -1566,9 +1611,6 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
-    bool resumed_from_power_off =
-        s_power_resume_magic == POWER_RESUME_MAGIC;
-    s_power_resume_magic = 0;
     ESP_ERROR_CHECK(err);
     boot_recovery_prepare();
 
@@ -1625,10 +1667,9 @@ void app_main(void)
     /* Run the visual half of the welcome after queueing its audio half. */
     state_lock();
     display_play_boot_animation_locked();
-    /* Show the battery icon after a low-power resume, or when boot state
-     * otherwise warrants it. */
+    /* Show battery state when boot conditions warrant it. */
     s_charging_latched = battery_is_charging();
-    if (resumed_from_power_off || battery_is_low() || s_charging_latched)
+    if (battery_is_low() || s_charging_latched)
     {
         display_show_battery_glimpse_locked();
     }
@@ -1684,6 +1725,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "boot complete (battery %d%%, %.1f mV)",
              battery_soc(), (double)battery_voltage());
+    activity_note();
 
     uint8_t uid[CR95HF_UID_MAX];
     char url[CR95HF_URL_MAX + 1];
@@ -1693,22 +1735,10 @@ void app_main(void)
 
     while (1)
     {
-        /* Deferred encoder gestures first: a pending power-on must be seen even
-         * while the loop is otherwise parked. */
+        /* Deferred encoder gestures first. */
         encoder_actions_pump();
 
         stack_watch();
-
-        if (s_powered_off)
-        {
-            /* Charging must also initialize when USB is connected while the
-             * player is in software-off mode. */
-            (void)battery_service();
-            /* Keep the I/O-expander button task alive while the main player
-             * loop yields; all downstream rails are already disconnected. */
-            vTaskDelay(pdMS_TO_TICKS(200));
-            continue;
-        }
 
         /* A new NFC card either toggles admin, is captured by active admin,
          * or starts its mapped first track. */
@@ -1728,6 +1758,7 @@ void app_main(void)
 
         if (new_card)
         {
+            activity_note();
             memcpy(last_uid, uid, uid_len);
             last_uid_len = uid_len;
             log_card_diagnostics(uid, uid_len, url, &card_info);
@@ -1790,6 +1821,7 @@ void app_main(void)
         }
         else if (!card && card_present)
         {
+            activity_note();
             if (admin_is_active())
             {
                 admin_set_last_card(NULL, 0, NULL);
@@ -1830,6 +1862,8 @@ void app_main(void)
         state_lock();
         display_maintain_locked();
         state_unlock();
+
+        idle_power_check();
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }

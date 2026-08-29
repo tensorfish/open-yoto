@@ -156,6 +156,12 @@ firmware/
 - I2C master (SDA=21, SCL=25) + IO expander(s) with exact stock latch and
   direction bytes, followed by the recovered run-state transitions (rev #04:
   VINHOLD HIGH, active-low PWREN LOW, levelconvertor IOX.0.3 HIGH).
+- **Power and battery [rev #04/#05]**: CW2215B board profiles, SGM41513
+  hot-plug configuration with source-safe input limits, and stock charge-current
+  requests. A three-second power hold or 30 minutes of inactivity disables the
+  amp and peripheral rails, releases `VIN_HOLD`, and enters deep sleep when
+  external power keeps the ESP32 supplied; the host suite covers both shutdown
+  timing and charger register behavior.
 - **GC9306 TFT driver [rev #04]**: stock SPI2 mode 0/80MHz/no-dummy setup,
   stock reset and complete initialization tail, queue-1 1364-pixel RGB666
   transport, CASET/RASET/RAMWR framing, and 40 kHz GPIO26 backlight.

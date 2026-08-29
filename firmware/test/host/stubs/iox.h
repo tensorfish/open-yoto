@@ -13,5 +13,6 @@ esp_err_t iox_init(void);
 esp_err_t iox_set_peripherals_powered(bool powered);
 esp_err_t iox_set_pin(uint8_t pin, bool level);
 bool iox_get_pin(uint8_t pin);
+esp_err_t iox_read_port(uint8_t expander, uint8_t port, uint8_t *value);
 
 #endif /* HOST_STUB_IOX_H */
