@@ -100,11 +100,9 @@ static const char *TAG = "battery";
 #define CW2215B_VCELL_LSB_MV      0.3125f
 #define CW2215B_SOC_MAX           100
 
-/* ---- low-battery policy ---- */
-#define BATTERY_LOW_SOC_PCT     15
-/* TODO: confirm the low-voltage cutoff from the battery discharge curve /
- * schematic. 3300 mV is a conservative single-cell "low" threshold. */
-#define BATTERY_LOW_VOLTAGE_MV  3300
+/* Stock BATT_THRS_WRNG default recovered from the settings schema. Supported
+ * rev #04/#05 boards use the CW2215B SOC reading for this warning. */
+#define BATTERY_LOW_SOC_PCT 7
 
 
 static bool s_gauge_present = false;
@@ -909,14 +907,7 @@ bool battery_is_low(void)
     }
 
     int soc = battery_soc();
-    if (soc >= 0 && soc < BATTERY_LOW_SOC_PCT)
-    {
-        return true;
-    }
-
-    float voltage_mv = battery_voltage();
-    return voltage_mv > 0.0f
-        && voltage_mv < (float)BATTERY_LOW_VOLTAGE_MV;
+    return soc >= 0 && soc <= BATTERY_LOW_SOC_PCT;
 }
 
 bool battery_is_charging(void)

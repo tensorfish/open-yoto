@@ -27,6 +27,7 @@ static int s_failures;
 static TickType_t s_tick_ms;
 static bool s_iox_levels[16];
 static uint8_t s_charger_registers[256];
+static uint8_t s_gauge_registers[256];
 static uint8_t s_pd_registers[256];
 static bool s_charger_responds;
 static bool s_pd_responds;
@@ -95,6 +96,11 @@ esp_err_t i2c_master_write_read_device(i2c_port_t port, uint8_t address,
         read_buffer[0] = s_charger_registers[write_buffer[0]];
         return ESP_OK;
     }
+    if (address == I2C_ADDR_FUEL_GAUGE)
+    {
+        read_buffer[0] = s_gauge_registers[write_buffer[0]];
+        return ESP_OK;
+    }
     if (address == I2C_ADDR_PD_SINK && s_pd_responds)
     {
         read_buffer[0] = s_pd_registers[write_buffer[0]];
@@ -126,6 +132,7 @@ static void reset_model(void)
     s_tick_ms = 0;
     memset(s_iox_levels, 0, sizeof(s_iox_levels));
     memset(s_charger_registers, 0, sizeof(s_charger_registers));
+    memset(s_gauge_registers, 0, sizeof(s_gauge_registers));
     memset(s_pd_registers, 0, sizeof(s_pd_registers));
     memset(s_set_pins, 0, sizeof(s_set_pins));
     memset(s_set_levels, 0, sizeof(s_set_levels));
@@ -367,6 +374,22 @@ static void test_status_read_failure_preserves_known_state(void)
     CHECK(battery_service() == ESP_OK, "status failure did not recover");
 }
 
+static void test_stock_low_battery_threshold(void)
+{
+    reset_model();
+    s_gauge_present = true;
+    s_gauge_data_valid = true;
+
+    s_gauge_registers[CW2215B_REG_SOC] = BATTERY_LOW_SOC_PCT;
+    CHECK(battery_is_low(),
+          "stock warning threshold %d%% was not considered low",
+          BATTERY_LOW_SOC_PCT);
+
+    s_gauge_registers[CW2215B_REG_SOC] = BATTERY_LOW_SOC_PCT + 1;
+    CHECK(!battery_is_low(),
+          "SOC above stock warning threshold was considered low");
+}
+
 int main(void)
 {
     CHECK(I2C_ADDR_CHARGER == 0x1A,
@@ -379,6 +402,7 @@ int main(void)
     test_periodic_audit_repairs_owned_configuration();
     test_status_read_failure_preserves_known_state();
 
+    test_stock_low_battery_threshold();
     if (s_failures != 0)
     {
         fprintf(stderr, "%d charger test(s) failed\n", s_failures);

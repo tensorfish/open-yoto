@@ -8,10 +8,14 @@ Dense reference for AI agents reverse-engineering the Yoto ESP32 firmware power 
 multi-source input (USB-C PD + Qi wireless + Li-ion battery), a fuel gauge, a charger controller,
 and an IO-expander-driven power-control / power-sequencing path.
 
-**Ground truth is `output/strings.txt` (line numbers) + `output/hwconfig_*.json` + `output/pinmap.json`.**
-Ghidra generic Xtensa does **not** resolve L32R literal-pool string refs, so string→function xrefs
-were recovered manually (see §5) by scanning the IROM code segment for 32-bit little-endian pointers
-to rodata. Roles marked `[INFERENCE]` unless directly evidenced.
+Primary evidence is `output/strings.txt`, `output/hwconfig_*.json`,
+`output/pinmap.json`, and the Ghidra 12.0.4 project/reports under
+`output/ghidra-power-analysis/`. The analyzed 8 MiB flash image has SHA-256
+`1db52091f892e05a9aec97605890b406f6734213214afef792e247353a75449e`.
+Ghidra's generic Xtensa loader does not map an ESP application image or recover
+all L32R literal-pool xrefs by itself. The focused project maps each segment to
+its linked address; the report scripts additionally scan IROM for little-endian
+rodata pointers. Roles remain marked `[INFERENCE]` unless directly evidenced.
 
 ---
 
@@ -243,17 +247,28 @@ write reg `10` (`0xf` then `0`), reg `8` (config bits). Register names from data
 
 ### 6.3 Charging state machine + power-source arbitration
 
-- Charge ramp: `handle_chg_ramp_state` (SLOW/FAST/CHRG_SMART enum strings at strings.txt:1118–1120)
-  ramps `set_charging` current in steps; `set_charging_enabled` applies reasons.
-- Source selection: `Best src is USB … / Best src is Qi …` (strings.txt:953–956) chooses between
-  HUSB238 USB-C and CV8013N/CV8085 Qi; toggles `nvbuschgen`/`nqichgen` IOX pins.
+- Charge ramp: `handle_chg_ramp_state` (SLOW/FAST/CHRG_SMART enum strings at
+  strings.txt:1118–1120) ramps the current from a 450 mA floor toward a
+  descriptor-derived target. The visible stock function divides its current
+  request by five before register programming; that is not evidence that the
+  charger hardware itself uses 5 mA register steps.
+- Charger enable is SGM41513 register 1 bit 4, **active-high**. The separate
+  USB and Qi path-enable GPIOs are active-low; do not transfer that GPIO
+  polarity to the charger register.
+- Source selection: `Best src is USB … / Best src is Qi …`
+  (strings.txt:953–956) compares advertised USB and Qi power, with USB winning
+  ties, then drives the active-low `nvbuschgen`/`nqichgen` IOX pins.
+- Temperature policy uses nested inclusive windows: 0–44 °C permits charging,
+  while −19–59 °C permits continued battery operation. The recovered branches
+  do not establish separate hysteresis thresholds.
 - NTC temperature capping: `check_ntc_voltage` reads NTC over I2C
-  (`Read NTC voltage 0x%02x%02x (%d)`, strings.txt:1024); Qi overheat → input-current capping
-  (strings.txt:1026–1028); guards charge re-enable (`batt temp OK, but not re-enabling charging`,
-  941).
-- Charge-stop reasons (strings.txt:930–943): `system bootup`, `power source is disconnected`,
-  `battery level below % threshold`, `battery temperature charge-stop threshold reached`,
-  `Qi is disconnected`, `External power is connected but no longer charging`.
+  (`Read NTC voltage 0x%02x%02x (%d)`, strings.txt:1024); raw values
+  `0x590`/`0x5aa` select the Qi overheat cap state. The exact physical
+  temperature conversion is not recovered.
+- Charge-stop reasons (strings.txt:930–943): `system bootup`,
+  `power source is disconnected`, `battery level below % threshold`,
+  `battery temperature charge-stop threshold reached`, `Qi is disconnected`,
+  and `External power is connected but no longer charging`.
 
 ### 6.4 USB-C PD (HUSB238)
 
@@ -262,13 +277,46 @@ voltage %d current %d`, strings.txt:1130), non-PD QC / Apple / DCP/CDP (1131–1
 `wasPowered_`/`notYetFound` handshake state. Factory prodtest reads PDOs
 (`PDO: 5V/9V/12V/15V/18V/20V %lumA`, strings.txt:8751–8756; `DPDM: 0x%02X`, 8757).
 
-### 6.5 Shutdown / deep-sleep (`fw_power_man`)
+### 6.5 Shutdown, deep sleep, and idle policy (`fw_power_man`)
 
-Shutdown reasons (strings.txt:2455–2463): `emptyBattery`, `userShutdown`, `mqttShutdown`,
-`tickOverflow`, `inactivityShutdown`, `sdFail`, `lockError`, `batteryOverTemp`,
-`batteryUnderTemp`, `batteryFault`. Sequence: power-off amps/display/ambient → unlatch `VIN_HOLD`
-(2816) → `esp_deep_sleep` (2811). Wake on RTC alarm (`RTC_INT is LOW (alarm triggered);
-cancelling unlatch and rebooting`, 2818) or power button.
+Shutdown reasons (strings.txt:2455–2463) include `emptyBattery`,
+`userShutdown`, `mqttShutdown`, `tickOverflow`, `inactivityShutdown`, `sdFail`,
+`lockError`, `batteryOverTemp`, `batteryUnderTemp`, and `batteryFault`.
+
+The Ghidra control-flow recovery establishes:
+
+1. `FUN_40103ad8` initializes the power manager and always submits
+   `light_sleep_enable = false`. If automatic light sleep is requested, the
+   stock build logs that `FREERTOS_USE_TICKLESS_IDLE` is not enabled.
+2. `shutdownTimeout` defaults to 3600 seconds and is validated in the range
+   30–10800. `FUN_400ebd78` multiplies it by 1000 and requires every tracked
+   activity age to reach the result before dispatching inactivity shutdown.
+3. `FUN_40103e08` serializes terminal shutdown, rechecks the flat-battery
+   condition, and tears down downloads, audio, TDMA, NFC, Wi-Fi, display, and
+   UI state. It then isolates RTC GPIO12 and chooses physical unlatch or ESP
+   deep sleep.
+4. The hardware-family getter maps `2=v2`, `3=mini`, `4=v3`, `5=v2rev3`,
+   `6=minie`, and `7=v3e`. The terminal predicate always unlatches `v2`,
+   unlatches `v3` only when external power is absent, and never unlatches
+   `v3e`. Thus the supported rev #04 (`v3`) cuts `VIN_HOLD` on battery, whereas
+   the supported rev #05 (`v3e`) retains the latch and deep-sleeps.
+5. `FUN_401036e8` performs the final low-power hardware transition: amps off,
+   accelerometer low-power mode, and unused IO-expander pins changed to inputs
+   while preserving required power, charger, display, and interrupt outputs.
+6. Retained-latch paths arm a wake source before deep sleep. The analyzed
+   routines show a supported direct active-low pin path and an unsupported
+   IO-expander-specific case; the indirect ESP-IDF calls do not expose a
+   trustworthy numeric RTC GPIO in this report.
+7. After the deep-sleep reset, `FUN_40104808` qualifies the wake in 250 ms
+   increments. A held power button normally must persist for 2000 ms (250 ms
+   in one condition); RTC `AR_USER` and `AR_TEST` alarms are accepted, while an
+   unknown/no alarm returns to the standby loop.
+
+This explains multi-day unused life: after one hour the firmware does not keep
+running in a periodic light-sleep loop. It either removes battery power through
+`VIN_HOLD`, or disconnects downstream loads and leaves only an ESP32
+deep-sleep/wake path. Wake on RTC alarm can cancel unlatching and reboot;
+retained-latch boards also wake from the power-button path.
 
 ---
 
@@ -279,17 +327,22 @@ From `strings.txt:7688–7838` (settings schema) and `7780–7838` (key list):
 | Key | Default | Meaning |
 |---|---|---|
 | `POWER_MAN_MODE` | `2` (max `3`) | power-management mode |
-| `PS_LIGHTSLEEP` | — | light-sleep enable |
+| `PS_LIGHTSLEEP` | — | automatic light-sleep request; rejected by this build |
+| `shutdownTimeout` | `3600` (range `30`–`10800`) | inactivity shutdown seconds |
 | `BATT_PROFILE_ID` | — | active battery profile |
 | `APP_BATFULL_PCT` | `51` | battery-full threshold % |
-| `BATT_THRS_START` | `4` | power-on threshold % |
+| `BATT_THRS_START` | `4` | battery-only normal-start threshold % |
 | `BATT_THRS_OTA` | `15` | OTA battery threshold % |
 | `BATT_THRS_SAP` | — | SAP threshold % |
-| `BATT_THRS_WRNG` | `7` | warning threshold % |
-| `BATT_THRS_FLAT` | — | flat-battery threshold % |
+| `BATT_THRS_WRNG` | `7` | low-battery warning threshold % |
+| `BATT_THRS_FLAT` | — | terminal flat-battery threshold; schema has no embedded default |
 | `APP_BATT_FAULT` | `0` (bool, external) | battery fault flag |
 | `APP_V3BVOLCAPS` | — | V3 battery-voltage caps |
 | `PS_SWITCHFREQ` | — | power switch frequency |
+
+The captured NVS partition overrides `POWER_MAN_MODE` to `1` but does not
+contain `BATT_THRS_FLAT`; its runtime flat threshold therefore comes through
+an indirect product/profile path not resolved by the selected Ghidra slices.
 
 Events: `EVT_CONNECTED_TO_POWER` (strings.txt:3380), `EVT_DISCONNECTED_FROM_POWER` (3381).
 Sound files: `/system/sounds/{connected_to_power,disconnected_from_power_low,low_battery,battery_fault_beep,…}`

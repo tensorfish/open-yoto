@@ -96,7 +96,7 @@ int main(void)
     CHECK(iox_init() == ESP_OK,
           "rev04 IOX init touched unsupported interrupt-mask registers");
     CHECK(iox_prepare_power_button_wake() == ESP_ERR_NOT_SUPPORTED,
-          "rev04 did not select timer-backed wake fallback");
+          "rev04 did not report unsupported interrupt-mask control");
 
     if (s_failures != 0)
     {

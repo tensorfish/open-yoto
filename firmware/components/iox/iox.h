@@ -28,7 +28,8 @@ esp_err_t iox_set_peripherals_powered(bool powered);
 /**
  * Unmask only the active-low power-button input on PI4IOE5V6416 interrupt
  * output and clear stale transitions. Rev #04 ET6416 returns
- * ESP_ERR_NOT_SUPPORTED; its shutdown path uses timer-backed button polling.
+ * ESP_ERR_NOT_SUPPORTED; the shutdown caller still clears its input ports
+ * before arming the expander's active-low interrupt output as an ESP wake pin.
  */
 esp_err_t iox_prepare_power_button_wake(void);
 

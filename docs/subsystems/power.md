@@ -124,45 +124,82 @@ unreliable raw status pins.
 
 ## Replacement firmware shutdown
 
-A three-second power-button hold and the 30-minute inactivity deadline share
-one shutdown path:
+The replacement now follows the stock terminal-power policy instead of keeping
+the CPU in a 100 ms light-sleep polling loop. A three-second power-button hold
+and the stock **one-hour** inactivity default share one serialized shutdown
+path:
 
 1. Publish shutdown, stop the admin server without holding the player mutex,
    stop audio, and blank the display.
 2. Wait for a held power button to be released.
-3. Disable the amplifier and downstream rails; on rev #05, unmask only the
-   `IOX.1.3` interrupt and clear stale IOX transitions.
-4. Arm GPIO34 for the active-low IOX interrupt where supported.
-5. Retain `VIN_HOLD` and use 100 ms timer-backed light sleep. Rev #04's ET6416
-   does not accept the PI4IOE5V6416 interrupt-mask registers, so the timer is
-   its primary wake path. A one-second button hold restores the rails and
-   restarts the ESP32.
+3. Disable the amplifier and downstream rails.
+4. Choose the stock board-specific terminal disposition:
+   - **rev #04 / stock `v3` path:** when running from battery, isolate GPIO12,
+     release `VIN_HOLD`, and enter deep sleep as a fallback if the latch does
+     not remove power. If external power is present, retain `VIN_HOLD`, clear
+     stale ET6416 input transitions, arm active-low GPIO34, and deep-sleep.
+   - **rev #05 / stock `v3e` path:** always retain `VIN_HOLD`, unmask the
+     PI4IOE5V6416 power-button input, clear stale transitions, arm GPIO34, and
+     deep-sleep.
 
-Normal manual/inactivity shutdown deliberately retains the latch: rev #04
-cannot observe its IOX-only power button after a physical power cut. Playback
-and an active admin session defer inactivity shutdown; encoder events and NFC
-card insertion/removal restart the full 30-minute interval.
+After an EXT0 deep-sleep reset, the replacement samples the active-low power
+button every 250 ms and requires the stock normal two-second hold. A released
+or spurious wake disconnects the restored rails and returns to deep sleep
+before battery, display, audio, NFC, or SD initialization.
 
-Battery safety is separate from display and idle policy. Two consecutive fresh
-five-second samples at or below 3% SOC force shutdown only when a successful
-contemporaneous SGM41513 read reports `PG_STAT=0`. Invalid I²C samples,
-noncritical SOC, and external power clear the confirmation streak, so read
-sentinels or charge-complete state cannot masquerade as a critical battery.
+Encoder activity and NFC insertion/removal restart the one-hour interval.
+Playback and an active admin session defer shutdown. This terminal state—not
+automatic ESP light sleep—is what eliminates the active CPU/peripheral load.
 
-After critical battery is confirmed, the safety path isolates GPIO12, releases
-`VIN_HOLD`, and enters deep sleep as a fallback. This hard cutoff is
-intentionally non-wakeable until external power is attached.
+Stock settings fix normal battery-only startup at 4% SOC and the low-battery
+warning at 7%. The stock schema exposes a separate `BATT_THRS_FLAT` but does
+not embed its product/profile-specific default. The replacement conservatively
+uses 3%: two consecutive fresh five-second samples at or below that value force
+the same terminal transition only when a contemporaneous SGM41513 read reports
+`PG_STAT=0`. Invalid I²C samples, noncritical SOC, and external power clear the
+confirmation streak. On rev #04 this battery-only path releases `VIN_HOLD`; on
+rev #05 the hardware branch retains the latch and deep-sleeps.
 
 ## Original firmware reference
 
-The stock image also contains ESP-IDF light-sleep settings (`PS_LIGHTSLEEP`,
-`POWER_MAN_MODE`, `BATT_THRS_OTA`), sleep timers with volume fades, battery-full
-charge capping, and a smart-cable USB-C attach/detach state machine:
+The behavior above was recovered from
+`~/Downloads/yoto-player-v2.bin` (SHA-256
+`1db52091f892e05a9aec97605890b406f6734213214afef792e247353a75449e`)
+with Ghidra 12.0.4. Reproducible artifacts are under
+`output/ghidra-power-analysis/`; the focused project maps the ESP image
+segments to their linked Xtensa addresses.
 
-```text
-D (%lu) %s: %s: detected PD charger, voltage %d current %d
-D (%lu) %s: USB disconnected so resetting state variables
-```
+Key stock findings:
+
+- `shutdownTimeout` defaults to 3600 seconds (range 30–10800), and
+  `FUN_400ebd78` requires every activity-age predicate to reach
+  `shutdownTimeout * 1000` before dispatching automatic shutdown.
+- `FUN_40103ad8` always submits `light_sleep_enable = false`; a request for
+  automatic light sleep logs that `FREERTOS_USE_TICKLESS_IDLE` is not enabled.
+- `FUN_40103e08` serializes shutdown, rechecks flat battery, tears down
+  download/audio/TDMA/NFC/Wi-Fi/display/UI state, isolates RTC GPIO12, and then
+  selects physical unlatch or ESP deep sleep.
+- The hardware-family getter maps `2=v2`, `3=mini`, `4=v3`, `5=v2rev3`,
+  `6=minie`, and `7=v3e`. Its terminal predicate always unlatches `v2`,
+  unlatches `v3` only without external power, and never unlatches `v3e`.
+- `FUN_401036e8` disables amps, puts the accelerometer into low-power mode, and
+  changes unused IO-expander pins to inputs while preserving required power,
+  charger, display, and interrupt outputs.
+- Deep-sleep reset enters a wake-qualification loop in `FUN_40104808`. It polls
+  in 250 ms steps, normally requires a two-second held power button, accepts
+  RTC `AR_USER`/`AR_TEST` alarms, and sends unqualified wakeups back to sleep.
+- Battery monitoring supports ADC, CW2015 (`0x62`), and CW2215B (`0x64`).
+  Charger enable is SGM41513 register 1 bit 4 **active-high**; the separate Qi
+  and USB path-enable GPIOs are active-low.
+- Stock warning/start/OTA defaults are 7%/4%/15%. Charge-temperature limits
+  form nested inclusive windows: 0–44 °C for charging and −19–59 °C for
+  battery operation. The Ghidra evidence does not show separate thermal
+  hysteresis thresholds.
+
+The binary also contains battery-full charge capping, USB-versus-Qi source
+selection by advertised power (USB wins ties), a 450 mA charge-ramp floor, Qi
+NTC capping with raw thresholds `0x590`/`0x5aa`, and smart-cable USB-C
+attach/detach handling.
 
 ## Implementation references
 

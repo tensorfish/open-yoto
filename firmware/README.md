@@ -158,14 +158,16 @@ firmware/
   VINHOLD HIGH, active-low PWREN LOW, levelconvertor IOX.0.3 HIGH).
 - **Power and battery [rev #04/#05]**: CW2215B board profiles, SGM41513
   hot-plug configuration with source-safe input limits, 30-second masked
-  configuration repair, and stock charge-current requests. Two valid
-  battery-only samples at or below 3% SOC force a protective hard cutoff. A
-  three-second power hold or 30 minutes of inactivity disables the amp and
-  peripheral rails but retains `VIN_HOLD`, then uses timer-backed light sleep
-  so a one-second hold reliably restarts. Rev #05 also unmasks the IOX
-  power-button IRQ; rev #04's ET6416 rejects that optional register path. Only
-  confirmed critical battery releases the latch. The host suite covers
-  shutdown timing, wake fallback, invalid-sample rejection, and charger drift.
+  configuration repair, and stock charge-current requests. Battery-only boot
+  requires 4% SOC; warnings start at 7%; two valid battery-only samples at or
+  below 3% force terminal shutdown. A three-second power hold or the stock
+  one-hour inactivity timeout disables the amp and peripheral rails. Rev #04
+  releases `VIN_HOLD` when external power is absent; powered rev #04 and all
+  rev #05 paths retain it and enter deep sleep with active-low GPIO34 wake.
+  GPIO12 is isolated before deep sleep; EXT0 reset requires a two-second held
+  power button, otherwise the early boot path disconnects rails and sleeps
+  again. The host suite covers both board dispositions, timeout timing,
+  wake qualification, invalid-sample rejection, and charger drift.
 - **GC9306 TFT driver [rev #04]**: stock SPI2 mode 0/80MHz/no-dummy setup,
   stock reset and complete initialization tail, queue-1 1364-pixel RGB666
   transport, CASET/RASET/RAMWR framing, and 40 kHz GPIO26 backlight.

@@ -20,10 +20,12 @@ flowchart TD
   B --> D{main loop}
   D --> E[check battery]
   D --> F[poll NFC]
-  D --> K[check 30-minute inactivity deadline]
+  D --> K[check one-hour inactivity deadline]
   D -->|3-second power hold| L[stop services + disconnect rails]
   K -->|inactive| L
-  L --> M[release VIN_HOLD + deep sleep]
+  L --> M{rev #04 on battery?}
+  M -->|yes| N[release VIN_HOLD + deep-sleep fallback]
+  M -->|no| O[retain VIN_HOLD + GPIO34 deep-sleep wake]
   F -->|magic URL| G[toggle admin server]
   F -->|content card| H[look up content]
   H --> I[show image + play track]
@@ -71,15 +73,16 @@ On power-up, in order:
 
 1. Initialize settings storage (erase it if it's corrupt).
 2. Start the I²C bus + both I/O expanders.
-3. Battery monitor.
-4. 16×16 display, then the boot face animation: `face-01.png`…`face-08.png` at
+3. Initialize the CW2215B battery monitor.
+4. Initialize the accelerometer, display, audio, and codec.
+5. If no external power is present, refuse normal startup below the stock 4%
+   SOC threshold.
+6. Queue the stock welcome audio, then play `face-01.png`…`face-08.png` at
    16 fps, resting on `face-08` (the idle face). A depleted battery replaces
    that resting face with its `battery-*.png` icon as soon as the animation
    ends.
-5. NFC reader.
-6. Rotary encoders + buttons.
-7. SD card + optional content catalog.
-8. Audio and stock welcome playback.
+7. Initialize the NFC reader and rotary encoders/buttons.
+8. Mount the SD card and load the optional content catalog.
 
 Admin services remain off at boot. Scanning the exact admin magic URL starts
 the `openyoto` SoftAP, creates a six-character code, and starts the HTTP server
@@ -94,7 +97,7 @@ The loop handles deferred physical-control work first, then:
    policy, including while admin mode owns the display.
 3. Update noncritical battery warnings when the access-code screen is not pinned.
 4. Maintain display-transient deadlines.
-5. Check the 30-minute inactivity deadline.
+5. Check the one-hour inactivity deadline.
 
 A card is "new" on a rising edge or when its UID changes (a swap within one
 poll window):
@@ -118,22 +121,22 @@ The knobs/buttons are handled as events (not polled in the main loop):
 | Right knob turn | skip track (wraps around); with no card, winks the face |
 | Either knob press (short) | play / pause |
 | Power button press | toggle only the screen; screen-on shows the current battery icon |
-| Power button hold (3 s) | stop playback/admin, blank the display, disconnect the amp and downstream rails, retain `VIN_HOLD`, and wait in timer-backed light sleep for a one-second wake hold |
+| Power button hold (3 s) | stop playback/admin, blank the display, disconnect the amp and downstream rails, then enter the board-specific terminal state |
 
 Encoder actions and card insertion/removal reset the inactivity deadline.
-Playback and an active admin session continuously defer it. After 30 minutes
-without any of those activities, the firmware runs the same shutdown sequence
-as the three-second power hold.
+Playback and an active admin session continuously defer it. After the stock
+default of one hour without any of those activities, the firmware runs the
+same shutdown sequence as the three-second power hold.
 
-Normal manual and inactivity shutdown retains `VIN_HOLD`; rev #04 cannot wake
-after a physical power cut because its power button is behind the ET6416.
-Both revisions therefore use a timer-backed light-sleep loop as the reliable
-wake path. Holding power for one second restores the peripheral rails before
-restarting. Rev #05 additionally unmasks the `IOX.1.3` interrupt and arms its
-active-low GPIO34 output, while the 100 ms timer covers missed interrupts.
-
-Only confirmed critical battery shutdown releases `VIN_HOLD`, isolates GPIO12,
-and becomes intentionally non-wakeable until external power is attached.
+On rev #04, battery-powered shutdown isolates GPIO12 and releases `VIN_HOLD`;
+deep sleep is only a fallback if the physical latch does not remove power.
+When rev #04 is externally powered, it retains the latch, clears stale ET6416
+input transitions, and enters deep sleep with active-low GPIO34 wake armed.
+Rev #05 always retains `VIN_HOLD`; its PI4IOE5V6416 power-button input is
+unmasked and GPIO34 is armed before deep sleep. An EXT0 reset is accepted as a
+real wake only after the active-low power button remains held for two seconds;
+a released/spurious wake disconnects the rails and returns to deep sleep. The
+firmware does not timer-poll the button in light sleep.
 
 The display carries one **base screen** (idle face, card art, admin code, or a
 low-battery warning) plus **transients** that expire back onto it: the wink
@@ -325,12 +328,16 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
 `/sdcard` paths.
 
 ## Power & battery
+
 - Battery state comes from the CW2215B after loading the exact board-specific
   80-byte profile, activating the gauge, and waiting for ready state. VCELL and
   SOC are read only after initialization succeeds.
-- **Low battery** = charge < 15% **or** voltage < 3.3 V.
+- Battery-only normal startup requires at least **4% SOC**, matching the stock
+  `BATT_THRS_START` default.
+- **Low battery** = SOC at or below **7%**, matching the stock
+  `BATT_THRS_WRNG` default.
 - **Critical battery** = two consecutive valid five-second readings at or below
-  3% SOC while a fresh charger status read confirms no external power. This
+  **3% SOC** while a fresh charger status read confirms no external power. This
   shutdown policy runs even in admin mode. Invalid reads, external power, or a
   recovered SOC reset confirmation instead of being treated as an empty cell.
 - The battery screen comes from `firmware/icons/battery-*.png`. Each icon covers
@@ -342,8 +349,8 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   at 100%.
 - Battery info never fights the face. Charging is announced as a glimpse on the
   not-charging → charging **edge** and at boot; it covers the base screen for
-  5 s and then hands it back. The 30 s re-check only logs while
-  charging. A right-knob twist with no card loaded winks and rests on the face,
+  5 s and then hands it back. The 30 s re-check only logs while charging. A
+  right-knob twist with no card loaded winks and rests on the face,
   taking the display back from the charging icon. Only a **low** battery
   re-asserts itself over whatever is on screen.
 - On every USB plug-in, the firmware uses the SGM41513 `PG_STAT` bit as the
@@ -362,8 +369,9 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   `CHRG_STAT` state instead of the unreliable board `plugstat`/`chgstat` lines.
   A transition counts only after four consecutive 500 ms samples agree, and a
   glimpse appears at most once every 30 s.
-- A three-second power-button hold, or 30 minutes without input, playback, or
-  an active admin session, stops audio/admin, blanks the display, disables the
-  amplifier and downstream rails, retains `VIN_HOLD`, and enters timer-backed
-  light sleep. A one-second hold restores the rails and restarts. Only confirmed
-  critical battery releases the latch for a hard power cut.
+- A three-second power-button hold, or one hour without input, playback, or an
+  active admin session, stops audio/admin, blanks the display, and disables the
+  amplifier and downstream rails. Battery-powered rev #04 then releases
+  `VIN_HOLD`; externally powered rev #04 and all rev #05 shutdowns retain it
+  and enter deep sleep with active-low GPIO34 wake armed. GPIO12 is isolated in
+  every deep-sleep path.

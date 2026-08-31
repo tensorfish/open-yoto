@@ -30,6 +30,12 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I stubs \
+    -DTEST_BOARD_REV05 \
+    -o /tmp/display_state_rev05_test \
+    display_state_test.c
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I stubs \
     -o /tmp/battery_charge_rev04_test \
     -DCONFIG_BOARD_REV_04 \
     battery_charge_test.c
@@ -49,10 +55,13 @@ echo "PASS: volume overlay geometry (rev05)"
 echo "PASS: panel clear elision (rev04)"
 
 /tmp/iox_wake_test
-echo "PASS: IOX power-button wake fallback (rev04)"
+echo "PASS: IOX power-button interrupt control (rev04)"
 
 /tmp/display_state_test
 echo "PASS: display state machine (rev04)"
+
+/tmp/display_state_rev05_test
+echo "PASS: display state machine (rev05)"
 
 /tmp/battery_charge_rev04_test
 echo "PASS: charger hot-plug control (rev04)"

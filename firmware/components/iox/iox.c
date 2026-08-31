@@ -130,7 +130,8 @@ esp_err_t iox_prepare_power_button_wake(void)
 {
 #ifdef CONFIG_BOARD_REV_04
     /* The rev #04 ET6416 rejects PI4IOE5V6416 interrupt-mask registers.
-     * Externally-powered off mode therefore uses its timer polling fallback. */
+     * Its caller clears pending input transitions before arming the shared
+     * active-low interrupt output directly. */
     return ESP_ERR_NOT_SUPPORTED;
 #else
     const uint8_t exp = IOX_EXP(IOX_BTN_POWER);
