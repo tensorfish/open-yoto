@@ -42,6 +42,7 @@ static const char *TAG = "audio";
  * per channel = 2304 interleaved samples. */
 #define AUDIO_PCM_BUF_SAMPLES   2304
 #define AUDIO_RESAMPLE_BUF_SAMPLES 512
+#define AUDIO_PCM_MONO_SCRATCH_SAMPLES 512
 
 /* I2S DMA write timeout. Kept short so the decode task stays responsive to
  * stop/pause while still providing natural backpressure on a full DMA. */
@@ -81,13 +82,32 @@ static TaskHandle_t s_decode_task = NULL;
 /* Optional tone task used by the speaker smoke test. */
 static TaskHandle_t s_tone_task = NULL;
 
-/* Shared playback state. s_stop_req and s_paused are written from the calling
- * thread and read (polled) by the decode task; s_playing is written by the
- * decode task and read by audio_is_playing(). Volatile makes those cross-task
- * accesses well-defined. */
-static volatile bool s_playing = false;
+typedef enum
+{
+    AUDIO_SOURCE_IDLE = 0,
+    AUDIO_SOURCE_FILE_PENDING,
+    AUDIO_SOURCE_FILE,
+    AUDIO_SOURCE_TONE,
+    AUDIO_SOURCE_BLIP,
+    AUDIO_SOURCE_PCM,
+} audio_source_t;
+
+/* Ownership changes are serialized by this short critical section. It is
+ * never held while touching codecs, I2S, the filesystem, or the scheduler. */
+static portMUX_TYPE s_audio_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile audio_source_t s_source = AUDIO_SOURCE_IDLE;
+static uint32_t s_source_generation;
 static volatile bool s_stop_req = false;
 static volatile bool s_paused = false;
+
+static audio_pcm_stream_t s_pcm_stream;
+static uint32_t s_pcm_stream_counter;
+static uint32_t s_pcm_sample_rate;
+static uint8_t s_pcm_channels;
+static volatile bool s_pcm_cancelled;
+static bool s_pcm_opening;
+static bool s_pcm_writer_active;
+static bool s_pcm_closing;
 
 /* Volume is applied as PCM gain so it affects both the ES8156 and the
  * shared-I2S AW881xx speaker path. The fixed ES8156 hardware gain remains its
@@ -95,6 +115,7 @@ static volatile bool s_paused = false;
 static volatile int s_volume = 70;
 static int16_t s_scaled_pcm[AUDIO_PCM_BUF_SAMPLES];
 static int16_t s_resampled_pcm[AUDIO_RESAMPLE_BUF_SAMPLES];
+static int16_t s_pcm_mono_scratch[AUDIO_PCM_MONO_SCRATCH_SAMPLES];
 static unsigned char s_encoded_input[AUDIO_INPUT_BUF_SIZE];
 
 /* File path for the current playback request, installed before the PLAY
@@ -271,6 +292,99 @@ static void audio_update_headphone_route(bool force)
              inserted ? "muted" : "enabled");
 }
 
+static bool audio_source_matches(audio_source_t source, uint32_t generation)
+{
+    bool matches;
+
+    portENTER_CRITICAL(&s_audio_lock);
+    matches = s_source == source && s_source_generation == generation;
+    portEXIT_CRITICAL(&s_audio_lock);
+    return matches;
+}
+
+static void audio_source_release(audio_source_t source, uint32_t generation)
+{
+    portENTER_CRITICAL(&s_audio_lock);
+    if (s_source == source && s_source_generation == generation)
+    {
+        s_source = AUDIO_SOURCE_IDLE;
+        s_stop_req = false;
+        s_paused = false;
+    }
+    portEXIT_CRITICAL(&s_audio_lock);
+}
+
+static bool audio_write_cancel_requested(audio_pcm_stream_t stream)
+{
+    bool cancelled;
+
+    if (stream == 0)
+    {
+        return s_stop_req;
+    }
+
+    portENTER_CRITICAL(&s_audio_lock);
+    cancelled = s_source != AUDIO_SOURCE_PCM
+             || s_pcm_stream != stream
+             || s_pcm_cancelled;
+    portEXIT_CRITICAL(&s_audio_lock);
+    return cancelled;
+}
+
+/* Stop a legacy source without displacing an already-owned external PCM
+ * session. The caller must still claim ownership under s_audio_lock. */
+static esp_err_t audio_stop_non_pcm_sources(void)
+{
+    for (;;)
+    {
+        audio_source_t source;
+        uint32_t generation;
+        bool pending;
+
+        portENTER_CRITICAL(&s_audio_lock);
+        source = s_source;
+        generation = s_source_generation;
+        if (source == AUDIO_SOURCE_IDLE)
+        {
+            portEXIT_CRITICAL(&s_audio_lock);
+            return ESP_OK;
+        }
+        if (source == AUDIO_SOURCE_PCM)
+        {
+            portEXIT_CRITICAL(&s_audio_lock);
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        pending = source == AUDIO_SOURCE_FILE_PENDING;
+        if (pending)
+        {
+            s_source = AUDIO_SOURCE_IDLE;
+            s_stop_req = false;
+            s_paused = false;
+        }
+        else
+        {
+            s_stop_req = true;
+            s_paused = false;
+        }
+        portEXIT_CRITICAL(&s_audio_lock);
+
+        if (s_decode_task != NULL
+            && (pending || source == AUDIO_SOURCE_FILE))
+        {
+            xTaskNotify(s_decode_task, AUDIO_NOTIFY_STOP, eSetBits);
+        }
+        if (pending)
+        {
+            return ESP_OK;
+        }
+        while (audio_source_matches(source, generation))
+        {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    }
+}
+
 /**
  * Skip an ID3v2 header at the front of an MP3 stream.
  *
@@ -360,12 +474,17 @@ static int audio_fill(FILE *fp, unsigned char *buf,
  *
  * @return True if all samples were written; false if playback stopped.
  */
-static bool audio_write_pcm(const int16_t *pcm, size_t samples)
+static bool audio_write_pcm(const int16_t *pcm, size_t samples,
+                            audio_pcm_stream_t stream)
 {
     size_t offset = 0;
 
     while (offset < samples)
     {
+        if (audio_write_cancel_requested(stream))
+        {
+            return false;
+        }
         audio_update_headphone_route(false);
         const int16_t *output;
         size_t chunk_samples = samples - offset;
@@ -400,15 +519,15 @@ static bool audio_write_pcm(const int16_t *pcm, size_t samples)
             size_t written = 0;
             esp_err_t err;
 
-            if (s_stop_req)
+            if (audio_write_cancel_requested(stream))
             {
                 return false;
             }
-            while (s_paused && !s_stop_req)
+            while (stream == 0 && s_paused && !s_stop_req)
             {
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
-            if (s_stop_req)
+            if (audio_write_cancel_requested(stream))
             {
                 return false;
             }
@@ -438,6 +557,8 @@ typedef struct
     bool have_previous;
 } audio_resampler_t;
 
+static audio_resampler_t s_pcm_resampler;
+
 /*
  * Linearly resample a continuous mono stream to the stock 44.1 kHz I2S clock.
  * State spans MP3 frame boundaries so neither samples nor fractional phase are
@@ -445,14 +566,15 @@ typedef struct
  */
 static bool audio_write_resampled(audio_resampler_t *state,
                                   const int16_t *pcm, size_t samples,
-                                  uint32_t source_rate)
+                                  uint32_t source_rate,
+                                  audio_pcm_stream_t stream)
 {
     size_t produced = 0;
     size_t start = 0;
 
     if (source_rate == I2S_SAMPLE_RATE_HZ)
     {
-        return audio_write_pcm(pcm, samples);
+        return audio_write_pcm(pcm, samples, stream);
     }
     if (source_rate < 8000 || source_rate > 96000 || samples == 0)
     {
@@ -495,7 +617,7 @@ static bool audio_write_resampled(audio_resampler_t *state,
             state->next_output_index++;
             if (produced == AUDIO_RESAMPLE_BUF_SAMPLES)
             {
-                if (!audio_write_pcm(s_resampled_pcm, produced))
+                if (!audio_write_pcm(s_resampled_pcm, produced, stream))
                 {
                     return false;
                 }
@@ -506,7 +628,8 @@ static bool audio_write_resampled(audio_resampler_t *state,
         state->input_index = next_input;
     }
 
-    return produced == 0 || audio_write_pcm(s_resampled_pcm, produced);
+    return produced == 0
+        || audio_write_pcm(s_resampled_pcm, produced, stream);
 }
 
 static bool audio_write_decoded(audio_resampler_t *resampler, int16_t *pcm,
@@ -530,7 +653,8 @@ static bool audio_write_decoded(audio_resampler_t *resampler, int16_t *pcm,
         ESP_LOGE(TAG, "unsupported channel count: %d", channels);
         return false;
     }
-    return audio_write_resampled(resampler, pcm, output_samples, sample_rate);
+    return audio_write_resampled(resampler, pcm, output_samples, sample_rate,
+                                 0);
 }
 
 static bool audio_write_esp_frame(audio_resampler_t *resampler, int16_t *pcm,
@@ -1207,12 +1331,18 @@ static void audio_decode_task(void *arg)
     (void)arg;
 
     int16_t pcm[AUDIO_PCM_BUF_SAMPLES];
-    FILE *fp = NULL;
-
 
     for (;;)
     {
+        char path[AUDIO_PATH_MAX];
         uint32_t notify = 0;
+        uint32_t generation;
+        FILE *fp;
+        audio_format_t format;
+        const char *format_name;
+        esp_err_t decode_err;
+        void *mp3_decoder = NULL;
+        bool claimed = false;
 
         xTaskNotifyWait(0, UINT32_MAX, &notify, portMAX_DELAY);
         if ((notify & AUDIO_NOTIFY_PLAY) == 0)
@@ -1220,95 +1350,96 @@ static void audio_decode_task(void *arg)
             continue;
         }
 
-        fp = fopen(s_path, "rb");
-        if (fp == NULL)
+        portENTER_CRITICAL(&s_audio_lock);
+        if (s_source == AUDIO_SOURCE_FILE_PENDING && !s_stop_req)
         {
-            ESP_LOGE(TAG, "fopen(\"%s\") failed", s_path);
-            s_playing = false;
+            s_source = AUDIO_SOURCE_FILE;
+            generation = s_source_generation;
+            memcpy(path, s_path, sizeof(path));
+            claimed = true;
+        }
+        portEXIT_CRITICAL(&s_audio_lock);
+        if (!claimed)
+        {
             continue;
         }
 
+        fp = fopen(path, "rb");
+        if (fp == NULL)
         {
-            audio_format_t format = audio_detect_format(fp, s_path);
-            const char *format_name;
-            esp_err_t decode_err;
-            void *mp3_decoder = NULL;
+            ESP_LOGE(TAG, "fopen(\"%s\") failed", path);
+            audio_source_release(AUDIO_SOURCE_FILE, generation);
+            continue;
+        }
 
-            if (format == AUDIO_FORMAT_UNKNOWN)
+        format = audio_detect_format(fp, path);
+        if (format == AUDIO_FORMAT_UNKNOWN)
+        {
+            ESP_LOGE(TAG, "unsupported audio format: %s", path);
+            fclose(fp);
+            audio_source_release(AUDIO_SOURCE_FILE, generation);
+            continue;
+        }
+        if (format == AUDIO_FORMAT_MP3)
+        {
+            if (esp_mp3_dec_open(NULL, 0, &mp3_decoder)
+                != ESP_AUDIO_ERR_OK)
             {
-                ESP_LOGE(TAG, "unsupported audio format: %s", s_path);
+                ESP_LOGE(TAG, "Espressif MP3 decoder open failed");
                 fclose(fp);
-                fp = NULL;
-                s_playing = false;
+                audio_source_release(AUDIO_SOURCE_FILE, generation);
                 continue;
             }
-            if (format == AUDIO_FORMAT_MP3)
-            {
-                if (esp_mp3_dec_open(NULL, 0, &mp3_decoder)
-                    != ESP_AUDIO_ERR_OK)
-                {
-                    ESP_LOGE(TAG, "Espressif MP3 decoder open failed");
-                    fclose(fp);
-                    fp = NULL;
-                    s_playing = false;
-                    continue;
-                }
-                ESP_LOGI(TAG, "MP3 decoder opened");
-            }
-            if (format == AUDIO_FORMAT_MP3
-                && audio_skip_id3v2(fp) != ESP_OK)
-            {
-                ESP_LOGE(TAG, "failed to skip ID3v2 tag");
-                (void)esp_mp3_dec_close(mp3_decoder);
-                fclose(fp);
-                fp = NULL;
-                s_playing = false;
-                continue;
-            }
+            ESP_LOGI(TAG, "MP3 decoder opened");
+        }
+        if (format == AUDIO_FORMAT_MP3
+            && audio_skip_id3v2(fp) != ESP_OK)
+        {
+            ESP_LOGE(TAG, "failed to skip ID3v2 tag");
+            (void)esp_mp3_dec_close(mp3_decoder);
+            fclose(fp);
+            audio_source_release(AUDIO_SOURCE_FILE, generation);
+            continue;
+        }
 
-            format_name = format == AUDIO_FORMAT_M4A ? "M4A/AAC-LC"
-                        : format == AUDIO_FORMAT_AAC_ADTS ? "AAC/ADTS"
-                        : "MP3";
-            audio_update_headphone_route(true);
-            codec_es8156_unmute();
-            s_playing = true;
-            ESP_LOGI(TAG, "playing \"%s\" (%s)", s_path, format_name);
+        format_name = format == AUDIO_FORMAT_M4A ? "M4A/AAC-LC"
+                    : format == AUDIO_FORMAT_AAC_ADTS ? "AAC/ADTS"
+                    : "MP3";
+        audio_update_headphone_route(true);
+        codec_es8156_unmute();
+        ESP_LOGI(TAG, "playing \"%s\" (%s)", path, format_name);
 
-            if (format == AUDIO_FORMAT_M4A)
-            {
-                decode_err = audio_decode_m4a_aac(
-                    fp, s_path, pcm, AUDIO_PCM_BUF_SAMPLES);
-            }
-            else if (format == AUDIO_FORMAT_AAC_ADTS)
-            {
-                decode_err = audio_decode_adts_aac(
-                    fp, s_encoded_input, pcm, AUDIO_PCM_BUF_SAMPLES);
-            }
-            else
-            {
-                decode_err = audio_decode_mp3(
-                    fp, mp3_decoder, s_encoded_input, pcm,
-                    AUDIO_PCM_BUF_SAMPLES);
-            }
-            if (decode_err != ESP_OK && decode_err != ESP_ERR_INVALID_STATE)
-            {
-                ESP_LOGE(TAG, "%s playback failed: %s", format_name,
-                         esp_err_to_name(decode_err));
-            }
-            if (mp3_decoder != NULL)
-            {
-                (void)esp_mp3_dec_close(mp3_decoder);
-            }
+        if (format == AUDIO_FORMAT_M4A)
+        {
+            decode_err = audio_decode_m4a_aac(
+                fp, path, pcm, AUDIO_PCM_BUF_SAMPLES);
+        }
+        else if (format == AUDIO_FORMAT_AAC_ADTS)
+        {
+            decode_err = audio_decode_adts_aac(
+                fp, s_encoded_input, pcm, AUDIO_PCM_BUF_SAMPLES);
+        }
+        else
+        {
+            decode_err = audio_decode_mp3(
+                fp, mp3_decoder, s_encoded_input, pcm,
+                AUDIO_PCM_BUF_SAMPLES);
+        }
+        if (decode_err != ESP_OK && decode_err != ESP_ERR_INVALID_STATE)
+        {
+            ESP_LOGE(TAG, "%s playback failed: %s", format_name,
+                     esp_err_to_name(decode_err));
+        }
+        if (mp3_decoder != NULL)
+        {
+            (void)esp_mp3_dec_close(mp3_decoder);
         }
 
         codec_es8156_mute(true);
         (void)audio_i2s_clear();
         fclose(fp);
-        fp = NULL;
-        s_paused = false;
-        s_stop_req = false;
-        ESP_LOGI(TAG, "stopped \"%s\"", s_path);
-        s_playing = false;
+        ESP_LOGI(TAG, "stopped \"%s\"", path);
+        audio_source_release(AUDIO_SOURCE_FILE, generation);
     }
 }
 
@@ -1365,8 +1496,263 @@ esp_err_t audio_init(void)
     return ESP_OK;
 }
 
+esp_err_t audio_pcm_stream_open(uint32_t sample_rate_hz, uint8_t channels,
+                                audio_pcm_stream_t *stream)
+{
+    bool opened;
+    audio_pcm_stream_t token;
+
+    if (stream == NULL || (channels != 1 && channels != 2)
+        || (sample_rate_hz != 16000 && sample_rate_hz != 32000
+            && sample_rate_hz != 44100 && sample_rate_hz != 48000))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *stream = 0;
+    if (s_tx_chan == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    for (;;)
+    {
+        esp_err_t err = audio_stop_non_pcm_sources();
+        bool claimed = false;
+
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+
+        portENTER_CRITICAL(&s_audio_lock);
+        if (s_source == AUDIO_SOURCE_IDLE)
+        {
+            do
+            {
+                token = ++s_pcm_stream_counter;
+            } while (token == 0);
+            s_source = AUDIO_SOURCE_PCM;
+            s_source_generation++;
+            s_pcm_stream = token;
+            s_pcm_sample_rate = sample_rate_hz;
+            s_pcm_channels = channels;
+            s_pcm_cancelled = false;
+            s_pcm_opening = true;
+            s_pcm_writer_active = false;
+            s_pcm_closing = false;
+            s_stop_req = false;
+            s_paused = false;
+            memset(&s_pcm_resampler, 0, sizeof(s_pcm_resampler));
+            claimed = true;
+        }
+        portEXIT_CRITICAL(&s_audio_lock);
+        if (claimed)
+        {
+            break;
+        }
+    }
+
+    audio_update_headphone_route(true);
+    codec_es8156_unmute();
+
+    portENTER_CRITICAL(&s_audio_lock);
+    s_pcm_opening = false;
+    opened = s_source == AUDIO_SOURCE_PCM
+          && s_pcm_stream == token
+          && !s_pcm_cancelled
+          && !s_pcm_closing;
+    portEXIT_CRITICAL(&s_audio_lock);
+    if (!opened)
+    {
+        for (;;)
+        {
+            bool still_owned;
+
+            portENTER_CRITICAL(&s_audio_lock);
+            still_owned = s_source == AUDIO_SOURCE_PCM
+                       && s_pcm_stream == token;
+            portEXIT_CRITICAL(&s_audio_lock);
+            if (!still_owned)
+            {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    *stream = token;
+    return ESP_OK;
+}
+
+esp_err_t audio_pcm_stream_write(audio_pcm_stream_t stream,
+                                 const int16_t *interleaved, size_t frames)
+{
+    const int16_t *input = interleaved;
+    uint32_t sample_rate;
+    uint8_t channels;
+    bool wrote_all = true;
+    bool cancelled;
+
+    if (stream == 0 || (interleaved == NULL && frames != 0))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    portENTER_CRITICAL(&s_audio_lock);
+    if (s_source != AUDIO_SOURCE_PCM || s_pcm_stream != stream
+        || s_pcm_cancelled || s_pcm_closing || s_pcm_writer_active)
+    {
+        portEXIT_CRITICAL(&s_audio_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_pcm_writer_active = true;
+    sample_rate = s_pcm_sample_rate;
+    channels = s_pcm_channels;
+    portEXIT_CRITICAL(&s_audio_lock);
+
+    while (frames != 0)
+    {
+        size_t chunk = frames;
+        const int16_t *mono = input;
+
+        if (chunk > AUDIO_PCM_MONO_SCRATCH_SAMPLES)
+        {
+            chunk = AUDIO_PCM_MONO_SCRATCH_SAMPLES;
+        }
+        if (channels == 2)
+        {
+            for (size_t i = 0; i < chunk; i++)
+            {
+                int32_t mixed = (int32_t)input[i * 2]
+                              + (int32_t)input[i * 2 + 1];
+
+                s_pcm_mono_scratch[i] = (int16_t)(mixed / 2);
+            }
+            mono = s_pcm_mono_scratch;
+        }
+        if (!audio_write_resampled(&s_pcm_resampler, mono, chunk,
+                                   sample_rate, stream))
+        {
+            wrote_all = false;
+            break;
+        }
+        input += chunk * channels;
+        frames -= chunk;
+    }
+
+    portENTER_CRITICAL(&s_audio_lock);
+    cancelled = s_source != AUDIO_SOURCE_PCM
+             || s_pcm_stream != stream
+             || s_pcm_cancelled;
+    if (s_source == AUDIO_SOURCE_PCM && s_pcm_stream == stream)
+    {
+        s_pcm_writer_active = false;
+    }
+    portEXIT_CRITICAL(&s_audio_lock);
+
+    if (!wrote_all)
+    {
+        return cancelled ? ESP_ERR_INVALID_STATE : ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+void audio_pcm_stream_cancel(audio_pcm_stream_t stream)
+{
+    if (stream == 0)
+    {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_audio_lock);
+    if (s_source == AUDIO_SOURCE_PCM && s_pcm_stream == stream)
+    {
+        s_pcm_cancelled = true;
+    }
+    portEXIT_CRITICAL(&s_audio_lock);
+}
+
+esp_err_t audio_pcm_stream_close(audio_pcm_stream_t stream)
+{
+    bool closer = false;
+    esp_err_t clear_err;
+
+    if (stream == 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    portENTER_CRITICAL(&s_audio_lock);
+    if (s_source != AUDIO_SOURCE_PCM || s_pcm_stream != stream)
+    {
+        portEXIT_CRITICAL(&s_audio_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_pcm_cancelled = true;
+    if (!s_pcm_closing)
+    {
+        s_pcm_closing = true;
+        closer = true;
+    }
+    portEXIT_CRITICAL(&s_audio_lock);
+
+    if (!closer)
+    {
+        for (;;)
+        {
+            bool still_closing;
+
+            portENTER_CRITICAL(&s_audio_lock);
+            still_closing = s_source == AUDIO_SOURCE_PCM
+                         && s_pcm_stream == stream;
+            portEXIT_CRITICAL(&s_audio_lock);
+            if (!still_closing)
+            {
+                return ESP_OK;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+
+    for (;;)
+    {
+        bool in_flight;
+
+        portENTER_CRITICAL(&s_audio_lock);
+        in_flight = s_source == AUDIO_SOURCE_PCM
+                 && s_pcm_stream == stream
+                 && (s_pcm_opening || s_pcm_writer_active);
+        portEXIT_CRITICAL(&s_audio_lock);
+        if (!in_flight)
+        {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    codec_es8156_mute(true);
+    clear_err = audio_i2s_clear();
+
+    portENTER_CRITICAL(&s_audio_lock);
+    if (s_source == AUDIO_SOURCE_PCM && s_pcm_stream == stream)
+    {
+        s_source = AUDIO_SOURCE_IDLE;
+        s_pcm_stream = 0;
+        s_pcm_cancelled = false;
+        s_pcm_writer_active = false;
+        s_pcm_opening = false;
+        s_pcm_closing = false;
+        s_stop_req = false;
+        s_paused = false;
+    }
+    portEXIT_CRITICAL(&s_audio_lock);
+    return clear_err;
+}
+
 esp_err_t audio_play(const char *path)
 {
+    char requested_path[AUDIO_PATH_MAX];
     FILE *probe;
 
     if (path == NULL)
@@ -1387,17 +1773,34 @@ esp_err_t audio_play(const char *path)
         return ESP_ERR_NOT_FOUND;
     }
     fclose(probe);
+    strncpy(requested_path, path, sizeof(requested_path) - 1);
+    requested_path[sizeof(requested_path) - 1] = '\0';
 
-    /* A previous stream still running? Stop it (waits for the task to idle). */
-    if (s_playing)
+    for (;;)
     {
-        audio_stop();
-    }
+        esp_err_t err = audio_stop_non_pcm_sources();
+        bool claimed = false;
 
-    strncpy(s_path, path, sizeof(s_path) - 1);
-    s_path[sizeof(s_path) - 1] = '\0';
-    s_stop_req = false;
-    s_paused = false;
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+        portENTER_CRITICAL(&s_audio_lock);
+        if (s_source == AUDIO_SOURCE_IDLE)
+        {
+            memcpy(s_path, requested_path, sizeof(s_path));
+            s_source = AUDIO_SOURCE_FILE_PENDING;
+            s_source_generation++;
+            s_stop_req = false;
+            s_paused = false;
+            claimed = true;
+        }
+        portEXIT_CRITICAL(&s_audio_lock);
+        if (claimed)
+        {
+            break;
+        }
+    }
 
     xTaskNotify(s_decode_task, AUDIO_NOTIFY_PLAY, eSetBits);
     return ESP_OK;
@@ -1405,18 +1808,52 @@ esp_err_t audio_play(const char *path)
 
 esp_err_t audio_stop(void)
 {
-    if (!s_playing)
+    audio_source_t source;
+    uint32_t generation;
+    audio_pcm_stream_t pcm_stream;
+    bool pending;
+
+    portENTER_CRITICAL(&s_audio_lock);
+    source = s_source;
+    generation = s_source_generation;
+    pcm_stream = s_pcm_stream;
+    if (source == AUDIO_SOURCE_IDLE)
     {
         s_stop_req = false;
         s_paused = false;
+        portEXIT_CRITICAL(&s_audio_lock);
         return ESP_OK;
     }
+    if (source == AUDIO_SOURCE_PCM)
+    {
+        portEXIT_CRITICAL(&s_audio_lock);
+        return audio_pcm_stream_close(pcm_stream);
+    }
 
-    s_stop_req = true;
-    xTaskNotify(s_decode_task, AUDIO_NOTIFY_STOP, eSetBits);
+    pending = source == AUDIO_SOURCE_FILE_PENDING;
+    if (pending)
+    {
+        s_source = AUDIO_SOURCE_IDLE;
+        s_stop_req = false;
+        s_paused = false;
+    }
+    else
+    {
+        s_stop_req = true;
+        s_paused = false;
+    }
+    portEXIT_CRITICAL(&s_audio_lock);
 
-    /* Wait for the decode task to close the file and clear s_playing. */
-    while (s_playing)
+    if (s_decode_task != NULL
+        && (pending || source == AUDIO_SOURCE_FILE))
+    {
+        xTaskNotify(s_decode_task, AUDIO_NOTIFY_STOP, eSetBits);
+    }
+    if (pending)
+    {
+        return ESP_OK;
+    }
+    while (audio_source_matches(source, generation))
     {
         vTaskDelay(pdMS_TO_TICKS(5));
     }
@@ -1425,21 +1862,23 @@ esp_err_t audio_stop(void)
 
 esp_err_t audio_pause(void)
 {
-    if (!s_playing)
+    portENTER_CRITICAL(&s_audio_lock);
+    if (s_source != AUDIO_SOURCE_IDLE && s_source != AUDIO_SOURCE_PCM)
     {
-        return ESP_OK;
+        s_paused = true;
     }
-    s_paused = true;
+    portEXIT_CRITICAL(&s_audio_lock);
     return ESP_OK;
 }
 
 esp_err_t audio_resume(void)
 {
-    if (!s_playing)
+    portENTER_CRITICAL(&s_audio_lock);
+    if (s_source != AUDIO_SOURCE_PCM)
     {
-        return ESP_OK;
+        s_paused = false;
     }
-    s_paused = false;
+    portEXIT_CRITICAL(&s_audio_lock);
     return ESP_OK;
 }
 
@@ -1460,17 +1899,28 @@ esp_err_t audio_set_volume(int vol)
 
 bool audio_is_playing(void)
 {
-    return s_playing;
+    bool playing;
+
+    portENTER_CRITICAL(&s_audio_lock);
+    playing = s_source != AUDIO_SOURCE_IDLE;
+    portEXIT_CRITICAL(&s_audio_lock);
+    return playing;
 }
 
 bool audio_is_paused(void)
 {
-    return s_paused;
+    bool paused;
+
+    portENTER_CRITICAL(&s_audio_lock);
+    paused = s_source != AUDIO_SOURCE_PCM && s_paused;
+    portEXIT_CRITICAL(&s_audio_lock);
+    return paused;
 }
 
 esp_err_t audio_play_blip(int freq_hz, int duration_ms)
 {
     const int sample_rate = 44100;
+    uint32_t generation;
     int frames;
     int fade;
     float step;
@@ -1485,9 +1935,13 @@ esp_err_t audio_play_blip(int freq_hz, int duration_ms)
     {
         return ESP_ERR_INVALID_ARG;
     }
-    /* Content always wins: this path owns the DMA ring and clears it on the way
-     * out, so it must never run against a live or paused stream. */
-    if (s_playing)
+
+    /* Content always wins: avoid allocating when ownership is already held,
+     * then check again when atomically claiming the DMA path. */
+    portENTER_CRITICAL(&s_audio_lock);
+    bool busy = s_source != AUDIO_SOURCE_IDLE;
+    portEXIT_CRITICAL(&s_audio_lock);
+    if (busy)
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1523,15 +1977,25 @@ esp_err_t audio_play_blip(int freq_hz, int duration_ms)
         buf[i] = (int16_t)sample;
     }
 
-    /* audio_write_pcm() applies the current volume as PCM gain, which is the
-     * whole point: the blip is exactly as loud as content would be. */
-    s_playing = true;
+    portENTER_CRITICAL(&s_audio_lock);
+    if (s_source != AUDIO_SOURCE_IDLE)
+    {
+        portEXIT_CRITICAL(&s_audio_lock);
+        free(buf);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_source = AUDIO_SOURCE_BLIP;
+    generation = ++s_source_generation;
     s_stop_req = false;
     s_paused = false;
-    (void)audio_write_pcm(buf, (size_t)frames);
+    portEXIT_CRITICAL(&s_audio_lock);
+
+    /* audio_write_pcm() applies the current volume as PCM gain, which is the
+     * whole point: the blip is exactly as loud as content would be. */
+    (void)audio_write_pcm(buf, (size_t)frames, 0);
     free(buf);
     (void)audio_i2s_clear();
-    s_playing = false;
+    audio_source_release(AUDIO_SOURCE_BLIP, generation);
     return ESP_OK;
 }
 
@@ -1542,9 +2006,10 @@ esp_err_t audio_play_tone(int freq_hz)
     const int off_ms = 300;
     const int on_frames = sample_rate * on_ms / 1000;
     const int off_frames = sample_rate * off_ms / 1000;
-    const int period = sample_rate / freq_hz;
-    const int half = period / 2;
+    uint32_t generation;
     int16_t *buf;
+    int period;
+    int half;
     int total;
     int i;
     bool wrote_cycle = false;
@@ -1558,11 +2023,8 @@ esp_err_t audio_play_tone(int freq_hz)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (s_playing)
-    {
-        audio_stop();
-    }
-
+    period = sample_rate / freq_hz;
+    half = period / 2;
     total = on_frames + off_frames;
     buf = calloc((size_t)total, sizeof(int16_t));
     if (buf == NULL)
@@ -1578,13 +2040,35 @@ esp_err_t audio_play_tone(int freq_hz)
         buf[i] = v;
     }
 
-    s_playing = true;
-    s_stop_req = false;
-    s_paused = false;
+    for (;;)
+    {
+        esp_err_t err = audio_stop_non_pcm_sources();
+        bool claimed = false;
+
+        if (err != ESP_OK)
+        {
+            free(buf);
+            return err;
+        }
+        portENTER_CRITICAL(&s_audio_lock);
+        if (s_source == AUDIO_SOURCE_IDLE)
+        {
+            s_source = AUDIO_SOURCE_TONE;
+            generation = ++s_source_generation;
+            s_stop_req = false;
+            s_paused = false;
+            claimed = true;
+        }
+        portEXIT_CRITICAL(&s_audio_lock);
+        if (claimed)
+        {
+            break;
+        }
+    }
 
     while (!s_stop_req)
     {
-        if (!audio_write_pcm(buf, (size_t)total))
+        if (!audio_write_pcm(buf, (size_t)total, 0))
         {
             break;
         }
@@ -1597,7 +2081,7 @@ esp_err_t audio_play_tone(int freq_hz)
 
     free(buf);
     (void)audio_i2s_clear();
-    s_playing = false;
+    audio_source_release(AUDIO_SOURCE_TONE, generation);
     return ESP_OK;
 }
 

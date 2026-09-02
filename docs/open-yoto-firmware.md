@@ -63,6 +63,7 @@ flowchart TD
 | `encoder` | the two rotary knobs + push buttons + power button |
 | `content` | the SD card + optional `mapping.json` catalog |
 | `audio` + `codec_es8156` + Espressif decoders | MP3/AAC/M4A playback → I²S |
+| `bluetooth` | Classic Bluetooth A2DP phone audio → shared PCM/I²S path |
 | `admin` | on-demand hotspot, authenticated API, remote control, SD manager |
 | `yoto_vfs` | read-only embedded `/system` assets |
 | `main` | ties it all together (the state machine) |
@@ -212,7 +213,8 @@ flowchart LR
 SD MP3 ─────────> Espressif MP3 ─┐
 SD ADTS AAC ────> Espressif AAC ─┼─> metadata-aware resample
 SD / VFS M4A ──> MP4 tables + AAC┘   ─> mono 44.1 kHz PCM
-                                            └─> I2S ─> ES8156 + AW881xx
+Phone A2DP ─────> Bluedroid SBC ─────> bounded PCM worker ─┘
+                                                       └─> I2S ─> ES8156 + AW881xx
 ```
 
 - Normal boot plays only `/system/sounds/welcome`. The path is provided by a
@@ -230,6 +232,12 @@ SD / VFS M4A ──> MP4 tables + AAC┘   ─> mono 44.1 kHz PCM
   and channels drive stereo downmix and stateful 8–96 kHz conversion to the
   oracle's fixed 44.1 kHz mono sink; bounded PCM gain affects speaker and
   headphone output.
+- The Classic Bluetooth A2DP sink advertises as `Open Yoto`. Its callback
+  copies Bluedroid's borrowed decoded-SBC PCM into a bounded ring; a dedicated
+  worker performs resampling and blocking I²S writes through the same volume
+  and amplifier path. Disconnect and shutdown cancel and drain that session
+  before deinitializing Bluetooth. Explicit audio-source ownership prevents
+  local content and Bluetooth from writing I²S concurrently.
 - Rev #04 uses one AW88194A at 7-bit `0x34`. The replacement reproduces the
   factory ET6416 reset, register table, SmartK firmware/configuration, VCALB,
   DSP/I²S/PLL checks, interrupt setup, and hard-unmute.
@@ -370,8 +378,12 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   A transition counts only after four consecutive 500 ms samples agree, and a
   glimpse appears at most once every 30 s.
 - A three-second power-button hold, or one hour without input, playback, or an
-  active admin session, stops audio/admin, blanks the display, and disables the
-  amplifier and downstream rails. Battery-powered rev #04 then releases
-  `VIN_HOLD`; externally powered rev #04 and all rev #05 shutdowns retain it
-  and enter deep sleep with active-low GPIO34 wake armed. GPIO12 is isolated in
-  every deep-sleep path.
+  active admin session, stops Bluetooth/audio/admin, blanks the display, and
+  disables the amplifier and downstream rails. Active-low `PWREN` is changed
+  to an input rather than held inactive-high, matching the factory shutdown
+  latch sequence so the physical power button can restore power. Battery-powered
+  rev #04 then releases `VIN_HOLD`; externally powered rev #04 and all rev #05
+  shutdowns retain it and enter deep sleep with active-low GPIO34 wake armed.
+  GPIO12 is isolated in every deep-sleep path. An EXT0 wake reaches normal boot
+  only after the power button remains held for two seconds; an early release
+  returns the player to its powered-down state.

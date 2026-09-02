@@ -53,7 +53,8 @@ esptool.py --chip esp32 --flash_size 8MB write_flash 0x0 merged.bin
 
 The build emits `build/bootloader/bootloader.bin` (flashed at `0x1000`),
 `build/partition_table/partition-table.bin` (`0x8000`), and `build/yoto.bin`
-(`0x10000`). Flash size is 8 MB (ESP32-WROVER-E).
+(`0x10000`). The checked-in table reserves a 4 MiB factory partition on the
+8 MiB ESP32-WROVER-E flash.
 
 ### Linux UART automation
 
@@ -146,7 +147,8 @@ firmware/
     ├── display/              # HT16D35x 16x16 LED matrix (SPI + IOX CS)   [rev #05]
     ├── gc9306/               # GC9306 TFT driver (stock init + 18-bit)    [rev #04]
     ├── nfc/                  # ST CR95HF over UART
-    └── audio/                # I2S + ES8156 / aw881xx codec
+    ├── audio/                # I2S + ES8156 / aw881xx codec
+    └── bluetooth/            # Classic Bluetooth A2DP speaker sink
 ```
 
 ## What's implemented vs TODO
@@ -161,13 +163,15 @@ firmware/
   configuration repair, and stock charge-current requests. Battery-only boot
   requires 4% SOC; warnings start at 7%; two valid battery-only samples at or
   below 3% force terminal shutdown. A three-second power hold or the stock
-  one-hour inactivity timeout disables the amp and peripheral rails. Rev #04
-  releases `VIN_HOLD` when external power is absent; powered rev #04 and all
-  rev #05 paths retain it and enter deep sleep with active-low GPIO34 wake.
-  GPIO12 is isolated before deep sleep; EXT0 reset requires a two-second held
-  power button, otherwise the early boot path disconnects rails and sleeps
-  again. The host suite covers both board dispositions, timeout timing,
-  wake qualification, invalid-sample rejection, and charger drift.
+  one-hour inactivity timeout disables the amp and peripheral rails. Shutdown
+  tri-states active-low `PWREN`, matching the factory latch sequence so the
+  physical power button can re-enable the player. Rev #04 releases `VIN_HOLD`
+  when external power is absent; powered rev #04 and all rev #05 paths retain
+  it and enter deep sleep with active-low GPIO34 wake. GPIO12 is isolated before
+  deep sleep; EXT0 reset requires a two-second held power button, otherwise the
+  early boot path disconnects rails and sleeps again. The host suite covers both
+  board dispositions, timeout timing, wake qualification, invalid-sample
+  rejection, charger drift, and rev #04/#05 `PWREN` direction transitions.
 - **GC9306 TFT driver [rev #04]**: stock SPI2 mode 0/80MHz/no-dummy setup,
   stock reset and complete initialization tail, queue-1 1364-pixel RGB666
   transport, CASET/RASET/RAMWR framing, and 40 kHz GPIO26 backlight.
@@ -200,6 +204,13 @@ firmware/
   tables (`stsd`/`stsz`/`stsc`/`stco`/`co64`).
   TX descriptors auto-clear after transmission; stop/end transitions reset the
   complete cyclic DMA ring to silence before another playback starts.
+- **Classic Bluetooth speaker**: Bluedroid A2DP sink mode advertises the player
+  as `Open Yoto`, copies decoded SBC PCM into a bounded ring, and renders it
+  through the same resampling, volume, I²S, codec, and amp path as local content.
+  A worker owns the blocking I²S writes; disconnect and power-down synchronously
+  quiesce that worker before Bluetooth or the peripheral rails are disabled.
+  Local file playback has explicit source ownership and cannot race the A2DP
+  writer.
 - WROVER-E PSRAM backs allocations larger than 4 KiB, including the
   playback-scoped decoder heaps; 32 KiB of internal memory remains reserved
   for DMA/internal-only use.

@@ -9,6 +9,8 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -22,6 +24,15 @@
  *         are ready; otherwise the corresponding initialization error.
  */
 esp_err_t audio_init(void);
+
+typedef uint32_t audio_pcm_stream_t;
+
+esp_err_t audio_pcm_stream_open(uint32_t sample_rate_hz, uint8_t channels,
+                                audio_pcm_stream_t *stream);
+esp_err_t audio_pcm_stream_write(audio_pcm_stream_t stream,
+                                 const int16_t *interleaved, size_t frames);
+void audio_pcm_stream_cancel(audio_pcm_stream_t stream);
+esp_err_t audio_pcm_stream_close(audio_pcm_stream_t stream);
 
 /**
  * Begin playing a supported compressed-audio file from the VFS. Content

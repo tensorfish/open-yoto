@@ -27,6 +27,7 @@
 #include "display.h"
 #include "cr95hf.h"
 #include "encoder.h"
+#include "bluetooth.h"
 #include "content.h"
 #include "audio.h"
 #include "admin.h"
@@ -64,6 +65,7 @@ typedef enum {
     BOOT_STAGE_AUDIO,
     BOOT_STAGE_NFC,
     BOOT_STAGE_ENCODER,
+    BOOT_STAGE_BLUETOOTH,
 } boot_stage_t;
 
 typedef struct {
@@ -93,6 +95,8 @@ static const char *boot_stage_name(boot_stage_t stage)
             return "NFC";
         case BOOT_STAGE_ENCODER:
             return "encoder";
+        case BOOT_STAGE_BLUETOOTH:
+            return "Bluetooth";
         default:
             return "unknown";
     }
@@ -105,7 +109,7 @@ static bool boot_recovery_record_valid(const boot_recovery_record_t *record)
            && record->restart_count > 0
            && record->restart_count <= BOOT_RECOVERY_MAX_RESTARTS
            && record->stage >= BOOT_STAGE_IOX
-           && record->stage <= BOOT_STAGE_ENCODER;
+           && record->stage <= BOOT_STAGE_BLUETOOTH;
 }
 
 static esp_err_t boot_recovery_clear(void)
@@ -850,6 +854,12 @@ static void power_off(bool wait_for_button_release, bool hard_power_cut)
     /* Sample power before disconnecting the charger/peripheral rails. */
     bool release_vinhold = power_off_should_release_vinhold();
 
+    err = bluetooth_stop();
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not stop Bluetooth: %s",
+                 esp_err_to_name(err));
+    }
 
     /* Serialize lifecycle teardown separately from player state. HTTP handlers
      * may finish under s_state_mutex while admin_stop() joins the server task. */
@@ -1923,6 +1933,7 @@ void app_main(void)
                              remote_stop_sound, remote_pause_sound,
                              remote_resume_sound, remote_clear_display);
     admin_set_card_write_callback(remote_write_card);
+    boot_require(BOOT_STAGE_BLUETOOTH, bluetooth_init());
 
     err = boot_recovery_clear();
     if (err != ESP_OK)

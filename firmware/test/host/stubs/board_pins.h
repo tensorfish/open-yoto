@@ -24,10 +24,18 @@
 #define IOX_PORT(x) (((x) >> 4) & 0x03)
 #define IOX_BIT(x) ((x) & 0x0F)
 #define IOX_BTN_POWER IOX_PIN(0, 1, 3)
+#ifdef CONFIG_BOARD_REV_04
 #define IOX_AUDIO_PACTRL IOX_PIN(0, 0, 6)
 #define IOX_POWER_LEVELCONVERTOR IOX_PIN(0, 0, 3)
 #define IOX_POWER_PWREN IOX_PIN(0, 1, 4)
 #define IOX_POWER_VINHOLD IOX_PIN(0, 1, 6)
+#else
+#define IOX_AUDIO_PACTRL IOX_PIN(1, 0, 4)
+#define IOX_POWER_LEVELCONVERTOR IOX_PIN(1, 1, 0)
+#define IOX_POWER_PWREN IOX_PIN(1, 0, 5)
+#define IOX_POWER_VINHOLD IOX_PIN(1, 1, 1)
+#define IOX_POWER_VOUTEN IOX_PIN(1, 1, 3)
+#endif
 #else
 #define IOX_BAT_ALERT 1
 #define IOX_CHG_STAT 2

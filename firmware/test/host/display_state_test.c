@@ -337,6 +337,21 @@ esp_err_t audio_play_blip(int freq_hz, int duration_ms)
     return ESP_OK;
 }
 
+esp_err_t bluetooth_init(void)
+{
+    return ESP_OK;
+}
+
+esp_err_t bluetooth_stop(void)
+{
+    return ESP_OK;
+}
+
+bool bluetooth_is_connected(void)
+{
+    return false;
+}
+
 /* ---- remaining peripherals ---- */
 
 esp_err_t iox_init(void)

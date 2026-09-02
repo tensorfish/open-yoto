@@ -42,6 +42,21 @@ static esp_err_t iox_read_reg(uint8_t exp, uint8_t reg, uint8_t *val)
                                         val, 1, pdMS_TO_TICKS(IOX_TIMEOUT_MS));
 }
 
+static esp_err_t iox_set_pin_direction(uint8_t pin, bool output)
+{
+    const uint8_t exp = IOX_EXP(pin);
+    const uint8_t port = IOX_PORT(pin);
+    const uint8_t bit = IOX_BIT(pin);
+    const uint8_t reg = port == 0 ? IOX_REG_CONFIG_0 : IOX_REG_CONFIG_1;
+    uint8_t val;
+
+    esp_err_t err = iox_read_reg(exp, reg, &val);
+    if (err != ESP_OK) return err;
+    if (output) val &= (uint8_t)~(1u << bit);
+    else        val |= (uint8_t)(1u << bit);
+    return iox_write_reg(exp, reg, val);
+}
+
 /* Factory direction (Config) and output-default (Output) values for each
  * 8-bit port, recovered from the stock firmware's embedded config
  * (hwconfig_05: p0Dir=0xFE p1Dir=0xFF p2Dir=0x00 p3Dir=0xD4,
@@ -164,7 +179,7 @@ esp_err_t iox_set_peripherals_powered(bool powered)
     {
         err = iox_set_pin(IOX_POWER_LEVELCONVERTOR, false);
         if (err != ESP_OK) return err;
-        err = iox_set_pin(IOX_POWER_PWREN, true);
+        err = iox_set_pin_direction(IOX_POWER_PWREN, false);
         if (err != ESP_OK) return err;
 #ifndef CONFIG_BOARD_REV_04
         err = iox_set_pin(IOX_POWER_VOUTEN, false);
@@ -179,7 +194,11 @@ esp_err_t iox_set_peripherals_powered(bool powered)
     err = iox_set_pin(IOX_POWER_VOUTEN, true);
     if (err != ESP_OK) return err;
 #endif
+    /* PWREN is active-low. Preload its latch before enabling the output so
+     * the rail cannot see a HIGH pulse during the direction transition. */
     err = iox_set_pin(IOX_POWER_PWREN, false);
+    if (err != ESP_OK) return err;
+    err = iox_set_pin_direction(IOX_POWER_PWREN, true);
     if (err != ESP_OK) return err;
     return iox_set_pin(IOX_POWER_LEVELCONVERTOR, true);
 }
