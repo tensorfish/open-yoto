@@ -326,6 +326,87 @@ int main(void)
               s_set_x[i], s_set_y[i], BAR_X0, BAR_X1, BAR_ROW0, BAR_ROW1);
     }
 
+    /* The rev-05 Bluetooth indicator is the physical top-right logical LED
+     * and remains lit across every public path that rewrites the framebuffer. */
+    {
+        static uint8_t rgba[16 * 16 * 4];
+        static uint16_t rgb565[16 * 16];
+        static uint16_t color64_row[64];
+        static uint8_t full_mask[240 * 320 / 8];
+
+        display_set_pixel(15, 0, false);
+        display_flush();
+        s_set_start = s_set_count;
+        s_flush_start = s_flush_count;
+        display_set_bluetooth_indicator(true);
+        CHECK(s_set_count - s_set_start == 1,
+              "enabling Bluetooth wrote %d LEDs, want 1",
+              s_set_count - s_set_start);
+        CHECK(s_set_x[s_set_count - 1] == 15
+              && s_set_y[s_set_count - 1] == 0,
+              "Bluetooth indicator is (%d,%d), want top-right (15,0)",
+              s_set_x[s_set_count - 1], s_set_y[s_set_count - 1]);
+        CHECK(s_shadow[0][15],
+              "Bluetooth indicator is dark immediately after enable");
+        CHECK(last_flush_calls() == 1,
+              "enabling Bluetooth flushed %d times, want 1",
+              last_flush_calls());
+
+        display_clear();
+        display_flush();
+        CHECK(s_shadow[0][15], "clear/flush erased Bluetooth indicator");
+
+        display_show_rgba(rgba);
+        CHECK(s_shadow[0][15], "RGBA render erased Bluetooth indicator");
+
+        CHECK(display_show_rgb56516(rgb565) == ESP_OK,
+              "RGB565 render failed");
+        CHECK(s_shadow[0][15], "RGB565 render erased Bluetooth indicator");
+
+        CHECK(display_color64_begin() == ESP_OK, "color64 begin failed");
+        for (uint8_t y = 0; y < 64; y++)
+        {
+            CHECK(display_color64_write_row(y, color64_row) == ESP_OK,
+                  "color64 row %u failed", (unsigned)y);
+        }
+        CHECK(display_color64_end() == ESP_OK, "color64 end failed");
+        CHECK(s_shadow[0][15], "color64 render erased Bluetooth indicator");
+
+        display_show_mask_full(full_mask, 0xFFFFFF, 0x000000);
+        CHECK(s_shadow[0][15], "full-mask render erased Bluetooth indicator");
+
+        display_show_access_code(NULL);
+        CHECK(s_shadow[0][15],
+              "access-code render erased Bluetooth indicator");
+
+        display_draw_volume_overlay(50);
+        CHECK(s_shadow[0][15],
+              "volume overlay erased Bluetooth indicator");
+
+        display_set_pixel(15, 0, false);
+        display_flush();
+        CHECK(s_shadow[0][15],
+              "top-right base write erased Bluetooth indicator");
+
+        s_set_start = s_set_count;
+        s_flush_start = s_flush_count;
+        display_set_bluetooth_indicator(false);
+        CHECK(s_set_count == s_set_start && last_flush_calls() == 0,
+              "disabling Bluetooth must wait for the caller's base repaint");
+
+        display_show_rgba(rgba);
+        CHECK(!s_shadow[0][15],
+              "post-disable base repaint left the indicator lit");
+
+        display_set_pixel(15, 0, true);
+        display_flush();
+        CHECK(s_shadow[0][15],
+              "disabled indicator intercepted the base top-right LED");
+
+        display_set_pixel(15, 0, false);
+        display_flush();
+    }
+
     if (s_failures != 0)
     {
         fprintf(stderr, "volume overlay rev05 test: %d assertion(s) failed\n",

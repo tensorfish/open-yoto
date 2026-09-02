@@ -39,6 +39,14 @@ void display_set_pixel(int x, int y, bool on);
 void display_flush(void);
 
 /**
+ * Enable or disable the persistent Bluetooth status indicator.
+ *
+ * Enabling draws immediately and subsequent renders preserve it. Disabling
+ * removes it from subsequent renders; the caller repaints the current base.
+ */
+void display_set_bluetooth_indicator(bool enabled);
+
+/**
  * Render a 16x16 RGBA icon through the revision's physical display path.
  * The rev #04 GC9306 path alpha-premultiplies RGB, nearest-neighbour scales
  * 15× to the visible `(0,0)..(239,239)` canvas, then transmits RGB666 with

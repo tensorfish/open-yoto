@@ -5,8 +5,9 @@
  * pulse counter, and their push buttons plus the power button are read from
  * the PI4IOE5V6416 IO expander and debounced. A FreeRTOS task delivers:
  *   - a TURN event per detent (positive/negative delta),
- *   - a SHORT_PRESS event on button release before the long-press threshold,
- *   - a LONG_PRESS event once a button is held past the threshold.
+ *   - a SHORT_PRESS event on button release before its hold threshold,
+ *   - a LONG_PRESS event after 800 ms for the left knob or 3000 ms for the
+ *     right knob and dedicated power button.
  */
 #pragma once
 

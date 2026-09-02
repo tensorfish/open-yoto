@@ -49,8 +49,9 @@ static const char *TAG = "encoder";
 #define ENCODER_BTN_DEBOUNCE_MS      30
 #define ENCODER_BTN_SAMPLES          (ENCODER_BTN_DEBOUNCE_MS / ENCODER_BTN_POLL_MS)
 
-/* Knobs classify an 800 ms hold; power requires a deliberate three seconds. */
-#define ENCODER_LONG_PRESS_MS        800
+/* Left knob holds classify after 800 ms; right knob and power require three seconds. */
+#define ENCODER_LEFT_LONG_PRESS_MS   800
+#define ENCODER_RIGHT_LONG_PRESS_MS  3000
 #define ENCODER_POWER_HOLD_MS        3000
 
 /* Queue depth carrying encoder events from the ISR to the task. */
@@ -175,7 +176,8 @@ static void encoder_poll_buttons(void)
             {
                 TickType_t threshold = pdMS_TO_TICKS(
                     id == ENCODER_ID_POWER ? ENCODER_POWER_HOLD_MS
-                                           : ENCODER_LONG_PRESS_MS);
+                    : id == ENCODER_ID_1  ? ENCODER_RIGHT_LONG_PRESS_MS
+                                            : ENCODER_LEFT_LONG_PRESS_MS);
                 if (!btn->long_fired &&
                     (TickType_t)(xTaskGetTickCount() - btn->pressed_at) >= threshold)
                 {
@@ -376,9 +378,9 @@ esp_err_t encoder_init(void)
     }
 
     ESP_LOGI(TAG, "2 encoders + 3 buttons ready (4X, %d counts/detent, "
-             "%d ms knob hold, %d ms power hold)",
-             ENCODER_COUNTS_PER_DETENT, ENCODER_LONG_PRESS_MS,
-             ENCODER_POWER_HOLD_MS);
+             "holds: left=%d ms, right=%d ms, power=%d ms)",
+             ENCODER_COUNTS_PER_DETENT, ENCODER_LEFT_LONG_PRESS_MS,
+             ENCODER_RIGHT_LONG_PRESS_MS, ENCODER_POWER_HOLD_MS);
     return ESP_OK;
 }
 

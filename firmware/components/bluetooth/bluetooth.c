@@ -954,9 +954,9 @@ esp_err_t bluetooth_init(void)
 
 fail:
     ESP_LOGE(TAG, "Bluetooth initialization failed: %s", esp_err_to_name(err));
-    (void)shutdown_stack();
+    esp_err_t cleanup_err = shutdown_stack();
     atomic_store_explicit(&s_lifecycle,
-                          resources_remain()
+                          cleanup_err != ESP_OK || resources_remain()
                               ? BT_LIFECYCLE_CLEANUP_REQUIRED
                               : BT_LIFECYCLE_UNINITIALIZED,
                           memory_order_release);
@@ -987,7 +987,7 @@ esp_err_t bluetooth_stop(void)
 
     esp_err_t err = shutdown_stack();
     atomic_store_explicit(&s_lifecycle,
-                          resources_remain()
+                          err != ESP_OK || resources_remain()
                               ? BT_LIFECYCLE_CLEANUP_REQUIRED
                               : BT_LIFECYCLE_UNINITIALIZED,
                           memory_order_release);

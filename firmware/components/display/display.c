@@ -98,6 +98,61 @@ static bool s_fb[16][16];
  */
 static bool s_panel_margin_clean;
 
+#define BLUETOOTH_DOT_SIZE  DISPLAY_TFT_SCALE
+#define BLUETOOTH_DOT_X0    0
+#define BLUETOOTH_DOT_Y0    0
+#define BLUETOOTH_DOT_COLOR 0x168BFF
+
+static bool s_bluetooth_indicator;
+
+
+static esp_err_t bluetooth_fill_dot(uint32_t color)
+{
+    /*
+     * MADCTL horizontally mirrors controller coordinates, so controller x=0
+     * is the physical right edge. One logical-pixel-sized square is the color
+     * display's equivalent of the rev-05 status LED.
+     */
+    return gc9306_fill_rect(BLUETOOTH_DOT_X0, BLUETOOTH_DOT_Y0,
+                            BLUETOOTH_DOT_X0 + BLUETOOTH_DOT_SIZE - 1,
+                            BLUETOOTH_DOT_Y0 + BLUETOOTH_DOT_SIZE - 1,
+                            color);
+}
+
+static void bluetooth_draw_indicator(void)
+{
+    if (s_bluetooth_indicator)
+    {
+        esp_err_t err = bluetooth_fill_dot(BLUETOOTH_DOT_COLOR);
+
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Bluetooth indicator draw failed: %s",
+                     esp_err_to_name(err));
+        }
+    }
+}
+
+/*
+ * Disabling only changes composition state. The app immediately repaints its
+ * current base, avoiding a second full-panel transfer or up to 144 tiny I2C
+ * controlled restores for a detailed mask.
+ */
+
+void display_set_bluetooth_indicator(bool enabled)
+{
+    if (s_bluetooth_indicator == enabled)
+    {
+        return;
+    }
+
+    s_bluetooth_indicator = enabled;
+    if (enabled)
+    {
+        bluetooth_draw_indicator();
+    }
+}
+
 esp_err_t display_init(void)
 {
     esp_err_t err = gc9306_init();
@@ -158,6 +213,7 @@ void display_flush(void)
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "flush: background fill failed: %s", esp_err_to_name(err));
+        bluetooth_draw_indicator();
         return;
     }
     for (int y = 0; y < 16; y++)
@@ -182,6 +238,7 @@ void display_flush(void)
             }
         }
     }
+    bluetooth_draw_indicator();
 }
 
 void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
@@ -199,6 +256,7 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
         if (err != ESP_OK)
         {
             ESP_LOGW(TAG, "RGBA frame failed: %s", esp_err_to_name(err));
+            bluetooth_draw_indicator();
             return;
         }
         s_panel_margin_clean = true;
@@ -211,6 +269,7 @@ void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
     {
         ESP_LOGW(TAG, "RGBA frame failed: %s", esp_err_to_name(err));
     }
+    bluetooth_draw_indicator();
 }
 
 esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
@@ -234,12 +293,20 @@ esp_err_t display_show_rgb56516(const uint16_t pixels[16 * 16])
     {
         ESP_LOGW(TAG, "RGB565 frame failed: %s", esp_err_to_name(err));
     }
+    bluetooth_draw_indicator();
     return err;
 }
 
 esp_err_t display_color64_begin(void)
 {
-    return gc9306_color64_begin();
+    esp_err_t err = gc9306_color64_begin();
+
+    if (err != ESP_OK)
+    {
+        /* begin clears/configures the panel before later setup steps can fail. */
+        bluetooth_draw_indicator();
+    }
+    return err;
 }
 
 esp_err_t display_color64_write_row(uint8_t y,
@@ -254,7 +321,10 @@ esp_err_t display_color64_write_row(uint8_t y,
 
 esp_err_t display_color64_end(void)
 {
-    return gc9306_color64_end();
+    esp_err_t err = gc9306_color64_end();
+
+    bluetooth_draw_indicator();
+    return err;
 }
 
 void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
@@ -272,6 +342,7 @@ void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
     {
         ESP_LOGW(TAG, "full raster failed: %s", esp_err_to_name(err));
     }
+    bluetooth_draw_indicator();
 }
 
 
@@ -354,6 +425,7 @@ void display_show_access_code(
     {
         ESP_LOGW(TAG, "access-code render failed: %s", esp_err_to_name(err));
     }
+    bluetooth_draw_indicator();
 }
 
 /*
@@ -451,6 +523,22 @@ void display_draw_volume_overlay(int volume)
 
 static uint32_t s_color64_luma[16];
 static uint8_t s_color64_next_row;
+static bool s_bluetooth_indicator;
+
+void display_set_bluetooth_indicator(bool enabled)
+{
+    if (s_bluetooth_indicator == enabled)
+    {
+        return;
+    }
+
+    s_bluetooth_indicator = enabled;
+    if (enabled)
+    {
+        ht16d35x_set_pixel(15, 0, true);
+        ht16d35x_flush();
+    }
+}
 esp_err_t display_init(void)
 {
     return ht16d35x_init();
@@ -459,15 +547,27 @@ esp_err_t display_init(void)
 void display_clear(void)
 {
     ht16d35x_clear();
+    if (s_bluetooth_indicator)
+    {
+        ht16d35x_set_pixel(15, 0, true);
+    }
 }
 
 void display_set_pixel(int x, int y, bool on)
 {
+    if (x == 15 && y == 0 && s_bluetooth_indicator)
+    {
+        on = true;
+    }
     ht16d35x_set_pixel(x, y, on);
 }
 
 void display_flush(void)
 {
+    if (s_bluetooth_indicator)
+    {
+        ht16d35x_set_pixel(15, 0, true);
+    }
     ht16d35x_flush();
 }
 
@@ -634,7 +734,7 @@ void display_show_mask_full(const uint8_t mask[240 * 320 / 8],
 void display_show_access_code(
     const char code[DISPLAY_ACCESS_CODE_LEN + 1])
 {
-    ht16d35x_clear();
+    display_clear();
     if (code != NULL)
     {
         for (int i = 0; i < DISPLAY_ACCESS_CODE_LEN; i++)
@@ -654,13 +754,13 @@ void display_show_access_code(
                 {
                     if ((bits & (uint8_t)(1U << (4 - col))) != 0)
                     {
-                        ht16d35x_set_pixel(x0 + col, y0 + row, true);
+                        display_set_pixel(x0 + col, y0 + row, true);
                     }
                 }
             }
         }
     }
-    ht16d35x_flush();
+    display_flush();
 }
 
 #endif /* CONFIG_BOARD_REV_04 */

@@ -15,6 +15,11 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 cc -std=c11 -Wall -Wextra -Werror \
     -I stubs \
+    -o /tmp/encoder_hold_test \
+    encoder_hold_test.c
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I stubs \
     -o /tmp/panel_clear_test \
     panel_clear_test.c
 
@@ -56,6 +61,9 @@ echo "PASS: volume overlay geometry (rev04)"
 
 /tmp/volume_overlay_rev05_test
 echo "PASS: volume overlay geometry (rev05)"
+
+/tmp/encoder_hold_test
+echo "PASS: encoder button hold timing"
 
 /tmp/panel_clear_test
 echo "PASS: panel clear elision (rev04)"

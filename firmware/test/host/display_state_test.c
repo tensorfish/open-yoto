@@ -25,6 +25,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+
+/* The host display header intentionally mirrors only the established API; the
+ * test supplies this new observable before including app_main.c. */
+void display_set_bluetooth_indicator(bool enabled);
 static int s_failures;
 
 #define CHECK(cond, ...)                                    \
@@ -99,26 +103,44 @@ BaseType_t xTaskCreate(void (*code)(void *), const char *name,
     return pdPASS;
 }
 
+static uintptr_t s_next_semaphore = 1;
+static int s_state_mutex_depth;
+static int s_bluetooth_lifecycle_mutex_depth;
+
 SemaphoreHandle_t xSemaphoreCreateMutex(void)
 {
-    return (SemaphoreHandle_t)1;
+    return (SemaphoreHandle_t)s_next_semaphore++;
 }
 
 SemaphoreHandle_t xSemaphoreCreateBinary(void)
 {
-    return (SemaphoreHandle_t)1;
+    return (SemaphoreHandle_t)s_next_semaphore++;
 }
 
 BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t ticks)
 {
-    (void)sem;
     (void)ticks;
+    if (sem == s_state_mutex)
+    {
+        s_state_mutex_depth++;
+    }
+    if (sem == s_bluetooth_lifecycle_mutex)
+    {
+        s_bluetooth_lifecycle_mutex_depth++;
+    }
     return pdTRUE;
 }
 
 BaseType_t xSemaphoreGive(SemaphoreHandle_t sem)
 {
-    (void)sem;
+    if (sem == s_state_mutex)
+    {
+        s_state_mutex_depth--;
+    }
+    if (sem == s_bluetooth_lifecycle_mutex)
+    {
+        s_bluetooth_lifecycle_mutex_depth--;
+    }
     return pdTRUE;
 }
 
@@ -243,6 +265,9 @@ static bool s_low;
 static int s_soc = 50;
 static float s_voltage = 3700.0f;
 static bool s_playing;
+static bool s_paused;
+static int s_pause_calls;
+static int s_resume_calls;
 static bool s_snapshot_valid = true;
 static bool s_external_power_present;
 
@@ -295,7 +320,7 @@ bool audio_is_playing(void)
 
 bool audio_is_paused(void)
 {
-    return false;
+    return s_paused;
 }
 
 esp_err_t audio_init(void)
@@ -316,11 +341,15 @@ esp_err_t audio_stop(void)
 
 esp_err_t audio_pause(void)
 {
+    s_pause_calls++;
+    s_paused = true;
     return ESP_OK;
 }
 
 esp_err_t audio_resume(void)
 {
+    s_resume_calls++;
+    s_paused = false;
     return ESP_OK;
 }
 
@@ -337,14 +366,44 @@ esp_err_t audio_play_blip(int freq_hz, int duration_ms)
     return ESP_OK;
 }
 
+bluetooth_host_stub_state_t bluetooth_host_stub;
+static int s_bluetooth_state_lock_violations;
+static int s_bluetooth_lifecycle_lock_violations;
+
+void bluetooth_host_stub_reset(void)
+{
+    bluetooth_host_stub.init_result = ESP_OK;
+    bluetooth_host_stub.stop_result = ESP_OK;
+    bluetooth_host_stub.init_calls = 0;
+    bluetooth_host_stub.stop_calls = 0;
+}
+
 esp_err_t bluetooth_init(void)
 {
-    return ESP_OK;
+    bluetooth_host_stub.init_calls++;
+    if (s_state_mutex_depth != 0)
+    {
+        s_bluetooth_state_lock_violations++;
+    }
+    if (s_bluetooth_lifecycle_mutex_depth == 0)
+    {
+        s_bluetooth_lifecycle_lock_violations++;
+    }
+    return bluetooth_host_stub.init_result;
 }
 
 esp_err_t bluetooth_stop(void)
 {
-    return ESP_OK;
+    bluetooth_host_stub.stop_calls++;
+    if (s_state_mutex_depth != 0)
+    {
+        s_bluetooth_state_lock_violations++;
+    }
+    if (s_bluetooth_lifecycle_mutex_depth == 0)
+    {
+        s_bluetooth_lifecycle_lock_violations++;
+    }
+    return bluetooth_host_stub.stop_result;
 }
 
 bool bluetooth_is_connected(void)
@@ -554,10 +613,18 @@ static int s_volume_draw_count;
 int s_clear_count;
 int s_flush_count;
 int s_access_code_count;
+static bool s_bluetooth_indicator;
+static int s_bluetooth_indicator_calls;
 
 esp_err_t display_init(void)
 {
     return ESP_OK;
+}
+
+void display_set_bluetooth_indicator(bool enabled)
+{
+    s_bluetooth_indicator = enabled;
+    s_bluetooth_indicator_calls++;
 }
 
 void display_show_rgba(const uint8_t rgba[16 * 16 * 4])
@@ -674,6 +741,9 @@ static void reset_state(void)
     s_soc = 50;
     s_voltage = 3700.0f;
     s_playing = false;
+    s_paused = false;
+    s_pause_calls = 0;
+    s_resume_calls = 0;
 
     s_display_base = DISPLAY_BASE_IDLE;
     s_display_image_path[0] = '\0';
@@ -694,6 +764,7 @@ static void reset_state(void)
     s_track_count = 0;
     s_track_index = 0;
     s_powered_off = false;
+    s_bluetooth_enabled = false;
     s_current_url[0] = '\0';
     s_volume_blip_signal = NULL;
     s_last_playpause_ticks = 0;
@@ -702,6 +773,7 @@ static void reset_state(void)
     s_pending_skip = 0;
     s_pending_power = false;
     s_pending_screen_toggle = false;
+    s_pending_bluetooth_toggle = false;
     s_content_lookups = 0;
     s_admin_active = false;
     s_restart_count = 0;
@@ -726,8 +798,15 @@ static void reset_state(void)
     s_battery_critical_check_ticks = 0;
     s_battery_critical_samples = 0;
     s_last_activity_ticks = 0;
+    bluetooth_host_stub_reset();
+    s_bluetooth_state_lock_violations = 0;
+    s_bluetooth_lifecycle_lock_violations = 0;
+    s_state_mutex_depth = 0;
+    s_bluetooth_lifecycle_mutex_depth = 0;
+    s_next_semaphore = 1;
 
     s_admin_lifecycle_mutex = xSemaphoreCreateMutex();
+    s_bluetooth_lifecycle_mutex = xSemaphoreCreateMutex();
     s_state_mutex = xSemaphoreCreateMutex();
 
     s_frame_count = 0;
@@ -735,6 +814,8 @@ static void reset_state(void)
     s_clear_count = 0;
     s_flush_count = 0;
     s_access_code_count = 0;
+    s_bluetooth_indicator = false;
+    s_bluetooth_indicator_calls = 0;
 }
 
 /* Fire one encoder event exactly as the encoder task would. */
@@ -773,6 +854,8 @@ int main(void)
         CHECK(s_display_base == DISPLAY_BASE_IDLE,
               "boot: base should be DISPLAY_BASE_IDLE, got %d",
               (int)s_display_base);
+        CHECK(!s_bluetooth_enabled && bluetooth_host_stub.init_calls == 0,
+              "boot: Bluetooth must remain off without mandatory initialization");
     }
 
     /* --------------------------------- 2. CHARGE GLIMPSE RETURNS TO FACE --- */
@@ -1084,8 +1167,18 @@ int main(void)
     /* --------------------------------------------- 9. MANUAL POWER OFF ---- */
     {
         reset_state();
+        bluetooth_toggle();
+        CHECK(s_bluetooth_enabled && s_bluetooth_indicator,
+              "power: precondition must enable Bluetooth");
         power_off(true, false);
         CHECK(s_powered_off, "power: a hold must start power-off");
+        CHECK(!s_bluetooth_enabled && !s_bluetooth_indicator,
+              "power: shutdown must leave Bluetooth state and indicator off");
+        CHECK(bluetooth_host_stub.stop_calls == 1,
+              "power: enabled Bluetooth must be stopped exactly once");
+        CHECK(s_bluetooth_state_lock_violations == 0
+              && s_bluetooth_lifecycle_lock_violations == 0,
+              "power: Bluetooth stop must hold only the lifecycle mutex");
         CHECK(s_display_base == DISPLAY_BASE_OFF,
               "power: off should park the base at OFF, got %d",
               (int)s_display_base);
@@ -1156,6 +1249,8 @@ int main(void)
         encoder_event(ENCODER_ID_POWER, 0, ENCODER_EVT_LONG_PRESS);
         CHECK(s_pending_power && !s_powered_off,
               "encoder: a power hold must be recorded, not executed inline");
+        CHECK(!s_pending_bluetooth_toggle,
+              "encoder: the dedicated power hold must not toggle Bluetooth");
         encoder_actions_pump();
         CHECK(s_powered_off,
               "encoder: the pump must apply the deferred power transition");
@@ -1181,7 +1276,120 @@ int main(void)
               "encoder: the dropped skip must still be cleared");
     }
 
-    /* ------------------------------ 11. ADMIN CODE STAYS ON THE PANEL ----- */
+    /* ------------------------------ 11. BLUETOOTH KNOB TOGGLE ------------ */
+    {
+        int frame_mark;
+        int indicator_mark;
+
+        reset_state();
+        CHECK(!s_bluetooth_enabled && !s_bluetooth_indicator,
+              "Bluetooth: reset/boot state must be off");
+
+        /* The callback records intent only; lifecycle work belongs to the
+         * gesture task/main-loop fallback pump. */
+        encoder_event(ENCODER_ID_1, 0, ENCODER_EVT_LONG_PRESS);
+        CHECK(s_pending_bluetooth_toggle && !s_pending_power,
+              "Bluetooth: right-knob hold must queue only a Bluetooth toggle");
+        CHECK(bluetooth_host_stub.init_calls == 0
+              && bluetooth_host_stub.stop_calls == 0,
+              "Bluetooth: encoder callback must not run lifecycle calls");
+        encoder_actions_pump();
+        CHECK(!s_pending_bluetooth_toggle,
+              "Bluetooth: pump must drain the queued toggle");
+        CHECK(s_bluetooth_enabled && s_bluetooth_indicator,
+              "Bluetooth: first toggle must enable state and indicator");
+        CHECK(bluetooth_host_stub.init_calls == 1
+              && bluetooth_host_stub.stop_calls == 0,
+              "Bluetooth: first toggle must initialize exactly once");
+
+        /* Disabling redraws the current base after removing the indicator. */
+        state_lock();
+        display_set_idle_locked();
+        state_unlock();
+        frame_mark = s_frame_count;
+        encoder_event(ENCODER_ID_1, 0, ENCODER_EVT_LONG_PRESS);
+        CHECK(bluetooth_host_stub.stop_calls == 0,
+              "Bluetooth: second callback must defer stop");
+        encoder_actions_pump();
+        CHECK(!s_bluetooth_enabled && !s_bluetooth_indicator,
+              "Bluetooth: second toggle must disable state and indicator");
+        CHECK(bluetooth_host_stub.stop_calls == 1,
+              "Bluetooth: second toggle must stop exactly once");
+        CHECK(s_frame_count == frame_mark + 1
+              && last_frame() == IDLE_FACE_RGBA,
+              "Bluetooth: disable must redraw the current idle base");
+        CHECK(s_bluetooth_state_lock_violations == 0
+              && s_bluetooth_lifecycle_lock_violations == 0,
+              "Bluetooth: lifecycle calls must be serialized without the "
+              "player state mutex");
+
+        /* Toggle intent composes by parity while lifecycle work is busy: two
+         * completed holds cancel rather than collapsing into one transition. */
+        reset_state();
+        encoder_event(ENCODER_ID_1, 0, ENCODER_EVT_LONG_PRESS);
+        encoder_event(ENCODER_ID_1, 0, ENCODER_EVT_LONG_PRESS);
+        CHECK(!s_pending_bluetooth_toggle,
+              "Bluetooth: two queued holds must cancel by parity");
+        encoder_actions_pump();
+        CHECK(!s_bluetooth_enabled && !s_bluetooth_indicator
+              && bluetooth_host_stub.init_calls == 0
+              && bluetooth_host_stub.stop_calls == 0,
+              "Bluetooth: two queued holds must leave Bluetooth off");
+
+        /* Failed init publishes neither enabled state nor an indicator. */
+        reset_state();
+        bluetooth_host_stub.init_result = ESP_FAIL;
+        encoder_event(ENCODER_ID_1, 0, ENCODER_EVT_LONG_PRESS);
+        encoder_actions_pump();
+        CHECK(bluetooth_host_stub.init_calls == 1
+              && bluetooth_host_stub.stop_calls == 1
+              && !s_bluetooth_enabled && !s_bluetooth_indicator,
+              "Bluetooth: failed init must clean up and leave Bluetooth off");
+        CHECK(s_bluetooth_indicator_calls == 0,
+              "Bluetooth: failed init must not update the indicator");
+        CHECK(s_bluetooth_state_lock_violations == 0
+              && s_bluetooth_lifecycle_lock_violations == 0,
+              "Bluetooth: failed-init cleanup must use only lifecycle lock");
+
+        /* Failed runtime stop preserves both successful on-state and its
+         * screen composition; terminal power-off still forces them off. */
+        reset_state();
+        encoder_event(ENCODER_ID_1, 0, ENCODER_EVT_LONG_PRESS);
+        encoder_actions_pump();
+        bluetooth_host_stub.stop_result = ESP_FAIL;
+        indicator_mark = s_bluetooth_indicator_calls;
+        frame_mark = s_frame_count;
+        encoder_event(ENCODER_ID_1, 0, ENCODER_EVT_LONG_PRESS);
+        encoder_actions_pump();
+        CHECK(bluetooth_host_stub.stop_calls == 1
+              && s_bluetooth_enabled && s_bluetooth_indicator,
+              "Bluetooth: failed stop must preserve enabled state");
+        CHECK(s_bluetooth_indicator_calls == indicator_mark
+              && s_frame_count == frame_mark,
+              "Bluetooth: failed stop must not update or redraw the display");
+        power_off(false, false);
+        CHECK(!s_bluetooth_enabled && !s_bluetooth_indicator,
+              "Bluetooth: terminal shutdown must force state and indicator off");
+
+        /* Existing right-knob short press remains play/pause, and a left turn
+         * remains volume control rather than entering Bluetooth paths. */
+        reset_state();
+        s_playing = true;
+        encoder_event(ENCODER_ID_1, 0, ENCODER_EVT_SHORT_PRESS);
+        CHECK(s_pause_calls == 1 && s_paused
+              && !s_pending_bluetooth_toggle,
+              "Bluetooth: right short press must remain pause");
+        advance_ms(GESTURE_DEBOUNCE_MS);
+        encoder_event(ENCODER_ID_1, 0, ENCODER_EVT_SHORT_PRESS);
+        CHECK(s_resume_calls == 1 && !s_paused,
+              "Bluetooth: second right short press must remain resume");
+        encoder_event(ENCODER_ID_0, 1, ENCODER_EVT_TURN);
+        CHECK(s_volume == 65 && bluetooth_host_stub.init_calls == 0
+              && bluetooth_host_stub.stop_calls == 0,
+              "Bluetooth: knob turns must preserve volume behavior");
+    }
+
+    /* ------------------------------ 12. ADMIN CODE STAYS ON THE PANEL ----- */
     {
         int codes;
 
@@ -1246,7 +1454,7 @@ int main(void)
               "admin: stopping admin must restore the idle face");
     }
 
-    /* ------------------------- 12. STOCK INACTIVITY TERMINAL OFF ---------- */
+    /* ------------------------- 13. STOCK INACTIVITY TERMINAL OFF ---------- */
     {
         reset_state();
         s_tick_ms = IDLE_POWER_OFF_MS - 1;

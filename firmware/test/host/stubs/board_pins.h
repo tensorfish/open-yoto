@@ -9,6 +9,10 @@
 #define PIN_IOX_INT 34
 #define PIN_I2C_SDA 21
 #define PIN_I2C_SCL 25
+#define PIN_ENC0_A 35
+#define PIN_ENC0_B 39
+#define PIN_ENC1_A 27
+#define PIN_ENC1_B 36
 #define I2C_MASTER_FREQ_HZ 100000
 
 #define I2C_PORT 0
@@ -18,6 +22,8 @@
 #define I2C_ADDR_CHARGER 0x1A
 #define I2C_ADDR_PD_SINK 0x08
 
+#define IOX_BTN_ENC0_PUSH 9
+#define IOX_BTN_ENC1_PUSH 10
 #ifdef HOST_IOX_WAKE_TEST
 #define IOX_PIN(exp, port, bit) (((exp) << 6) | ((port) << 4) | (bit))
 #define IOX_EXP(x) (((x) >> 6) & 0x03)

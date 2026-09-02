@@ -204,13 +204,18 @@ firmware/
   tables (`stsd`/`stsz`/`stsc`/`stco`/`co64`).
   TX descriptors auto-clear after transmission; stop/end transitions reset the
   complete cyclic DMA ring to silence before another playback starts.
-- **Classic Bluetooth speaker**: Bluedroid A2DP sink mode advertises the player
-  as `Open Yoto`, copies decoded SBC PCM into a bounded ring, and renders it
-  through the same resampling, volume, I²S, codec, and amp path as local content.
-  A worker owns the blocking I²S writes; disconnect and power-down synchronously
-  quiesce that worker before Bluetooth or the peripheral rails are disabled.
-  Local file playback has explicit source ownership and cannot race the A2DP
-  writer.
+- **Classic Bluetooth speaker**: Bluetooth is off at boot. Pressing and holding
+  the right knob for three seconds toggles the Bluedroid A2DP sink; while
+  enabled it advertises the player as `Open Yoto`. A short press remains
+  play/pause, and turning the knob still skips tracks or winks when no card is
+  loaded. The enabled state is shown persistently at the physical top-right:
+  a blue dot on the rev #04 color display, or the top-right LED on the
+  monochrome rev #05 display. Decoded SBC PCM is copied into a bounded ring and
+  rendered through the same resampling, volume, I²S, codec, and amp path as
+  local content. A worker owns the blocking I²S writes; disconnect, Bluetooth
+  disable, and power-down synchronously quiesce that worker before Bluetooth or
+  the peripheral rails are disabled. Local file playback has explicit source
+  ownership and cannot race the A2DP writer.
 - WROVER-E PSRAM backs allocations larger than 4 KiB, including the
   playback-scoped decoder heaps; 32 KiB of internal memory remains reserved
   for DMA/internal-only use.

@@ -65,7 +65,6 @@ typedef enum {
     BOOT_STAGE_AUDIO,
     BOOT_STAGE_NFC,
     BOOT_STAGE_ENCODER,
-    BOOT_STAGE_BLUETOOTH,
 } boot_stage_t;
 
 typedef struct {
@@ -95,8 +94,6 @@ static const char *boot_stage_name(boot_stage_t stage)
             return "NFC";
         case BOOT_STAGE_ENCODER:
             return "encoder";
-        case BOOT_STAGE_BLUETOOTH:
-            return "Bluetooth";
         default:
             return "unknown";
     }
@@ -109,7 +106,7 @@ static bool boot_recovery_record_valid(const boot_recovery_record_t *record)
            && record->restart_count > 0
            && record->restart_count <= BOOT_RECOVERY_MAX_RESTARTS
            && record->stage >= BOOT_STAGE_IOX
-           && record->stage <= BOOT_STAGE_BLUETOOTH;
+           && record->stage <= BOOT_STAGE_ENCODER;
 }
 
 static esp_err_t boot_recovery_clear(void)
@@ -308,7 +305,11 @@ static int s_track_count = 0;
 /* Serializes admin start/stop without blocking HTTP callbacks on the player
  * state mutex. */
 static SemaphoreHandle_t s_admin_lifecycle_mutex;
+/* Serializes Bluetooth init/stop against terminal power-off without holding
+ * the player state mutex across either blocking lifecycle call. */
+static SemaphoreHandle_t s_bluetooth_lifecycle_mutex;
 static SemaphoreHandle_t s_state_mutex;
+static bool s_bluetooth_enabled = false;
 typedef enum {
     DISPLAY_BASE_OFF,
     DISPLAY_BASE_IDLE,
@@ -354,6 +355,7 @@ static uint8_t s_wink_frame_index;
 static int s_pending_skip;
 static bool s_pending_power;
 static bool s_pending_screen_toggle;
+static bool s_pending_bluetooth_toggle;
 /* The card a pending skip was captured for; a swap invalidates the turn. */
 static char s_pending_skip_url[CR95HF_URL_MAX + 1];
 /* Wakes the gesture task the moment a gesture is recorded. */
@@ -382,6 +384,16 @@ static void admin_lifecycle_lock(void)
 static void admin_lifecycle_unlock(void)
 {
     xSemaphoreGive(s_admin_lifecycle_mutex);
+}
+
+static void bluetooth_lifecycle_lock(void)
+{
+    xSemaphoreTake(s_bluetooth_lifecycle_mutex, portMAX_DELAY);
+}
+
+static void bluetooth_lifecycle_unlock(void)
+{
+    xSemaphoreGive(s_bluetooth_lifecycle_mutex);
 }
 
 /* Wake the gesture task; safe to call with the state mutex held. */
@@ -622,6 +634,62 @@ static void display_render_base_locked(void)
     }
 }
 
+/*
+ * Apply one deferred right-knob hold. The lifecycle mutex closes the race with
+ * terminal shutdown; s_state_mutex is used only to inspect/publish state and is
+ * never held while the Bluetooth component blocks in init/stop.
+ */
+static void bluetooth_toggle(void)
+{
+    bool enable;
+    esp_err_t err;
+
+    bluetooth_lifecycle_lock();
+    state_lock();
+    if (s_powered_off)
+    {
+        state_unlock();
+        bluetooth_lifecycle_unlock();
+        return;
+    }
+    enable = !s_bluetooth_enabled;
+    state_unlock();
+
+    err = enable ? bluetooth_init() : bluetooth_stop();
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not %s Bluetooth: %s",
+                 enable ? "start" : "stop", esp_err_to_name(err));
+        if (enable)
+        {
+            /* bluetooth_init() may leave recoverable controller resources
+             * behind after a partial failure. Retry its idempotent teardown so
+             * the next knob hold can attempt a clean initialization. */
+            esp_err_t cleanup_err = bluetooth_stop();
+            if (cleanup_err != ESP_OK)
+            {
+                ESP_LOGW(TAG, "could not clean up failed Bluetooth start: %s",
+                         esp_err_to_name(cleanup_err));
+            }
+        }
+        bluetooth_lifecycle_unlock();
+        return;
+    }
+
+    state_lock();
+    s_bluetooth_enabled = enable;
+    display_set_bluetooth_indicator(enable);
+    if (!enable)
+    {
+        /* Removing the status dot exposes pixels from the old composition.
+         * Repaint the current base so disabling never leaves a scar. */
+        display_render_base_locked();
+    }
+    state_unlock();
+    bluetooth_lifecycle_unlock();
+    ESP_LOGI(TAG, "Bluetooth %s", enable ? "enabled" : "disabled");
+}
+
 static esp_err_t display_show_card_image_locked(const char *path)
 {
     esp_err_t err = render_image(path);
@@ -839,27 +907,45 @@ static bool power_reject_unqualified_wake(void)
 static void power_off(bool wait_for_button_release, bool hard_power_cut)
 {
     esp_err_t err;
+    bool release_vinhold;
 
-    /* Publish shutdown under the state lock, then release it before stopping
-     * HTTP. An in-flight admin callback may need this same mutex before
-     * httpd_stop() can join its task. */
+    /*
+     * Establish terminal state while owning the Bluetooth lifecycle lock.
+     * A toggle already in init/stop finishes first; a later toggle observes
+     * s_powered_off and cannot start another lifecycle operation.
+     */
+    bluetooth_lifecycle_lock();
     state_lock();
     if (s_powered_off)
     {
         state_unlock();
+        bluetooth_lifecycle_unlock();
         return;
     }
     s_powered_off = true;
+    s_pending_bluetooth_toggle = false;
     state_unlock();
     /* Sample power before disconnecting the charger/peripheral rails. */
-    bool release_vinhold = power_off_should_release_vinhold();
+    release_vinhold = power_off_should_release_vinhold();
 
+    /*
+     * Stop is idempotent while uninitialized and also retries teardown after a
+     * partial initialization failure, so terminal shutdown always invokes it.
+     */
     err = bluetooth_stop();
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "could not stop Bluetooth: %s",
                  esp_err_to_name(err));
     }
+
+    /* Shutdown is terminal even if teardown reports an error: publish an off
+     * UI/state before the panel and peripheral rails are removed. */
+    state_lock();
+    s_bluetooth_enabled = false;
+    display_set_bluetooth_indicator(false);
+    state_unlock();
+    bluetooth_lifecycle_unlock();
 
     /* Serialize lifecycle teardown separately from player state. HTTP handlers
      * may finish under s_state_mutex while admin_stop() joins the server task. */
@@ -1178,6 +1264,16 @@ static void encoder_cb(int encoder_id, int delta, encoder_event_t event)
         }
     }
     else if (event == ENCODER_EVT_LONG_PRESS &&
+             encoder_id == ENCODER_ID_1)
+    {
+        /* Bluetooth lifecycle calls can block and must not run on the
+         * encoder's small callback task. */
+        state_lock();
+        s_pending_bluetooth_toggle = !s_pending_bluetooth_toggle;
+        gesture_signal();
+        state_unlock();
+    }
+    else if (event == ENCODER_EVT_LONG_PRESS &&
              encoder_id == ENCODER_ID_POWER)
     {
         if (!gesture_debounced(&s_last_power_ticks, POWER_DEBOUNCE_MS))
@@ -1207,6 +1303,7 @@ static void encoder_actions_pump(void)
     int skip;
     bool power;
     bool screen_toggle_pending;
+    bool bluetooth_toggle_pending;
     bool stale;
 
     state_lock();
@@ -1216,6 +1313,8 @@ static void encoder_actions_pump(void)
     s_pending_power = false;
     screen_toggle_pending = s_pending_screen_toggle;
     s_pending_screen_toggle = false;
+    bluetooth_toggle_pending = s_pending_bluetooth_toggle;
+    s_pending_bluetooth_toggle = false;
     /* A skip belongs to the card that was loaded when the knob turned. The card
      * can be removed or swapped in between, and applying the turn to whatever
      * card arrived next would skip the wrong story. */
@@ -1226,6 +1325,10 @@ static void encoder_actions_pump(void)
     if (power)
     {
         power_off(true, false);
+    }
+    else if (bluetooth_toggle_pending)
+    {
+        bluetooth_toggle();
     }
     if (screen_toggle_pending)
     {
@@ -1822,7 +1925,9 @@ void app_main(void)
      * this main loop. */
     s_state_mutex = xSemaphoreCreateMutex();
     s_admin_lifecycle_mutex = xSemaphoreCreateMutex();
-    if (s_state_mutex == NULL || s_admin_lifecycle_mutex == NULL)
+    s_bluetooth_lifecycle_mutex = xSemaphoreCreateMutex();
+    if (s_state_mutex == NULL || s_admin_lifecycle_mutex == NULL
+        || s_bluetooth_lifecycle_mutex == NULL)
     {
         ESP_LOGE(TAG, "player mutex creation failed");
         return;
@@ -1908,9 +2013,9 @@ void app_main(void)
         s_volume_blip_signal = NULL;
     }
 
-    /* Deferred knob/power gestures run on their own task so they are not stuck
-     * behind the main loop's NFC poll. If it cannot start, the main loop still
-     * pumps them once per pass — slower, but nothing is lost. */
+    /* Deferred knob, Bluetooth, and power gestures run on their own task so
+     * they are not stuck behind the main loop's NFC poll. If it cannot start,
+     * the main loop still pumps them once per pass — slower, but nothing is lost. */
     s_gesture_signal = xSemaphoreCreateBinary();
     if (s_gesture_signal == NULL
         || xTaskCreate(gesture_task, "gesture", GESTURE_TASK_STACK_BYTES,
@@ -1933,7 +2038,6 @@ void app_main(void)
                              remote_stop_sound, remote_pause_sound,
                              remote_resume_sound, remote_clear_display);
     admin_set_card_write_callback(remote_write_card);
-    boot_require(BOOT_STAGE_BLUETOOTH, bluetooth_init());
 
     err = boot_recovery_clear();
     if (err != ESP_OK)

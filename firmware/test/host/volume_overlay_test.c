@@ -33,6 +33,10 @@
 #define BAR_Y0     195
 #define BAR_Y1     210
 #define BAR_WIDTH  168
+#define TEST_BT_DOT_X0    0
+#define TEST_BT_DOT_Y0    0
+#define TEST_BT_DOT_SIZE  12
+#define TEST_BT_DOT_COLOR 0x168BFF
 
 #define MAX_RECTS 4096
 
@@ -48,6 +52,7 @@ typedef struct
 static fill_rect_t s_all[MAX_RECTS];
 static int s_all_count;
 static int s_draw_start;
+static esp_err_t s_color64_begin_result = ESP_OK;
 
 static int s_failures;
 
@@ -106,7 +111,7 @@ esp_err_t gc9306_draw_rgb56516_full(const uint16_t pixels[16 * 16])
 
 esp_err_t gc9306_color64_begin(void)
 {
-    return ESP_OK;
+    return s_color64_begin_result;
 }
 
 esp_err_t gc9306_color64_write_row(const uint16_t pixels[64])
@@ -160,6 +165,27 @@ const char *esp_err_to_name(esp_err_t err)
 static int last_draw_rects(void)
 {
     return s_all_count - s_draw_start;
+}
+
+static void check_last_bluetooth_rect(uint32_t color, const char *path)
+{
+    CHECK(s_all_count > s_draw_start,
+          "%s did not draw the Bluetooth indicator", path);
+    if (s_all_count > s_draw_start)
+    {
+        const fill_rect_t *r = &s_all[s_all_count - 1];
+
+        CHECK(r->x0 == TEST_BT_DOT_X0
+              && r->x1 == TEST_BT_DOT_X0 + TEST_BT_DOT_SIZE - 1
+              && r->y0 == TEST_BT_DOT_Y0
+              && r->y1 == TEST_BT_DOT_Y0 + TEST_BT_DOT_SIZE - 1,
+              "%s Bluetooth rect is (%d,%d)..(%d,%d), want mirrored "
+              "top-right controller rect (0,0)..(11,11)",
+              path, r->x0, r->y0, r->x1, r->y1);
+        CHECK(r->color == color,
+              "%s Bluetooth rect color 0x%06x, want 0x%06x",
+              path, (unsigned)r->color, (unsigned)color);
+    }
 }
 
 static void draw(int volume)
@@ -429,6 +455,80 @@ int main(void)
         CHECK(black_covers == 1,
               "volume 25 black rect does not cover x %d..%d",
               BAR_X0, BAR_X1 - filled);
+    }
+
+    /* Bluetooth dot is blue at mirrored controller x=0 and survives every
+     * complete public render path that can overwrite its panel region. */
+    {
+        static uint8_t rgba[16 * 16 * 4];
+        static uint16_t rgb565[16 * 16];
+        static uint16_t color64_row[64];
+        static uint8_t full_mask[240 * 320 / 8];
+
+        s_draw_start = s_all_count;
+        display_set_bluetooth_indicator(true);
+        CHECK(last_draw_rects() == 1,
+              "enabling Bluetooth issued %d rects, want 1",
+              last_draw_rects());
+        check_last_bluetooth_rect(TEST_BT_DOT_COLOR, "enable");
+
+        s_draw_start = s_all_count;
+        display_flush();
+        check_last_bluetooth_rect(TEST_BT_DOT_COLOR, "bitmap flush");
+
+        s_draw_start = s_all_count;
+        display_show_rgba(rgba);
+        check_last_bluetooth_rect(TEST_BT_DOT_COLOR, "RGBA render");
+
+        s_draw_start = s_all_count;
+        CHECK(display_show_rgb56516(rgb565) == ESP_OK,
+              "RGB565 render failed");
+        check_last_bluetooth_rect(TEST_BT_DOT_COLOR, "RGB565 render");
+
+        s_draw_start = s_all_count;
+        CHECK(display_color64_begin() == ESP_OK, "color64 begin failed");
+        for (uint8_t y = 0; y < 64; y++)
+        {
+            CHECK(display_color64_write_row(y, color64_row) == ESP_OK,
+                  "color64 row %u failed", (unsigned)y);
+        }
+        CHECK(display_color64_end() == ESP_OK, "color64 end failed");
+        check_last_bluetooth_rect(TEST_BT_DOT_COLOR, "color64 render");
+
+        s_color64_begin_result = ESP_FAIL;
+        s_draw_start = s_all_count;
+        CHECK(display_color64_begin() == ESP_FAIL,
+              "color64 begin failure was not propagated");
+        check_last_bluetooth_rect(TEST_BT_DOT_COLOR,
+                                  "failed color64 begin");
+        s_color64_begin_result = ESP_OK;
+
+        s_draw_start = s_all_count;
+        display_show_mask_full(full_mask, 0xFFFFFF, 0x000000);
+        check_last_bluetooth_rect(TEST_BT_DOT_COLOR, "full-mask render");
+
+        s_draw_start = s_all_count;
+        display_show_access_code("ABC123");
+        check_last_bluetooth_rect(TEST_BT_DOT_COLOR, "access-code render");
+
+        /* Disabling is allocation- and transfer-free; the app repaints its
+         * current base immediately after changing composition state. */
+        s_draw_start = s_all_count;
+        display_set_bluetooth_indicator(false);
+        CHECK(last_draw_rects() == 0,
+              "disabling Bluetooth issued %d unexpected rects",
+              last_draw_rects());
+
+        s_draw_start = s_all_count;
+        display_show_rgba(rgba);
+        CHECK(last_draw_rects() == 0,
+              "disabled Bluetooth indicator was redrawn over RGBA base");
+
+        s_draw_start = s_all_count;
+        CHECK(display_show_rgb56516(rgb565) == ESP_OK,
+              "post-disable RGB565 render failed");
+        CHECK(last_draw_rects() == 0,
+              "disabled Bluetooth indicator was redrawn");
     }
 
     if (s_failures != 0)

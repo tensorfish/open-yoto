@@ -18,6 +18,7 @@ typedef unsigned int UBaseType_t;
 #define portMAX_DELAY ((TickType_t)0xffffffffUL)
 
 #define pdTRUE ((BaseType_t)1)
+#define pdFALSE ((BaseType_t)0)
 #define pdPASS ((BaseType_t)1)
 
 #endif /* HOST_STUB_FREERTOS_H */

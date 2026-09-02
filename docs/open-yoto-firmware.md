@@ -38,12 +38,13 @@ flowchart TD
 2. **Looks up that URL** in a file on the SD card (`mapping.json`).
 3. **Plays the matching audio** (MP3) and **shows the matching picture**
    (legacy or color 16×16; older replacement OYIM 64×64 remains readable).
-4. The two knobs control **volume** (left) and **track skip** (right); pressing
-   them **pauses**. Long-pressing the right knob or the power button turns the
-   device **off/on**. Turning the right knob with no card loaded winks the face;
-   turning the left knob shows a volume bar redrawn at most once per 100 ms with
-   the newest level. Turning both composes: the bar is re-applied over each wink
-   frame instead of the two screens taking turns.
+4. The two knobs control **volume** (left) and **track skip** (right); a short
+   press on either knob toggles **play/pause**. Holding the right knob for three
+   seconds toggles Bluetooth, while holding the dedicated power button for
+   three seconds turns the device off. Turning the right knob with no card
+   loaded winks the face; turning the left knob shows a volume bar redrawn at
+   most once per 100 ms with the newest level. Turning both composes: the bar is
+   re-applied over each wink frame instead of the two screens taking turns.
 5. On boot, starts the open `openyoto` hotspot and web UI. A random
    six-character alphanumeric code is shown as two rows of three glyphs. Rev
    #04 renders a native 5×7 font at 9× scale inside the panel's verified
@@ -84,6 +85,8 @@ On power-up, in order:
    ends.
 7. Initialize the NFC reader and rotary encoders/buttons.
 8. Mount the SD card and load the optional content catalog.
+9. Leave Classic Bluetooth off until the user enables it with a three-second
+   hold of the right knob.
 
 Admin services remain off at boot. Scanning the exact admin magic URL starts
 the `openyoto` SoftAP, creates a six-character code, and starts the HTTP server
@@ -121,6 +124,7 @@ The knobs/buttons are handled as events (not polled in the main loop):
 | Left knob turn | volume (5 per click, 0–100); bar redraw coalesced to 100 ms, plus one 45 ms 880 Hz blip per detent when nothing is playing |
 | Right knob turn | skip track (wraps around); with no card, winks the face |
 | Either knob press (short) | play / pause |
+| Right knob hold (3 s) | toggle Classic Bluetooth on/off |
 | Power button press | toggle only the screen; screen-on shows the current battery icon |
 | Power button hold (3 s) | stop playback/admin, blank the display, disconnect the amp and downstream rails, then enter the board-specific terminal state |
 
@@ -144,6 +148,11 @@ low-battery warning) plus **transients** that expire back onto it: the wink
 (300 ms), the volume bar (1.5 s after the last detent), and the battery glimpse
 (5 s). Transients compose rather than pre-empt each other — every icon frame
 re-applies a live volume bar — and each expiry repaints the base underneath.
+
+When Bluetooth is enabled, its status indicator remains visible over every
+base screen and transient: a blue dot at the physical top-right on the rev #04
+color display, or the top-right LED on the monochrome rev #05 display. Disabling
+Bluetooth redraws the current display without the indicator.
 
 Volume feedback is audible as well as visual. With nothing playing, a volume
 change makes no sound at all, so a dedicated task plays one short sine blip per
@@ -232,12 +241,14 @@ Phone A2DP ─────> Bluedroid SBC ─────> bounded PCM worker �
   and channels drive stereo downmix and stateful 8–96 kHz conversion to the
   oracle's fixed 44.1 kHz mono sink; bounded PCM gain affects speaker and
   headphone output.
-- The Classic Bluetooth A2DP sink advertises as `Open Yoto`. Its callback
-  copies Bluedroid's borrowed decoded-SBC PCM into a bounded ring; a dedicated
-  worker performs resampling and blocking I²S writes through the same volume
-  and amplifier path. Disconnect and shutdown cancel and drain that session
-  before deinitializing Bluetooth. Explicit audio-source ownership prevents
-  local content and Bluetooth from writing I²S concurrently.
+- Classic Bluetooth is off at boot. Holding the right knob for three seconds
+  enables or disables the A2DP sink; while enabled, it advertises as
+  `Open Yoto`. Its callback copies Bluedroid's borrowed decoded-SBC PCM into a
+  bounded ring; a dedicated worker performs resampling and blocking I²S writes
+  through the same volume and amplifier path. Disconnect, explicit disable, and
+  shutdown cancel and drain that session before deinitializing Bluetooth.
+  Explicit audio-source ownership prevents local content and Bluetooth from
+  writing I²S concurrently.
 - Rev #04 uses one AW88194A at 7-bit `0x34`. The replacement reproduces the
   factory ET6416 reset, register table, SmartK firmware/configuration, VCALB,
   DSP/I²S/PLL checks, interrupt setup, and hard-unmute.
