@@ -285,8 +285,8 @@ static void show_admin_code(
  * and the main loop). Set before rail shutdown so concurrent tasks stop
  * producing work while the ESP32 is entering deep sleep. */
 static bool s_powered_off = false;
-/* The stock shutdownTimeout default is 3600 seconds (range 30..10800). */
-#define IDLE_POWER_OFF_MS (60u * 60u * 1000u)
+/* User standby policy; stock defaults to an hour. */
+#define IDLE_POWER_OFF_MS (30u * 60u * 1000u)
 static TickType_t s_last_activity_ticks;
 /* Stock exposes separate start/flat thresholds: the schema fixes startup at
  * 4% but leaves the flat default indirect. Keep a conservative 3% replacement
@@ -804,33 +804,27 @@ static void play_pause_toggle(void)
 }
 
 /*
- * Stock hardware family v3 (the rev #04 configuration) releases VIN_HOLD
- * whenever external power is absent. Family v3e (rev #05) never releases it;
- * that board retains the latch and uses ESP32 deep sleep instead.
- *
- * The stock external-power predicate returns false when the charger object is
- * unavailable, so an unreadable rev #04 power state follows the safe hard-off
- * path rather than keeping a depleted unit alive.
+ * Stock FUN_40103a24 releases VIN_HOLD on battery for both supported families
+ * (v3/rev #04 and v3e/rev #05). Reserve that physical cutoff for a depleted
+ * battery; user/idle standby must retain the ESP and button wake domain.
  */
 static bool power_off_should_release_vinhold(void)
 {
-#ifdef CONFIG_BOARD_REV_04
     battery_snapshot_t snapshot;
 
     return battery_get_snapshot(&snapshot) != ESP_OK
         || !snapshot.external_power_present;
-#else
-    return false;
-#endif
 }
 
-static void power_enter_retained_deep_sleep(const char *reason)
+static void power_enter_deep_sleep(const char *reason, bool release_vinhold)
 {
     esp_err_t err = iox_prepare_power_button_wake();
     if (err != ESP_OK && err != ESP_ERR_NOT_SUPPORTED)
     {
-        ESP_LOGW(TAG, "could not prepare IOX wake: %s",
+        ESP_LOGE(TAG, "could not prepare IOX wake: %s",
                  esp_err_to_name(err));
+        esp_restart();
+        return;
     }
 
     /* Reading every input port clears pending IOX transitions before GPIO34
@@ -843,11 +837,17 @@ static void power_enter_retained_deep_sleep(const char *reason)
     (void)iox_read_port(1, 0, &ignored);
     (void)iox_read_port(1, 1, &ignored);
 #endif
-    err = esp_sleep_enable_ext0_wakeup(PIN_IOX_INT, 0);
+    /* Stock FUN_40103cf8 uses EXT1 ALL_LOW on the direct ioxInt GPIO.
+     * With one pin selected, this is the expander's active-low interrupt. */
+    err = esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_IOX_INT,
+                                          ESP_EXT1_WAKEUP_ALL_LOW);
     if (err != ESP_OK)
     {
-        ESP_LOGW(TAG, "could not arm power-button wake: %s",
+        /* Never strand a retained-power unit asleep without a wake source. */
+        ESP_LOGE(TAG, "could not arm power-button wake: %s",
                  esp_err_to_name(err));
+        esp_restart();
+        return;
     }
     err = rtc_gpio_isolate(GPIO_NUM_12);
     if (err != ESP_OK)
@@ -856,24 +856,49 @@ static void power_enter_retained_deep_sleep(const char *reason)
                  esp_err_to_name(err));
     }
 
-    ESP_LOGI(TAG, "%s: VIN_HOLD retained; entering deep sleep", reason);
+    /* Arm wake before attempting the physical cut: a charger plugged in at
+     * this point, or a latch that stays powered, must not strand the ESP in
+     * unwakeable sleep. A real power loss instead resumes through cold boot. */
+    if (release_vinhold)
+    {
+        ESP_LOGI(TAG, "critical power-down: releasing VIN_HOLD");
+        err = iox_set_pin(IOX_POWER_VINHOLD, false);
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "could not release VIN_HOLD: %s",
+                     esp_err_to_name(err));
+        }
+    }
+
+    ESP_LOGI(TAG, "%s: entering wakeable deep sleep", reason);
     esp_deep_sleep_start();
+}
+
+static bool power_button_pressed(void)
+{
+    uint8_t inputs;
+
+    /* A failed I2C read is not an active-low press. In particular, it must
+     * neither qualify a spurious wake nor stall the button-release wait. */
+    return iox_read_port(IOX_EXP(IOX_BTN_POWER), IOX_PORT(IOX_BTN_POWER),
+                         &inputs) == ESP_OK
+        && (inputs & (1u << IOX_BIT(IOX_BTN_POWER))) == 0;
 }
 
 /*
  * A retained-latch wake resets the ESP as soon as GPIO34 falls. Match the
- * stock post-reset qualifier: an EXT0 wake becomes a real boot only if the
+ * stock post-reset qualifier: an EXT1 wake becomes a real boot only if the
  * active-low power button remains held for two seconds.
  */
 static bool power_wake_is_qualified(void)
 {
-    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT0)
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT1)
     {
         return true;
     }
 
     TickType_t started = xTaskGetTickCount();
-    while (!iox_get_pin(IOX_BTN_POWER))
+    while (power_button_pressed())
     {
         if ((TickType_t)(xTaskGetTickCount() - started)
                 >= pdMS_TO_TICKS(POWER_WAKE_HOLD_MS))
@@ -895,14 +920,14 @@ static bool power_reject_unqualified_wake(void)
     ESP_LOGI(TAG, "unqualified deep-sleep wake; returning to standby");
     (void)iox_set_pin(IOX_AUDIO_PACTRL, false);
     (void)iox_set_peripherals_powered(false);
-    power_enter_retained_deep_sleep("unqualified wake");
+    power_enter_deep_sleep("unqualified wake", false);
     return true;
 }
 
 /*
- * All terminal requests share the stock teardown. The final disposition is
- * board/power-source specific: rev #04 cuts VIN_HOLD on battery and otherwise
- * deep-sleeps; rev #05 always retains VIN_HOLD and deep-sleeps.
+ * User/idle requests disconnect loads but retain the button wake domain.
+ * Only battery protection may release VIN_HOLD. Deep sleep resets into normal
+ * initialization on a qualified wake.
  */
 static void power_off(bool wait_for_button_release, bool hard_power_cut)
 {
@@ -926,7 +951,7 @@ static void power_off(bool wait_for_button_release, bool hard_power_cut)
     s_pending_bluetooth_toggle = false;
     state_unlock();
     /* Sample power before disconnecting the charger/peripheral rails. */
-    release_vinhold = power_off_should_release_vinhold();
+    release_vinhold = hard_power_cut && power_off_should_release_vinhold();
 
     /*
      * Stop is idempotent while uninitialized and also retries teardown after a
@@ -974,17 +999,13 @@ static void power_off(bool wait_for_button_release, bool hard_power_cut)
     display_render_base_locked();
     state_unlock();
 
-    if (wait_for_button_release)
-    {
-        /* The expander IRQ is level-low until its input port is read. Waiting
-         * for release prevents an externally-powered unit from immediately
-         * waking from the same long press that requested shutdown. */
-        while (!iox_get_pin(IOX_BTN_POWER))
-        {
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-    }
 
+    err = lis2dh12_power_down();
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "could not power down accelerometer: %s",
+                 esp_err_to_name(err));
+    }
     (void)iox_set_pin(IOX_AUDIO_PACTRL, false);
     err = iox_set_peripherals_powered(false);
     if (err != ESP_OK)
@@ -992,31 +1013,20 @@ static void power_off(bool wait_for_button_release, bool hard_power_cut)
         ESP_LOGW(TAG, "could not disconnect peripheral rails: %s",
                  esp_err_to_name(err));
     }
-
-    if (release_vinhold)
+    if (wait_for_button_release)
     {
-        err = rtc_gpio_isolate(GPIO_NUM_12);
-        if (err != ESP_OK)
+        /* The expander IRQ is level-low until its input port is read. Waiting
+         * for release prevents an externally-powered unit from immediately
+         * waking from the same long press that requested shutdown. */
+        while (power_button_pressed())
         {
-            ESP_LOGW(TAG, "could not isolate GPIO12 for power-down: %s",
-                     esp_err_to_name(err));
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
-        ESP_LOGI(TAG, "%s: releasing VIN_HOLD",
-                 hard_power_cut ? "critical power-down" : "stock power-down");
-        err = iox_set_pin(IOX_POWER_VINHOLD, false);
-        if (err != ESP_OK)
-        {
-            ESP_LOGW(TAG, "could not release VIN_HOLD: %s",
-                     esp_err_to_name(err));
-        }
-        /* If the external latch does not remove power, deep sleep is the stock
-         * terminal fallback. */
-        esp_deep_sleep_start();
-        return;
     }
 
-    power_enter_retained_deep_sleep(
-        hard_power_cut ? "critical power-down" : "stock power-down");
+    power_enter_deep_sleep(
+        hard_power_cut ? "critical power-down" : "battery-saving standby",
+        release_vinhold);
 }
 
 static void activity_note(void)
@@ -1043,7 +1053,7 @@ static void idle_power_check(void)
         return;
     }
 
-    ESP_LOGI(TAG, "one hour inactive; powering off");
+    ESP_LOGI(TAG, "30 minutes inactive; entering battery-saving standby");
     power_off(false, false);
 }
 
@@ -1940,6 +1950,11 @@ void app_main(void)
     {
         return;
     }
+    /* GPIO12 isolation holds SD D2 disconnected across deep-sleep reset.
+     * Release it before SD initialization; return the wake pad to GPIO too. */
+    ESP_ERROR_CHECK(rtc_gpio_hold_dis(GPIO_NUM_12));
+    ESP_ERROR_CHECK(rtc_gpio_deinit(GPIO_NUM_12));
+    ESP_ERROR_CHECK(rtc_gpio_deinit(PIN_IOX_INT));
     boot_require(BOOT_STAGE_BATTERY, battery_init());
     if (lis2dh12_init() != ESP_OK)
     {

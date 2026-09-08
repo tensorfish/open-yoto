@@ -24,11 +24,11 @@
 
 #define IOX_BTN_ENC0_PUSH 9
 #define IOX_BTN_ENC1_PUSH 10
-#ifdef HOST_IOX_WAKE_TEST
 #define IOX_PIN(exp, port, bit) (((exp) << 6) | ((port) << 4) | (bit))
 #define IOX_EXP(x) (((x) >> 6) & 0x03)
 #define IOX_PORT(x) (((x) >> 4) & 0x03)
 #define IOX_BIT(x) ((x) & 0x0F)
+#ifdef HOST_IOX_WAKE_TEST
 #define IOX_BTN_POWER IOX_PIN(0, 1, 3)
 #ifdef CONFIG_BOARD_REV_04
 #define IOX_AUDIO_PACTRL IOX_PIN(0, 0, 6)

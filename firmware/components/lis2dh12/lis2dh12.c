@@ -47,3 +47,9 @@ esp_err_t lis2dh12_init(void)
              I2C_ADDR_ACCELEROMETER);
     return ESP_OK;
 }
+
+esp_err_t lis2dh12_power_down(void)
+{
+    /* ODR=0000 stops measurements; no motion wake is used in standby. */
+    return lis2dh12_write(LIS2DH12_REG_CTRL1, 0x00);
+}

@@ -167,6 +167,12 @@ int main(void)
           "shutdown did not preserve config bits while tri-stating PWREN");
     CHECK((s_registers[power_exp][output_reg] & power_mask) != 0,
           "shutdown actively changed the PWREN output latch");
+#ifndef CONFIG_BOARD_REV_04
+    CHECK((s_registers[IOX_EXP(IOX_POWER_VOUTEN)]
+                      [IOX_REG_CONFIG_0 + IOX_PORT(IOX_POWER_VOUTEN)]
+           & (1u << IOX_BIT(IOX_POWER_VOUTEN))) != 0,
+          "standby must release VOUTEN instead of holding its rail off");
+#endif
 
     const uint8_t power_on_config = (uint8_t)(0xA5 | power_mask);
     const uint8_t powered_latch = (uint8_t)(0xFF & (uint8_t)~power_mask);
@@ -188,6 +194,15 @@ int main(void)
           "power-on did not preload PWREN immediately before enabling output");
     CHECK(s_registers[power_exp][config_reg] == powered_config,
           "power-on did not preserve unrelated PWREN config bits");
+#ifndef CONFIG_BOARD_REV_04
+    CHECK((s_registers[IOX_EXP(IOX_POWER_VOUTEN)]
+                      [IOX_REG_CONFIG_0 + IOX_PORT(IOX_POWER_VOUTEN)]
+           & (1u << IOX_BIT(IOX_POWER_VOUTEN))) == 0
+          && (s_registers[IOX_EXP(IOX_POWER_VOUTEN)]
+                         [IOX_REG_OUTPUT_0 + IOX_PORT(IOX_POWER_VOUTEN)]
+              & (1u << IOX_BIT(IOX_POWER_VOUTEN))) != 0,
+          "power-on must restore VOUTEN high after standby");
+#endif
 
     if (s_failures != 0)
     {

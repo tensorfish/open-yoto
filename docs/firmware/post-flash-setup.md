@@ -171,6 +171,24 @@ For firmware changes, follow [updates and recovery](flash-custom-firmware.md#upd
 The `/upload` installer only replaces HTML on the SD card; it cannot update
 firmware or provide an OTA rollback.
 
+## Power, standby, and recharging
+
+- Hold the **power button for three seconds** to enter battery-saving standby.
+  The player also enters standby after **30 minutes idle**; playback and an active
+  admin session defer that timer.
+- Hold power for **two seconds** to turn it on again, then release the button.
+- After the battery runs flat, connect a suitable charger and allow it to recover.
+  Battery-only startup requires **at least 4% charge**. With valid external power,
+  the firmware permits startup even when the gauge reports 0%.
+- Press power to start after charging; plugging in the charger is not guaranteed
+  to start playback or boot automatically.
+
+Depleted-battery shutdown arms button wake before attempting the physical power
+cut, so a surviving deep-sleep fallback does not become unresponsive. These paths
+have host regression coverage, but actual discharge/recharge and standby-current
+verification require hardware. See [Power & battery](../subsystems/power.md#recovery-after-battery-depletion)
+for the recovery sequence and limitations.
+
 ## Troubleshooting
 
 ### The `openyoto` hotspot does not appear

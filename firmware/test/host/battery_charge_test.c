@@ -86,6 +86,13 @@ esp_err_t i2c_master_write_read_device(i2c_port_t port, uint8_t address,
 {
     (void)port;
     (void)timeout;
+    if (address == I2C_ADDR_FUEL_GAUGE && write_size == 1
+        && read_size > 0 && read_size <= 2
+        && (size_t)write_buffer[0] + read_size <= sizeof(s_gauge_registers))
+    {
+        memcpy(read_buffer, &s_gauge_registers[write_buffer[0]], read_size);
+        return ESP_OK;
+    }
     if (write_size != 1 || read_size != 1)
     {
         return ESP_FAIL;
@@ -94,11 +101,6 @@ esp_err_t i2c_master_write_read_device(i2c_port_t port, uint8_t address,
     {
         s_charger_reads++;
         read_buffer[0] = s_charger_registers[write_buffer[0]];
-        return ESP_OK;
-    }
-    if (address == I2C_ADDR_FUEL_GAUGE)
-    {
-        read_buffer[0] = s_gauge_registers[write_buffer[0]];
         return ESP_OK;
     }
     if (address == I2C_ADDR_PD_SINK && s_pd_responds)
@@ -116,6 +118,11 @@ esp_err_t i2c_master_write_to_device(i2c_port_t port, uint8_t address,
 {
     (void)port;
     (void)timeout;
+    if (address == I2C_ADDR_FUEL_GAUGE && write_size == 2)
+    {
+        s_gauge_registers[write_buffer[0]] = write_buffer[1];
+        return ESP_OK;
+    }
     if (address != 0x1A || !s_charger_responds
         || write_size != 2)
     {
@@ -390,6 +397,33 @@ static void test_stock_low_battery_threshold(void)
           "SOC above stock warning threshold was considered low");
 }
 
+static void test_depleted_battery_boot_on_usb(void)
+{
+    reset_model();
+    /* A reset fuel gauge needs its profile restored, even when SOC is zero.
+     * Model a recoverable depleted cell at 2.5 V, not a physically failed cell. */
+    s_gauge_registers[CW2215B_REG_ID] = CW2215B_CHIP_ID;
+    s_gauge_registers[CW2215B_REG_IC_STATE] = CW2215B_IC_READY_MASK;
+    s_gauge_registers[CW2215B_REG_VCELL] = 0x1F;
+    s_gauge_registers[CW2215B_REG_VCELL + 1] = 0x40;
+    s_charger_registers[SGM41513_REG_STATUS] =
+        SGM41513_PG_STAT | SGM41513_CHRG_STAT_PRECHARGE;
+    s_charger_registers[SGM41513_REG_MISC_CONTROL] = SGM41513_BATFET_DIS;
+
+    CHECK(battery_init() == ESP_OK,
+          "depleted boot: zero SOC prevented battery initialization");
+    battery_snapshot_t snapshot;
+    CHECK(battery_get_snapshot(&snapshot) == ESP_OK
+          && snapshot.soc_percent == 0 && snapshot.external_power_present,
+          "depleted boot: USB-powered empty battery was not valid startup data");
+    CHECK(battery_is_charging()
+          && (s_charger_registers[SGM41513_REG_POWER_ON]
+              & SGM41513_CHG_CONFIG) != 0
+          && (s_charger_registers[SGM41513_REG_MISC_CONTROL]
+              & SGM41513_BATFET_DIS) == 0,
+          "depleted boot: fresh USB input did not restore battery charging");
+}
+
 int main(void)
 {
     CHECK(I2C_ADDR_CHARGER == 0x1A,
@@ -403,6 +437,7 @@ int main(void)
     test_status_read_failure_preserves_known_state();
 
     test_stock_low_battery_threshold();
+    test_depleted_battery_boot_on_usb();
     if (s_failures != 0)
     {
         fprintf(stderr, "%d charger test(s) failed\n", s_failures);

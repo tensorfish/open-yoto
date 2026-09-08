@@ -7,5 +7,6 @@
 #include "esp_err.h"
 
 esp_err_t lis2dh12_init(void);
+esp_err_t lis2dh12_power_down(void);
 
 #endif /* HOST_STUB_LIS2DH12_H */

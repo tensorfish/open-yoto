@@ -282,6 +282,25 @@ int main(void)
     check_short_release(ENCODER_ID_1, 3000);
     check_short_release(ENCODER_ID_POWER, 3000);
 
+    /* The power-on hold belongs to boot, not the next shutdown gesture. */
+    reset_buttons();
+    s_pin_levels[IOX_BTN_POWER] = false;
+    CHECK(encoder_init() == ESP_OK, "encoder initialization failed");
+    for (unsigned ms = 0; ms < 6000; ms += ENCODER_BTN_POLL_MS)
+    {
+        encoder_poll_buttons();
+        s_now += ENCODER_BTN_POLL_MS;
+    }
+    debounce_release(ENCODER_ID_POWER);
+    CHECK(s_event_count[ENCODER_ID_POWER] == 0,
+          "wake hold/release emitted a shutdown or screen toggle");
+    TickType_t accepted = debounce_press(ENCODER_ID_POWER);
+    s_now = accepted + 3000;
+    encoder_poll_buttons();
+    CHECK(s_event_count[ENCODER_ID_POWER] == 1
+          && s_last_event[ENCODER_ID_POWER] == ENCODER_EVT_LONG_PRESS,
+          "fresh power hold after wake did not request standby");
+
     if (s_failures != 0)
     {
         fprintf(stderr, "encoder hold test: %d assertion(s) failed\n",

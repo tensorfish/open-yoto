@@ -122,47 +122,66 @@ and never clears a latched `BATFET_DIS`, which can represent discharge
 over-current protection. UI state comes from `CHRG_STAT`, not the board's
 unreliable raw status pins.
 
-## Replacement firmware shutdown
+## Replacement firmware standby
 
-The replacement now follows the stock terminal-power policy instead of keeping
-the CPU in a 100 ms light-sleep polling loop. A three-second power-button hold
-and the stock **one-hour** inactivity default share one serialized shutdown
-path:
+A **three-second power-button hold** or **30 minutes idle** enters one
+serialized, wakeable battery-saving state on rev #04 and rev #05:
 
-1. Publish shutdown, stop the admin server without holding the player mutex,
-   stop audio, and blank the display.
-2. Wait for a held power button to be released.
-3. Disable the amplifier and downstream rails.
-4. Choose the stock board-specific terminal disposition:
-   - **rev #04 / stock `v3` path:** when running from battery, isolate GPIO12,
-     release `VIN_HOLD`, and enter deep sleep as a fallback if the latch does
-     not remove power. If external power is present, retain `VIN_HOLD`, clear
-     stale ET6416 input transitions, arm active-low GPIO34, and deep-sleep.
-   - **rev #05 / stock `v3e` path:** always retain `VIN_HOLD`, unmask the
-     PI4IOE5V6416 power-button input, clear stale transitions, arm GPIO34, and
-     deep-sleep.
+1. Publish shutdown and stop Bluetooth/admin without holding the player mutex
+   across service teardown; stop audio and blank the display.
+2. Power down the LIS2DH12 accelerometer before disabling the level converter.
+3. Disable the amplifier, tri-state active-low `PWREN` and rev #05 `VOUTEN`,
+   and leave `VIN_HOLD` asserted. Wait for the power button to be released.
+4. Clear stale IOX input transitions, unmask the rev #05 power-button interrupt,
+   arm GPIO34 EXT1 `ALL_LOW`, isolate GPIO12, and enter deep sleep. If wake
+   setup fails, restart rather than sleeping without a working wake source.
 
-After an EXT0 deep-sleep reset, the replacement samples the active-low power
-button every 250 ms and requires the stock normal two-second hold. A released
-or spurious wake disconnects the restored rails and returns to deep sleep
-before battery, display, audio, NFC, or SD initialization.
+**Hold the power button for two seconds to turn it on again.** EXT1 wakes poll
+the button every 250 ms; released/spurious interrupts and failed I2C reads
+cannot qualify a boot. A rejected wake disconnects restored rails and sleeps
+again before battery/display/audio/NFC/SD driver initialization. A qualified boot
+releases GPIO12 isolation so rev #04 SD D2 works again. The encoder consumes a
+power button already held at startup through release, preventing a second
+shutdown from the same wake gesture.
 
-Encoder activity and NFC insertion/removal restart the one-hour interval.
-Playback and an active admin session defer shutdown. This terminal state—not
-automatic ESP light sleep—is what eliminates the active CPU/peripheral load.
+Encoder activity and NFC insertion/removal restart the 30-minute interval.
+Playback and an active admin session defer standby. This is ESP deep sleep,
+not a periodic light-sleep button-polling loop. Retaining `VIN_HOLD` on battery
+is an intentional departure from stock physical-off behavior: normal “off”
+keeps the ESP/button wake domain alive instead of relying on a physical re-latch.
+Standby current and physical wake reliability still need measurement on hardware.
 
 Stock settings fix normal battery-only startup at 4% SOC and the low-battery
 warning at 7%. The stock schema exposes a separate `BATT_THRS_FLAT` but does
 not embed its product/profile-specific default. The replacement conservatively
 uses 3%: two consecutive fresh five-second samples at or below that value force
-the same terminal transition only when a contemporaneous SGM41513 read reports
-`PG_STAT=0`. Invalid I²C samples, noncritical SOC, and external power clear the
-confirmation streak. On rev #04 this battery-only path releases `VIN_HOLD`; on
-rev #05 the hardware branch retains the latch and deep-sleeps.
+the battery-protection transition only when a contemporaneous SGM41513 read
+reports `PG_STAT=0`. Invalid I²C samples, noncritical SOC, and external power
+clear the confirmation streak. This depleted-battery path releases `VIN_HOLD`
+on both revisions; it is distinct from normal wakeable standby.
+
+### Recovery after battery depletion
+
+Depletion is not a persistent firmware lockout. After charging, hold power for
+two seconds to start the player. Battery-only startup requires at least 4% SOC;
+with valid external power, even a reported 0% SOC is accepted. The SGM41513
+supports autonomous precharge and system power with a depleted battery, so
+charging does not depend on the player application already running. A damaged
+cell, unsafe temperature, or inadequate power source can still prevent recovery.
+
+The shutdown sequence arms GPIO34 wake **before** releasing `VIN_HOLD`. If
+power actually disappears, the next startup is a cold boot. If the latch remains
+powered or a charger is connected during cutoff, the deep-sleep fallback retains
+button wake instead of sleeping with no wake source. No automatic boot-on-charge
+behavior is promised; use the power button.
+
+Host regressions cover depleted shutdown fallback, charged cold-start eligibility,
+USB-powered zero-SOC wake, and real charger/gauge initialization against a
+register model after reset. Physical discharge/recharge remains a hardware check.
 
 ## Original firmware reference
 
-The behavior above was recovered from
+The original behavior below was recovered from
 `~/Downloads/yoto-player-v2.bin` (SHA-256
 `1db52091f892e05a9aec97605890b406f6734213214afef792e247353a75449e`)
 with Ghidra 12.0.4. Reproducible artifacts are under
@@ -180,11 +199,16 @@ Key stock findings:
   download/audio/TDMA/NFC/Wi-Fi/display/UI state, isolates RTC GPIO12, and then
   selects physical unlatch or ESP deep sleep.
 - The hardware-family getter maps `2=v2`, `3=mini`, `4=v3`, `5=v2rev3`,
-  `6=minie`, and `7=v3e`. Its terminal predicate always unlatches `v2`,
-  unlatches `v3` only without external power, and never unlatches `v3e`.
+  `6=minie`, and `7=v3e`. `FUN_40103a24` always unlatches `v2`/`v2rev3`;
+  families `v3`, `minie`, and `v3e` all unlatch only without external power.
+  Both supported rev #04 and rev #05 therefore physically unlatch on battery.
 - `FUN_401036e8` disables amps, puts the accelerometer into low-power mode, and
   changes unused IO-expander pins to inputs while preserving required power,
   charger, display, and interrupt outputs.
+- `FUN_40103cf8` arms a 64-bit GPIO mask with mode 0, matching EXT1 `ALL_LOW`.
+  Both embedded board configs specify `ioxInt=GPIO.34`; the physical power
+  button is `IOX.1.3`. The unsupported case is an IOX descriptor for `ioxInt`
+  itself, not the supported expander interrupt wired to a direct ESP GPIO.
 - Deep-sleep reset enters a wake-qualification loop in `FUN_40104808`. It polls
   in 250 ms steps, normally requires a two-second held power button, accepts
   RTC `AR_USER`/`AR_TEST` alarms, and sends unqualified wakeups back to sleep.

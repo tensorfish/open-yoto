@@ -182,7 +182,9 @@ esp_err_t iox_set_peripherals_powered(bool powered)
         err = iox_set_pin_direction(IOX_POWER_PWREN, false);
         if (err != ESP_OK) return err;
 #ifndef CONFIG_BOARD_REV_04
-        err = iox_set_pin(IOX_POWER_VOUTEN, false);
+        /* Stock releases VOUTEN as well as PWREN; driving it LOW can prevent
+         * the hardware button/latch from restoring the downstream supply. */
+        err = iox_set_pin_direction(IOX_POWER_VOUTEN, false);
         if (err != ESP_OK) return err;
 #endif
         return ESP_OK;
@@ -192,6 +194,8 @@ esp_err_t iox_set_peripherals_powered(bool powered)
     if (err != ESP_OK) return err;
 #ifndef CONFIG_BOARD_REV_04
     err = iox_set_pin(IOX_POWER_VOUTEN, true);
+    if (err != ESP_OK) return err;
+    err = iox_set_pin_direction(IOX_POWER_VOUTEN, true);
     if (err != ESP_OK) return err;
 #endif
     /* PWREN is active-low. Preload its latch before enabling the output so

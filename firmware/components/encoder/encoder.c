@@ -370,6 +370,17 @@ esp_err_t encoder_init(void)
     err = encoder_setup_unit(&s_encoders[1], ENCODER_ID_1, PIN_ENC1_A, PIN_ENC1_B);
     if (err != ESP_OK) return err;
 
+    /* A button already held during startup is the wake gesture. Consume it
+     * through release so it cannot immediately switch the player off again. */
+    if (encoder_button_read(ENCODER_ID_POWER))
+    {
+        s_buttons[ENCODER_ID_POWER] = (encoder_button_t){
+            .pressed = true,
+            .count = ENCODER_BTN_SAMPLES,
+            .long_fired = true,
+        };
+    }
+
     if (xTaskCreate(encoder_task, "encoder", ENCODER_TASK_STACK_BYTES,
                     NULL, 5, &s_encoder_task) != pdPASS)
     {

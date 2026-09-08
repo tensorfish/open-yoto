@@ -296,17 +296,17 @@ The Ghidra control-flow recovery establishes:
    UI state. It then isolates RTC GPIO12 and chooses physical unlatch or ESP
    deep sleep.
 4. The hardware-family getter maps `2=v2`, `3=mini`, `4=v3`, `5=v2rev3`,
-   `6=minie`, and `7=v3e`. The terminal predicate always unlatches `v2`,
-   unlatches `v3` only when external power is absent, and never unlatches
-   `v3e`. Thus the supported rev #04 (`v3`) cuts `VIN_HOLD` on battery, whereas
-   the supported rev #05 (`v3e`) retains the latch and deep-sleeps.
+   `6=minie`, and `7=v3e`. `FUN_40103a24` always unlatches families 2 and 5;
+   families 4, 6, and 7 all return the inverse of external-power presence.
+   Thus both supported rev #04 (`v3`) and rev #05 (`v3e`) cut `VIN_HOLD` on
+   battery and retain it when externally powered.
 5. `FUN_401036e8` performs the final low-power hardware transition: amps off,
    accelerometer low-power mode, and unused IO-expander pins changed to inputs
    while preserving required power, charger, display, and interrupt outputs.
-6. Retained-latch paths arm a wake source before deep sleep. The analyzed
-   routines show a supported direct active-low pin path and an unsupported
-   IO-expander-specific case; the indirect ESP-IDF calls do not expose a
-   trustworthy numeric RTC GPIO in this report.
+6. `FUN_40103cf8` constructs `1ULL << ioxInt` and passes mode 0 to the
+   ESP-IDF wake API at `0x401775c4`, identifying EXT1 `ALL_LOW`, not EXT0.
+   Both embedded rev #04/#05 configs set `ioxInt=GPIO.34`. A direct GPIO
+   descriptor is supported; an IOX descriptor for `ioxInt` itself is rejected.
 7. After the deep-sleep reset, `FUN_40104808` qualifies the wake in 250 ms
    increments. A held power button normally must persist for 2000 ms (250 ms
    in one condition); RTC `AR_USER` and `AR_TEST` alarms are accepted, while an

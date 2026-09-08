@@ -215,23 +215,25 @@ void esp_restart(void)
 }
 
 static int s_deep_sleep_count;
-static int s_wake_gpio;
+static uint64_t s_wake_mask;
 static int s_wake_level;
 static int s_isolated_gpio;
 static int s_rtc_isolate_count;
 static int s_light_sleep_count;
 static esp_sleep_wakeup_cause_t s_wakeup_cause;
+static esp_err_t s_wake_result;
 
 esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause(void)
 {
     return s_wakeup_cause;
 }
 
-esp_err_t esp_sleep_enable_ext0_wakeup(int gpio_num, int level)
+esp_err_t esp_sleep_enable_ext1_wakeup_io(uint64_t io_mask,
+                                         esp_sleep_ext1_wakeup_mode_t mode)
 {
-    s_wake_gpio = gpio_num;
-    s_wake_level = level;
-    return ESP_OK;
+    s_wake_mask = io_mask;
+    s_wake_level = mode;
+    return s_wake_result;
 }
 
 
@@ -250,6 +252,18 @@ esp_err_t rtc_gpio_isolate(int gpio_num)
 {
     s_isolated_gpio = gpio_num;
     s_rtc_isolate_count++;
+    return ESP_OK;
+}
+
+esp_err_t rtc_gpio_hold_dis(int gpio_num)
+{
+    (void)gpio_num;
+    return ESP_OK;
+}
+
+esp_err_t rtc_gpio_deinit(int gpio_num)
+{
+    (void)gpio_num;
     return ESP_OK;
 }
 
@@ -451,16 +465,27 @@ bool iox_get_pin(uint8_t pin)
     return s_iox_levels[pin];
 }
 
+static esp_err_t s_iox_read_result;
+
 esp_err_t iox_read_port(uint8_t expander, uint8_t port, uint8_t *value)
 {
-    (void)expander;
-    (void)port;
-    *value = 0;
+    *value = 0xFF;
+    if (expander == IOX_EXP(IOX_BTN_POWER)
+        && port == IOX_PORT(IOX_BTN_POWER)
+        && !s_iox_levels[IOX_BTN_POWER])
+    {
+        *value &= (uint8_t)~(1u << IOX_BIT(IOX_BTN_POWER));
+    }
     s_iox_port_reads++;
-    return ESP_OK;
+    return s_iox_read_result;
 }
 
 esp_err_t lis2dh12_init(void)
+{
+    return ESP_OK;
+}
+
+esp_err_t lis2dh12_power_down(void)
 {
     return ESP_OK;
 }
@@ -785,8 +810,10 @@ static void reset_state(void)
     s_iox_levels[IOX_USB_POWER_STAT] = true;
     s_iox_port_reads = 0;
     s_deep_sleep_count = 0;
-    s_wake_gpio = -1;
+    s_iox_read_result = ESP_OK;
+    s_wake_mask = 0;
     s_wake_level = -1;
+    s_wake_result = ESP_OK;
     s_isolated_gpio = -1;
     s_rtc_isolate_count = 0;
     s_light_sleep_count = 0;
@@ -1170,7 +1197,8 @@ int main(void)
         bluetooth_toggle();
         CHECK(s_bluetooth_enabled && s_bluetooth_indicator,
               "power: precondition must enable Bluetooth");
-        power_off(true, false);
+        encoder_event(ENCODER_ID_POWER, 0, ENCODER_EVT_LONG_PRESS);
+        encoder_actions_pump();
         CHECK(s_powered_off, "power: a hold must start power-off");
         CHECK(!s_bluetooth_enabled && !s_bluetooth_indicator,
               "power: shutdown must leave Bluetooth state and indicator off");
@@ -1186,15 +1214,10 @@ int main(void)
               "power: off must blank the panel");
         CHECK(s_iox_power_off_count == 1,
               "power: off must disconnect downstream peripheral rails");
-#ifdef CONFIG_BOARD_REV_04
         CHECK(s_restart_count == 0 && s_deep_sleep_count == 1
-              && !s_iox_levels[IOX_POWER_VINHOLD],
-              "power: unplugged rev04 shutdown must release VIN_HOLD");
-#else
-        CHECK(s_restart_count == 0 && s_deep_sleep_count == 1
-              && s_iox_levels[IOX_POWER_VINHOLD],
-              "power: rev05 shutdown must retain VIN_HOLD");
-#endif
+              && s_iox_levels[IOX_POWER_VINHOLD]
+              && s_wake_mask == (1ULL << PIN_IOX_INT) && s_wake_level == 0,
+              "power: manual standby must retain power and arm button wake");
     }
 
     /* ------------------------------ 10. ENCODER DOES NO HEAVY WORK -------- */
@@ -1454,31 +1477,23 @@ int main(void)
               "admin: stopping admin must restore the idle face");
     }
 
-    /* ------------------------- 13. STOCK INACTIVITY TERMINAL OFF ---------- */
+    /* ------------------------- 13. THIRTY-MINUTE IDLE STANDBY ------------- */
     {
         reset_state();
-        s_tick_ms = IDLE_POWER_OFF_MS - 1;
+        s_tick_ms = 30u * 60u * 1000u - 1;
         idle_power_check();
         CHECK(s_deep_sleep_count == 0,
-              "idle power: shut down before the one-hour deadline");
+              "idle power: slept before the thirty-minute deadline");
 
         s_tick_ms++;
         idle_power_check();
         CHECK(s_powered_off && s_iox_power_off_count == 1,
               "idle power: shutdown state or peripheral rail cut is wrong");
         CHECK(s_restart_count == 0 && s_deep_sleep_count == 1,
-              "idle power: one-hour shutdown did not reach terminal sleep");
-#ifdef CONFIG_BOARD_REV_04
-        CHECK(!s_iox_levels[IOX_POWER_VINHOLD],
-              "idle power: unplugged rev04 kept VIN_HOLD asserted");
-        CHECK(s_iox_port_reads == 0 && s_wake_gpio == -1,
-              "idle power: hard-off path incorrectly armed IOX wake");
-#else
-        CHECK(s_iox_levels[IOX_POWER_VINHOLD],
-              "idle power: rev05 released VIN_HOLD");
-        CHECK(s_iox_port_reads == 4 && s_wake_gpio == PIN_IOX_INT,
-              "idle power: rev05 did not arm IOX wake");
-#endif
+              "idle power: thirty-minute deadline did not enter standby");
+        CHECK(s_iox_levels[IOX_POWER_VINHOLD]
+              && s_wake_mask == (1ULL << PIN_IOX_INT) && s_wake_level == 0,
+              "idle power: standby must retain power and arm button wake");
         CHECK(s_rtc_isolate_count == 1,
               "idle power: terminal path did not isolate GPIO12");
     }
@@ -1497,7 +1512,7 @@ int main(void)
         s_tick_ms += IDLE_POWER_OFF_MS - 1;
         idle_power_check();
         CHECK(s_deep_sleep_count == 0,
-              "idle power: shut down before one hour after playback");
+              "idle power: slept before thirty minutes after playback");
         s_tick_ms++;
         idle_power_check();
         CHECK(s_restart_count == 0 && s_deep_sleep_count == 1,
@@ -1510,21 +1525,25 @@ int main(void)
         CHECK(power_wake_is_qualified(),
               "wake gate: cold boot was incorrectly rejected");
 
-        s_wakeup_cause = ESP_SLEEP_WAKEUP_EXT0;
+        s_wakeup_cause = ESP_SLEEP_WAKEUP_EXT1;
         CHECK(power_reject_unqualified_wake(),
               "wake gate: released power button was accepted");
         CHECK(s_deep_sleep_count == 1 && s_iox_power_off_count == 1
-              && s_wake_gpio == PIN_IOX_INT,
+              && s_wake_mask == (1ULL << PIN_IOX_INT),
               "wake gate: rejected wake did not restore terminal sleep");
 
         reset_state();
-        s_wakeup_cause = ESP_SLEEP_WAKEUP_EXT0;
+        s_wakeup_cause = ESP_SLEEP_WAKEUP_EXT1;
         s_iox_levels[IOX_BTN_POWER] = false;
         CHECK(power_wake_is_qualified(),
               "wake gate: two-second held power button was rejected");
         CHECK(s_tick_ms == POWER_WAKE_HOLD_MS,
               "wake gate: hold duration was %u ms, expected %u",
               (unsigned)s_tick_ms, (unsigned)POWER_WAKE_HOLD_MS);
+
+        s_iox_read_result = ESP_FAIL;
+        CHECK(!power_wake_is_qualified(),
+              "wake gate: I2C failure was mistaken for a held power button");
     }
 
     /* The stock normal-start gate rejects only valid battery-only SOC < 4%. */
@@ -1559,15 +1578,42 @@ int main(void)
         s_tick_ms += BATTERY_CRITICAL_CHECK_PERIOD_MS;
         CHECK(battery_critical_check() && s_deep_sleep_count == 1,
               "critical battery: second sample did not shut down in admin mode");
-#ifdef CONFIG_BOARD_REV_04
         CHECK(!s_iox_levels[IOX_POWER_VINHOLD]
               && s_rtc_isolate_count == 1,
-              "critical battery: rev04 kept the power latch asserted");
-#else
-        CHECK(s_iox_levels[IOX_POWER_VINHOLD]
-              && s_rtc_isolate_count == 1,
-              "critical battery: rev05 released the retained power latch");
-#endif
+              "critical battery: depleted player kept the power latch asserted");
+        CHECK(s_wake_mask == (1ULL << PIN_IOX_INT) && s_wake_level == 0,
+              "critical battery: surviving power cut slept without button wake");
+    }
+
+    /* A depleted shutdown must not leave a software lockout after charging.
+     * Cover both a real power loss (cold boot) and a latch that left the ESP
+     * in deep sleep until the user pressed power again. */
+    {
+        battery_snapshot_t snapshot;
+
+        reset_state();
+        s_soc = 0;
+        CHECK(battery_startup_is_blocked(&snapshot),
+              "recharge: empty battery-only startup must stay blocked");
+        power_off(false, true);
+        CHECK(s_deep_sleep_count == 1
+              && s_wake_mask == (1ULL << PIN_IOX_INT),
+              "recharge: empty-start fallback must remain wakeable");
+
+        reset_state(); /* Hardware reset after charging with ESP unpowered. */
+        s_soc = BATTERY_STARTUP_SOC_PCT;
+        CHECK(!power_reject_unqualified_wake()
+              && !battery_startup_is_blocked(&snapshot),
+              "recharge: charged cold boot must reach normal startup");
+
+        reset_state(); /* Button wakes a surviving deep-sleep fallback. */
+        s_wakeup_cause = ESP_SLEEP_WAKEUP_EXT1;
+        s_iox_levels[IOX_BTN_POWER] = false;
+        s_external_power_present = true;
+        s_soc = 0;
+        CHECK(!power_reject_unqualified_wake()
+              && !battery_startup_is_blocked(&snapshot),
+              "recharge: USB-powered button wake must allow zero-SOC startup");
     }
 
     /* Unknown power/gauge state and external power break consecutiveness. */
@@ -1594,8 +1640,7 @@ int main(void)
               "critical reset: stale samples caused immediate shutdown");
     }
 
-    /* Externally powered rev04 and all rev05 shutdowns retain VIN_HOLD and
-     * enter ESP deep sleep with the IOX interrupt armed. */
+    /* Standby retains VIN_HOLD on external power as well as battery. */
     {
         reset_state();
         s_external_power_present = true;
@@ -1610,16 +1655,19 @@ int main(void)
         CHECK(s_iox_levels[IOX_POWER_VINHOLD]
               && !s_iox_peripherals_powered,
               "powered shutdown: VIN_HOLD/rail disposition is wrong");
-        CHECK(s_iox_port_reads ==
-#ifdef CONFIG_BOARD_REV_04
-                  2
-#else
-                  4
-#endif
-              && s_wake_gpio == PIN_IOX_INT && s_wake_level == 0,
+        CHECK(s_wake_mask == (1ULL << PIN_IOX_INT) && s_wake_level == 0,
               "powered shutdown: active-low IOX wake was not armed");
         CHECK(s_rtc_isolate_count == 1,
               "powered shutdown: GPIO12 was not isolated");
+    }
+
+    /* Wake setup failure must not leave the player asleep without a way out. */
+    {
+        reset_state();
+        s_wake_result = ESP_FAIL;
+        power_off(false, false);
+        CHECK(s_deep_sleep_count == 0 && s_restart_count == 1,
+              "standby: failed wake setup stranded the player in deep sleep");
     }
 
     if (s_failures != 0)
