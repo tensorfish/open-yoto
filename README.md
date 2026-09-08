@@ -1,8 +1,12 @@
 # Open Yoto
 
-Open source replacement firmware for the [Yoto Mini](https://yotoplay.com/yoto-mini)
-kids' audio player. Cards play straight off the SD card — no account, no cloud,
-nothing phoning home.
+Independent replacement firmware for the [Yoto Mini](https://yotoplay.com/yoto-mini)
+kids' audio player. Play your own audio from the SD card with NFC cards — no
+Yoto account or cloud service required.
+
+**Development firmware, built from source.** Targets Mini board revisions #04
+and #05; #05 display support is partial. Not for full-size Yoto Players or
+unlisted boards. [Check compatibility before installing](docs/firmware/flash-custom-firmware.md).
 
 <img width="653" height="728" alt="open-yoto-running" src="https://github.com/user-attachments/assets/49d305d2-d503-4f22-9f65-b21ed9a04f94" />
 
@@ -18,19 +22,23 @@ Pretty far, as it turns out.
 
 | What | State |
 |---|---|
-| Boot, power rails, screen off / sleep / wake | Done |
-| Colour screen — rev #04 (GC9306) | Done |
+| Boot, power rails, screen off / sleep / wake | Implemented |
+| Colour screen — rev #04 (GC9306) | Implemented |
 | LED matrix screen — rev #05 (HT16D35x) | Partial — on/off pixels only, no grey levels |
-| Speaker, headphones, and auto-switching between them | Done |
-| MP3, AAC, and M4A playback | Done |
-| NFC cards — read and write | Done |
-| SD card library (tracks, artwork, card mappings) | Done |
-| Knobs and buttons — play/pause, skip, volume, power | Done |
-| Battery level and charging screens | Done |
-| Boot faces and per-track artwork | Done |
-| Wi-Fi admin page — upload tracks, edit cards, remote control | Done |
+| Speaker, headphones, and automatic switching | Implemented — shared volume curve |
+| MP3, ADTS AAC, and M4A/AAC-LC playback | Implemented |
+| NFC cards — read and write | Implemented |
+| SD card library (tracks, artwork, card mappings) | Implemented |
+| Knobs and buttons — play/pause, skip, volume, power | Implemented |
+| Battery level and charging screens | Implemented |
+| Boot faces and per-track artwork | Implemented |
+| On-demand Wi-Fi admin — upload tracks, edit cards, remote control | Implemented — open hotspot, unencrypted HTTP |
+| Optional Bluetooth speaker mode | Implemented — receives phone audio, not Bluetooth headphone output |
 | Reusing the stock Yoto card data already on your SD card | Not started |
 | Talking to Yoto's servers | Never |
+
+Implemented does not mean validated on every unit. See the
+[firmware inventory](firmware/README.md) and [release-readiness gaps](docs/project.md#release-readiness).
 
 ## Docs
 
@@ -44,7 +52,15 @@ Full write-up at **[docs.openyoto.com](https://docs.openyoto.com)**:
 - [Hardware & pin maps](docs/hardware.md) — the Yoto shipped several board
   revisions with different pins; check yours first
 - [Reverse engineering notes](docs/reverse-engineering.md)
+- [Support & contributing](docs/project.md) — bug reports, development checks,
+  security boundaries, and release-readiness work
 
-Flashing means opening the player and using an external USB-UART adapter — the
-USB-C port is power-only. It voids your warranty and can brick the device. Dump
-the stock firmware before you overwrite it.
+Flashing means opening the player and using an external 3.3 V USB-UART adapter —
+the USB-C port is power-only. Modification can damage the device and may affect
+warranty coverage. Back up this player's complete flash and SD card first.
+
+## Licence
+
+Original code and documentation: [MIT](LICENSE). Third-party code and stock-derived
+assets are **not** relicensed; [redistribution questions remain](docs/project.md#licensing).
+Open Yoto is not affiliated with or endorsed by Yoto.

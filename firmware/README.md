@@ -1,259 +1,197 @@
-# Yoto Firmware — ESP-IDF skeleton
+# Open Yoto firmware — ESP-IDF
 
-An ESP-IDF project skeleton for the Yoto Player (ESP32), with the correct pin
-map and per-peripheral init for the onboard battery, display, NFC reader, and
-speaker. Pin assignments are recovered from the stock firmware's embedded
-hardware config — see [`components/board/board_pins.h`](components/board/board_pins.h)
-and the project's `docs/` for the full reverse-engineering write-up.
+Early-development, service-independent firmware for the **Yoto Mini's ESP32**.
+This is a working player application under active development, not an ESP-IDF
+skeleton or a production-ready release. It plays local MP3/AAC/M4A media from
+NFC cards, provides an on-demand local web admin interface, and can receive
+Classic Bluetooth audio. There are no published firmware releases yet; build
+from source with **ESP-IDF v5.5**.
 
-## Build
+Start with the [installation guide](../docs/firmware/flash-custom-firmware.md).
+It covers board identification, opening-device risks, verified device-specific
+flash and SD backups, 3.3 V UART wiring, first boot, and recovery limitations.
+Do not flash before completing those precautions. USB-C on the player is
+power-only, not a flash interface.
 
-> **Note on `make`**: the GNU-Make workflow (`make menuconfig && make flash`)
-> was **removed in ESP-IDF v4/v5**. The current build command is `idf.py`, which
-> drives CMake + Ninja. This project targets ESP-IDF **v5.x** (`idf.py`).
+## Hardware scope
 
-### One-time setup (macOS)
+| Target | Status | `BOARD_REV_04` |
+|---|---|---|
+| Mini matching #04: GC9306 TFT, single IOX, SDMMC 4-bit | Supported development target; working color display evidence, not complete hardware validation | Enabled |
+| Mini matching #05: HT16D35x, dual IOX, SDMMC 1-bit | Partial; on/off display only, greyscale incomplete | Disabled |
+| Full-size Players, other revisions, unidentified hardware | Unsupported installation targets | Do not flash |
+
+Numbers refer to recovered hardware configurations, not retail names or a
+proven chronology. Identify the actual board using the
+[hardware reference](../docs/hardware.md) and
+[`board_pins.h`](components/board/board_pins.h). Open Yoto selects the board at
+**compile time**. The stock config table includes other hardware; its presence
+is not support for those devices. Porting another board requires driver and
+power-path work, not just changing a few pins.
+
+## Build and flash
+
+See [Build environment setup](../docs/build-setup.md) for ESP-IDF installation
+and complete menu settings. From the repository root:
 
 ```bash
-# 1. Build prerequisites (cmake/ninja/dfu-util). Python is managed by uv below,
-#    NOT Homebrew.
-brew install cmake ninja dfu-util
-
-# 2. uv-managed Python 3.12 (ESP-IDF needs Python 3.10+; 3.12 is a safe choice)
-uv python install 3.12
-
-# 3. Clone ESP-IDF v5.5 and install its tools, using uv's Python
-git clone --depth 1 --recursive --shallow-submodules -b release/v5.5 \
-  https://github.com/espressif/esp-idf.git ~/esp/esp-idf
-export PATH="$(dirname "$(uv python find 3.12)"):$PATH"   # uv Python first
-~/esp/esp-idf/install.sh esp32
-```
-
-### Build
-
-```bash
-. ~/esp/esp-idf/export.sh     # adds IDF_PATH + toolchain to PATH
+. ~/esp/esp-idf/export.sh
 cd firmware
 idf.py set-target esp32
+idf.py menuconfig
+```
+
+In **open-yoto Application**:
+
+- Enable **Target hardware revision #04 (TFT, single IOX)** only for #04;
+  disable it for the partial #05 target.
+- Disable **Build the boot test firmware**, **Build the I2C bus scanner
+  firmware**, and **Play a speaker test tone at boot** for normal operation.
+
+Do not trust a saved `sdkconfig` or Kconfig default to match your board or to
+select the normal application. In **Serial flasher config**, select **8 MB**,
+**Before flashing → No reset**, and **After flashing → Stay in bootloader**
+for the manual workflow. Keep the custom `partitions.csv` partition table.
+Save configuration, then:
+
+```bash
 idf.py build
 ```
 
-### Flash
-
-`idf.py` drives esptool.py at the correct offsets, or you can raw-flash a single
-merged image (the esptool workflow):
+Only after verifying the original flash and SD backups, select your adapter's
+actual port and follow the flash guide's manual BOOT/GPIO0 and RESET/EN sequence:
 
 ```bash
-idf.py -p /dev/cu.usbserial-XXXX flash monitor
-
-# ...or a single merged image via esptool.py:
-idf.py merge-bin -o merged.bin
-esptool.py --chip esp32 --flash_size 8MB write_flash 0x0 merged.bin
+export PORT=/dev/cu.usbserial-XXXX
+idf.py -p "$PORT" flash
+idf.py -p "$PORT" monitor
 ```
 
-The build emits `build/bootloader/bootloader.bin` (flashed at `0x1000`),
-`build/partition_table/partition-table.bin` (`0x8000`), and `build/yoto.bin`
-(`0x10000`). The checked-in table reserves a 4 MiB factory partition on the
-8 MiB ESP32-WROVER-E flash.
+After flashing, release BOOT and pulse RESET to boot the application; exit the
+monitor with **Ctrl+]**. Keep the source commit, ESP-IDF commit, `sdkconfig`,
+build artifacts, and `components/admin/html/index.html` together. The UI must
+match the source revision used for the firmware.
 
-### Linux UART automation
+`idf.py` uses the generated flash arguments. The current build places the
+bootloader at `0x1000`, partition table at `0x8000`, and `yoto.bin` at `0x10000`.
+[`partitions.csv`](partitions.csv) reserves a 4 MiB factory app on the 8 MiB
+flash, alongside NVS and PHY data. There are **no OTA slots or automatic image
+rollback**. `/upload` updates the SD-hosted HTML only. See
+[updates and recovery](../docs/firmware/flash-custom-firmware.md#updates-and-recovery)
+for UART updates and the caveats of restoring a same-device full flash dump.
 
-The board's USB-UART controls are wired as `RTS -> BOOT/GPIO0` and
-`DTR -> RESET/EN`, rather than the conventional Espressif mapping. The checked
-in `sdkconfig` sets esptool to `--before=no_reset --after=no_reset`; manual
-control is required.
+The optional Linux `tools/flash_esp32.py` helper expects the documented
+RTS→BOOT and DTR→RESET adapter wiring and no-reset configuration. Follow the
+[Linux helper instructions](../docs/build-setup.md#optional-linux-uart-automation)
+rather than assuming a universal automatic-reset circuit.
 
-From the repository root, source ESP-IDF and run:
+## Current application behavior
 
-```bash
-export PATH="$HOME/.espressif/python_env/idf5.5_py3.12_env/bin:$(dirname "$(uv python find 3.12)"):$PATH"
-. "$HOME/.esp/esp-idf/export.sh"
-python3 tools/flash_esp32.py
-```
+These are source implementation notes, not evidence that every feature has
+been hardware-validated on both boards.
 
-The tool builds, waits for esptool's connection phase, enters the ROM
-bootloader using the RTS/DTR sequence, flashes, resets into the application,
-and writes the UART log to `/tmp/yoto_scan.log`. Do not replace
-`tools/bootloader_esp32.py` with a pyserial script: opening pyserial changes
-the Linux TTY's termios configuration while esptool is connected. The helper
-uses modem-control ioctls only, preserving esptool's settings.
+- **Boot and display:** required IOX, battery, display, audio, NFC, and encoder
+  initialization has bounded boot-retry handling. The embedded welcome audio
+  starts before SD mounting; a welcome sound or `boot complete` log does not
+  prove storage works. #04 renders color icons through GC9306; #05 has a
+  boolean-pixel HT16D35x path. Boot, wink, and battery icons are compiled headers
+  generated from `icons/`.
+- **Local content:** FatFS mounts at `/sdcard`. Card entries live in
+  `/sdcard/media/library.json` and refer to media under `/sdcard/media`.
+  The index loads lazily; legacy Open Yoto `mapping.json` migration is not an
+  importer for stock Yoto `/cards` metadata. No stock-content import workflow
+  is implemented.
+- **Audio:** MP3, standalone ADTS AAC, and M4A/AAC-LC decoding feed a shared
+  resampling, PCM gain, I²S, ES8156 headphone, and AW88194 speaker path. Filename
+  extensions are not a guarantee that an arbitrary codec/container is supported.
+  Headphone insertion/removal changes routing; speaker and headphones still
+  share the PCM gain rather than separate volume curves.
+- **NFC/admin:** the exact NDEF URI `https://openyoto.com/admin` toggles the
+  `openyoto` hotspot and six-character code. Normal card URLs resolve to local
+  playlists; during admin mode, scans are captured for card management instead
+  of playback. Card writes compare the expected UID and verify URL read-back.
+- **Web UI:** the embedded installer at `/upload` writes
+  `/sdcard/webui/index.html`. The matching reference page provides file/folder
+  management, media upload, browser-side PNG/JPEG artwork conversion, card
+  read/write, and player controls. The hotspot is **open** and traffic is
+  **unencrypted HTTP**: access-code login and an HttpOnly session cookie do not
+  provide transport confidentiality. Keep admin mode temporary and use a
+  trusted physical environment. UART logs also include the code.
+- **Bluetooth:** off at boot; a three-second right-knob hold toggles a Classic
+  Bluetooth A2DP speaker sink named **Open Yoto**. The top-right indicator is a
+  blue dot on #04 or on/off LED on #05. Audio is received from a phone/computer,
+  not sent to Bluetooth headphones or saved to the SD card. A bounded PCM ring
+  and worker feed the shared audio path with explicit playback-source ownership.
+- **Power:** a three-second power hold or **30 minutes** of inactivity requests
+  standby. User/idle standby retains VIN_HOLD on both board paths and uses
+  **EXT1 ALL_LOW** on the active-low IOX interrupt for wake; a two-second held
+  power button qualifies a retained-power wake. Physical VIN_HOLD cutoff is
+  reserved for battery protection when external power is absent. Battery-only
+  startup requires 4% SOC; two valid samples at or below 3% trigger critical
+  shutdown. These policies are not a battery-safety certification.
 
-## Boot test firmware
+For actual setup and acceptance checks, use
+[Post-flash setup](../docs/firmware/post-flash-setup.md). Deeper runtime details
+are in [Firmware behavior](../docs/open-yoto-firmware.md).
 
-A minimal bring-up firmware (`main/test_main.c`) that skips NFC / SD / encoder
-and, on boot, just:
+## Bring-up applications
 
-- **rev #05** (default): displays a border + cross on the 16×16 LED panel;
-- **rev #04** (`CONFIG_BOARD_REV_04=y`): PWM the TFT backlight (GPIO26 via
-  LEDC, **40 kHz** — the stock frequency from the factory image; the panel's
-  LED rail is AC-coupled, so a plain GPIO high passes nothing and a lower
-  PWM frequency is attenuated, leaving the display dim enough that colours
-  wash out) and draw a green/blue test pattern on the GC9306 TFT;
-- emits a repeating **1 kHz** beep over the shared I²S bus to the AW88194A
-  speaker amp and ES8156 headphone DAC.
+Use **open-yoto Application** in `idf.py menuconfig` for deliberate hardware
+bring-up, never as the normal install preset:
 
-This proves the rev #04 power/reset, I²C, display, and complete audio path.
+- `APP_TEST_MODE` selects `main/test_main.c`: IOX/battery/audio initialization,
+  then red/green/blue/white TFT stripes on #04 or an LED border/cross on #05,
+  plus a repeating 1 kHz tone. It does not run the NFC/SD/encoder player.
+- `APP_SCAN_MODE` selects `main/scan_main.c`: an I²C address scan, not the player.
+  It takes precedence over the boot test in `main/CMakeLists.txt`.
+- `APP_SPEAKER_TEST_TONE` adds a repeating tone to the normal application for
+  audio bring-up; disable it for normal use.
 
-Enable it in `idf.py menuconfig` (top-level **"Build the boot test firmware"**,
-from `main/Kconfig.projbuild`), or directly:
-
-```bash
-echo 'CONFIG_APP_TEST_MODE=y' >> sdkconfig && idf.py build
-```
-
-Rev #04 bring-up notes (verified against a physical unit and stock app):
-
-- The GC9306 driver (`components/gc9306/`) follows the stock electrical
-  setup: SPI2 host 1, mode 0, 80 MHz, `SPI_DEVICE_NO_DUMMY`, manual CS,
-  queue depth 1, stock reset, the full F2 tail, DC-low init groups, and
-  1364-pixel queued RGB666 transfers. Pixel RGB bytes are forwarded
-  unchanged — there is no channel transform.
-- The IOX first receives the exact `hwconfig_04` latch/direction bytes
-  (`p0Dir=0xB0 p1Dir=0xAF p0Data=0x30 p1Data=0xEF`). Stock `app_main` then
-  drives VINHOLD HIGH, PWREN LOW, and `levelconvertor` (IOX.0.3) HIGH.
-- `analysis/extract_stock_battery_icon.py` recovers the exact low-SOC
-  battery_ui asset (table ID 10, PNG `0x3F468D61`) as an analysis artifact. Its
-  segmented white-on-black appearance is the stock low-SOC visual, not a
-  guessed outline. The runtime battery screen no longer compiles that frame in:
-  it renders `firmware/icons/battery-*.png` through the same alpha-premultiplied
-  12× window `(24,27)..(215,218)`.
-
-Back to the normal firmware:
-
-```bash
-sed -i '' 's/^CONFIG_APP_TEST_MODE=.*/CONFIG_APP_TEST_MODE=n/' sdkconfig && idf.py build
-```
+Choose the correct board in these modes too. To return to the player, disable
+all three options in menuconfig and rebuild; do not append conflicting config
+lines by hand. A diagnostic pattern or beep proves only the exercised path on
+that unit, not full board support.
 
 ## Structure
 
-```
+```text
 firmware/
-├── CMakeLists.txt            # top-level (idf.py / CMake)
-├── sdkconfig.defaults        # default Kconfig
+├── CMakeLists.txt
+├── sdkconfig.defaults        # defaults, not an identified-board preset
+├── partitions.csv           # NVS + PHY + single 4 MiB factory app
 ├── main/
-│   ├── app_main.c            # normal firmware: boot + init + main loop
-│   ├── test_main.c           # boot test firmware (display + beep)
-│   ├── boot_face_rgba.h      # generated: face-01..face-08 animation frames
-│   ├── wink_face_rgba.h      # generated: the two wink faces
-│   ├── battery_icons_rgba.h  # generated: charging 0..100, 10..100, empty icons
-│   ├── Kconfig.projbuild     # CONFIG_APP_TEST_MODE switch
-│   └── CMakeLists.txt
-├── test/host/                # host tests (no hardware): volume-bar geometry
-    ├── components/
-    ├── board/board_pins.h    # THE pin map + I2C addresses (authoritative)
-    ├── iox/                  # IO expander (buttons, display CS, power/amp ctrl)
-    ├── battery/              # CW2215B fuel gauge + SGM41513 charger
-    ├── lis2dh12/             # stock 0x18 accelerometer startup
-    ├── display/              # HT16D35x 16x16 LED matrix (SPI + IOX CS)   [rev #05]
-    ├── gc9306/               # GC9306 TFT driver (stock init + 18-bit)    [rev #04]
-    ├── nfc/                  # ST CR95HF over UART
-    ├── audio/                # I2S + ES8156 / aw881xx codec
-    └── bluetooth/            # Classic Bluetooth A2DP speaker sink
+│   ├── app_main.c           # player, gestures, power, NFC/admin lifecycle
+│   ├── test_main.c          # deliberate display/audio bring-up
+│   ├── scan_main.c          # deliberate I²C scan
+│   ├── Kconfig.projbuild    # application and board selection
+│   ├── CMakeLists.txt       # selects one application entry point
+│   └── *_rgba.h            # generated boot, wink, and battery assets
+├── components/
+│   ├── board/              # revision-dependent pins and addresses
+│   ├── iox/                # expander I/O and power controls
+│   ├── battery/            # CW2215B gauge and SGM41513 charger
+│   ├── lis2dh12/           # accelerometer startup
+│   ├── display/            # common display rendering
+│   ├── gc9306/             # #04 TFT transport
+│   ├── ht16d35x/           # #05 on/off LED transport
+│   ├── cr95hf/             # UART NFC Type 2 read/write
+│   ├── encoder/            # knobs, buttons, gesture classification
+│   ├── content/            # SD mount and local card library
+│   ├── audio/              # decoding and shared output ownership
+│   ├── codec_es8156/       # headphone DAC
+│   ├── aw88194/            # speaker amplifier and recovered DSP data
+│   ├── bluetooth/          # Classic Bluetooth A2DP sink
+│   ├── admin/              # SoftAP, HTTP API, installer and reference HTML
+│   ├── yoto_vfs/           # embedded system sound access
+│   ├── libhelix-mp3/       # vendored decoder
+│   └── libhelix-aac/       # vendored decoder
+├── icons/                  # source image assets
+└── test/host/              # host-side regression coverage, not hardware proof
 ```
 
-## What's implemented vs TODO
-
-**Implemented** (real bus + peripheral setup, compiles against ESP-IDF v5):
-
-- I2C master (SDA=21, SCL=25) + IO expander(s) with exact stock latch and
-  direction bytes, followed by the recovered run-state transitions (rev #04:
-  VINHOLD HIGH, active-low PWREN LOW, levelconvertor IOX.0.3 HIGH).
-- **Power and battery [rev #04/#05]**: CW2215B board profiles, SGM41513
-  hot-plug configuration with source-safe input limits, 30-second masked
-  configuration repair, and stock charge-current requests. Battery-only boot
-  requires 4% SOC; warnings start at 7%; two valid battery-only samples at or
-  below 3% force terminal shutdown. A three-second power hold or the stock
-  one-hour inactivity timeout disables the amp and peripheral rails. Shutdown
-  tri-states active-low `PWREN`, matching the factory latch sequence so the
-  physical power button can re-enable the player. Rev #04 releases `VIN_HOLD`
-  when external power is absent; powered rev #04 and all rev #05 paths retain
-  it and enter deep sleep with active-low GPIO34 wake. GPIO12 is isolated before
-  deep sleep; EXT0 reset requires a two-second held power button, otherwise the
-  early boot path disconnects rails and sleeps again. The host suite covers both
-  board dispositions, timeout timing, wake qualification, invalid-sample
-  rejection, charger drift, and rev #04/#05 `PWREN` direction transitions.
-- **GC9306 TFT driver [rev #04]**: stock SPI2 mode 0/80MHz/no-dummy setup,
-  stock reset and complete initialization tail, queue-1 1364-pixel RGB666
-  transport, CASET/RASET/RAMWR framing, and 40 kHz GPIO26 backlight.
-  `gc9306_draw_rgba16()` alpha-composites and 12× scales into the calibrated
-  `(24,24)..(215,215)` test window. Browser-generated OYIM images retain
-  16×16 RGB565 color and use the same 12× geometry; older 64×64 OYIM files
-  remain readable through a 3× compatibility path. Both compensate the
-  physical horizontal mirror and correct the observed R/B RGB666 swap at the
-  panel boundary.
-  An icon frame covers that window completely, so the 230 KB full-panel fill is
-  issued only when an earlier 1-bit bitmap flush or 240×320 raster could have
-  lit pixels outside it; consecutive icon frames cost the window alone, which is
-  what keeps animations and knob feedback free of black flashes.
-- **Boot faces, winks, and battery icons**: `icons/face-01.png`…`face-08.png`
-  play at 16 fps and rest on `face-08`, the idle face; turning the right knob
-  with no card loaded winks between `icons/face-wink-01.png` and
-  `face-wink-02.png`. The battery screen uses `icons/battery-10.png`…
-  `battery-100.png` (SOC floored to ten), `icons/battery-empty.png` below 10%,
-  and — while charging — `icons/battery-charging-0.png`…
-  `battery-charging-100.png` (SOC floored to ten). All three sets are compiled in as
-  `main/boot_face_rgba.h`, `main/wink_face_rgba.h` and
-  `main/battery_icons_rgba.h` by `tools/png_to_rgba_header.py`, which records
-  each PNG and RGBA SHA-256 so a header can be audited against its icon.
-  `test/host/run.sh` checks the volume-bar geometry and its draw-call budget on
-  the host.
-- Stock-matched I2S TX (APLL, mclk=0, bclk=5, lrclk=18, dout=19,
-  44100 Hz, 16-bit mono-left) with bounded PCM gain, stereo downmix, decoded
-  source-metadata propagation, and streaming 8–96 kHz resampling. Content
-  sniffing selects MP3, standalone ADTS AAC, or streamed M4A/AAC-LC sample
-  tables (`stsd`/`stsz`/`stsc`/`stco`/`co64`).
-  TX descriptors auto-clear after transmission; stop/end transitions reset the
-  complete cyclic DMA ring to silence before another playback starts.
-- **Classic Bluetooth speaker**: Bluetooth is off at boot. Pressing and holding
-  the right knob for three seconds toggles the Bluedroid A2DP sink; while
-  enabled it advertises the player as `Open Yoto`. A short press remains
-  play/pause, and turning the knob still skips tracks or winks when no card is
-  loaded. The enabled state is shown persistently at the physical top-right:
-  a blue dot on the rev #04 color display, or the top-right LED on the
-  monochrome rev #05 display. Decoded SBC PCM is copied into a bounded ring and
-  rendered through the same resampling, volume, I²S, codec, and amp path as
-  local content. A worker owns the blocking I²S writes; disconnect, Bluetooth
-  disable, and power-down synchronously quiesce that worker before Bluetooth or
-  the peripheral rails are disabled. Local file playback has explicit source
-  ownership and cannot race the A2DP writer.
-- WROVER-E PSRAM backs allocations larger than 4 KiB, including the
-  playback-scoped decoder heaps; 32 KiB of internal memory remains reserved
-  for DMA/internal-only use.
-- **AW88194A speaker amp [rev #04]**: factory reset timing, five ID retries,
-  exact 35-entry register table, recovered SmartK firmware and mono config,
-  VCALB, DSP/I²S/PLL validation, interrupts, start, and hard-unmute.
-- **SD startup**: stock SDMMC width flags, 40 MHz clock, 40 mA CLK drive,
-  five mount attempts, and FatFS at `/sdcard`. `mapping.json` is optional and
-  never gates a successful mount.
-- **Stock welcome**: the exact 18,608-byte oracle M4A asset is embedded once,
-  exposed read-only as `/system/sounds/welcome` by `YOTO_VFS`, parsed as one
-  AAC-LC/44.1 kHz/mono MP4 track, decoded, and sent through the shared I2S path
-  after the SD mount.
-- CR95HF on UART1, ESP TX=GPIO32, ESP RX=GPIO33, 57600 8-N-2, with the
-  stock control-byte and Echo synchronization sequence. Admin-mode scans
-  capture UID/URL without playback; authenticated writes compare the expected
-  UID and verify URL read-back under one UART transaction.
-- On-demand `openyoto` SoftAP and HTTP server with a random six-character
-  alphanumeric code, started only by scanning the exact admin magic URL. Its
-  responsive UI provides remote player controls, `/sdcard/media`-confined file
-  CRUD, captured-card read/write, mapping inspection, whole-folder track upload
-  with browser-side PNG/JPEG conversion, and a lazy recursive track catalog.
-- Admin memory is request-driven: default-directory listing at login,
-  per-directory streamed JSON, tab-scoped card/track loading, lazy card-index
-  parsing, playback-scoped decoder state, a 16 KiB HTTP task stack, and a
-  temporary access-code raster.
-
-**TODO**:
-
-- HT16D35x frame format + 6-bit-gray fan-out [rev #05].
-- Separate speaker/headphone volume curves. Insertion and removal are already
-  handled (100 ms `hpdetect` poll, SmartPA muted while a plug is in), but both
-  paths share one PCM gain.
-- Translation of stock `/sdcard/cards` metadata into open-yoto playlists.
-
-## Hardware revision caveat
-
-The Yoto shipped several hardware revisions with **different pins**. This
-skeleton targets the latest revision (2× IO expander, HT16D35x LED matrix,
-UART NFC, SDMMC 1-bit). If your unit differs, edit
-`components/board/board_pins.h` — the variant table is in `../docs/hardware.md`.
+Original Open Yoto code uses MIT; vendored components and recovered stock
+assets are not automatically covered by that choice. See
+[licensing scope](../docs/project.md#licensing) and
+[release readiness](../docs/project.md#release-readiness), including the
+outstanding stock-asset rights audit, before redistributing a firmware image.
+Contribution and reporting routes are on the [project page](../docs/project.md).

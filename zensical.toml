@@ -1,14 +1,14 @@
 [project]
 site_url = "https://docs.openyoto.com"
 site_name = "open-yoto"
-site_description = "Custom firmware, reverse engineering, and research for the Yoto Player ESP32"
+site_description = "Independent Yoto Mini firmware: hardware compatibility, installation, local setup, and development"
 site_author = "open-yoto"
 
 # copyright = "Copyright &copy; 2026 Your name"
 
-# repo_url = "https://github.com/user/repo"
-# repo_name = "user/repo"
-# edit_uri = "edit/main/docs/"
+repo_url = "https://github.com/tensorfish/open-yoto"
+repo_name = "tensorfish/open-yoto"
+edit_uri = "edit/main/docs/"
 
 nav = [
   { "open-yoto Firmware" = [
@@ -17,6 +17,7 @@ nav = [
       { "Post-Flash Setup" = "firmware/post-flash-setup.md" },
       { "How It Works" = "open-yoto-firmware.md" },
       { "Build Environment" = "build-setup.md" },
+      { "Project & Contributing" = "project.md" },
   ]},
   { "Reverse Engineering" = [
       { "Overview" = "reverse-engineering.md" },
@@ -60,8 +61,8 @@ nav = [
 language = "en"
 features = [
   "announce.dismiss",
-  # "content.action.edit",
-  # "content.action.view",
+  "content.action.edit",
+  "content.action.view",
   "content.code.annotate",
   "content.code.copy",
   "content.code.select",

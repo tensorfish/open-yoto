@@ -4,9 +4,11 @@ icon: lucide/file-cog
 
 # open-yoto-firmware
 
-A from-scratch firmware for the Yoto Player (ESP32). It reads NFC cards,
-plays matching audio + pictures, and starts an offline administration hotspot
-and web server on every boot. No cloud connection is required.
+Independent firmware for Yoto Mini board revisions #04 and #05 (ESP32). It
+reads NFC cards, plays local audio and pictures, and starts an offline
+administration hotspot only when the admin card is scanned. No cloud connection
+is required. See [compatibility and limitations](firmware/flash-custom-firmware.md)
+before installing and [security boundaries](project.md#security) before using admin mode.
 
 This page explains the logic in plain terms. The decompilation-based
 understanding of the *original* firmware is elsewhere (see
@@ -20,12 +22,11 @@ flowchart TD
   B --> D{main loop}
   D --> E[check battery]
   D --> F[poll NFC]
-  D --> K[check one-hour inactivity deadline]
+  D --> K[check 30-minute inactivity deadline]
   D -->|3-second power hold| L[stop services + disconnect rails]
   K -->|inactive| L
-  L --> M{rev #04 on battery?}
-  M -->|yes| N[release VIN_HOLD + deep-sleep fallback]
-  M -->|no| O[retain VIN_HOLD + GPIO34 deep-sleep wake]
+  L --> O[retain VIN_HOLD + GPIO34 EXT1 deep-sleep wake]
+  O -->|2-second power hold| A
   F -->|magic URL| G[toggle admin server]
   F -->|content card| H[look up content]
   H --> I[show image + play track]
@@ -35,22 +36,23 @@ flowchart TD
 ## What it does
 
 1. **Scans an NFC card** → reads its URL.
-2. **Looks up that URL** in a file on the SD card (`mapping.json`).
-3. **Plays the matching audio** (MP3) and **shows the matching picture**
+2. **Looks up that URL** in `/sdcard/media/library.json` (with migration from
+   legacy `/sdcard/mapping.json` when no library exists).
+3. **Plays the matching audio** (MP3, ADTS AAC, or M4A/AAC-LC) and **shows the matching picture**
    (legacy or color 16×16; older replacement OYIM 64×64 remains readable).
 4. The two knobs control **volume** (left) and **track skip** (right); a short
    press on either knob toggles **play/pause**. Holding the right knob for three
    seconds toggles Bluetooth, while holding the dedicated power button for
-   three seconds turns the device off. Turning the right knob with no card
+   three seconds enters battery-saving standby. Turning the right knob with no card
    loaded winks the face; turning the left knob shows a volume bar redrawn at
    most once per 100 ms with the newest level. Turning both composes: the bar is
    re-applied over each wink frame instead of the two screens taking turns.
-5. On boot, starts the open `openyoto` hotspot and web UI. A random
+5. Scanning the admin card starts the open `openyoto` hotspot and web UI. A random
    six-character alphanumeric code is shown as two rows of three glyphs. Rev
    #04 renders a native 5×7 font at 9× scale inside the panel's verified
    240×240 visible region and compensates for the MADCTL horizontal mirror;
    rev #05 uses a compact 5×7 matrix fallback. The authenticated UI provides
-   player remote control, card mappings, and full SD file/directory management.
+   player remote control, card mappings, and media-confined file/directory management.
 
 ## The components
 
@@ -62,7 +64,7 @@ flowchart TD
 | `ht16d35x` | the 16×16 LED display |
 | `cr95hf` | the NFC card reader |
 | `encoder` | the two rotary knobs + push buttons + power button |
-| `content` | the SD card + optional `mapping.json` catalog |
+| `content` | the SD card + lazy `/sdcard/media/library.json` catalog, with legacy migration |
 | `audio` + `codec_es8156` + Espressif decoders | MP3/AAC/M4A playback → I²S |
 | `bluetooth` | Classic Bluetooth A2DP phone audio → shared PCM/I²S path |
 | `admin` | on-demand hotspot, authenticated API, remote control, SD manager |
@@ -101,7 +103,7 @@ The loop handles deferred physical-control work first, then:
    policy, including while admin mode owns the display.
 3. Update noncritical battery warnings when the access-code screen is not pinned.
 4. Maintain display-transient deadlines.
-5. Check the one-hour inactivity deadline.
+5. Check the 30-minute inactivity deadline.
 
 A card is "new" on a rising edge or when its UID changes (a swap within one
 poll window):
@@ -126,22 +128,32 @@ The knobs/buttons are handled as events (not polled in the main loop):
 | Either knob press (short) | play / pause |
 | Right knob hold (3 s) | toggle Classic Bluetooth on/off |
 | Power button press | toggle only the screen; screen-on shows the current battery icon |
-| Power button hold (3 s) | stop playback/admin, blank the display, disconnect the amp and downstream rails, then enter the board-specific terminal state |
+| Power button hold (3 s) | stop playback/Bluetooth/admin, blank the display, power down the accelerometer, release peripheral rails, and enter wakeable deep sleep |
+| Power button hold while in standby (2 s) | wake and boot the player; release before the next gesture |
 
 Encoder actions and card insertion/removal reset the inactivity deadline.
-Playback and an active admin session continuously defer it. After the stock
-default of one hour without any of those activities, the firmware runs the
-same shutdown sequence as the three-second power hold.
+Playback and an active admin session continuously defer it. After **30 minutes**
+without any of those activities, the firmware runs the same standby sequence
+as the three-second power hold. The stock default is one hour; the replacement
+intentionally uses a shorter interval.
 
-On rev #04, battery-powered shutdown isolates GPIO12 and releases `VIN_HOLD`;
-deep sleep is only a fallback if the physical latch does not remove power.
-When rev #04 is externally powered, it retains the latch, clears stale ET6416
-input transitions, and enters deep sleep with active-low GPIO34 wake armed.
-Rev #05 always retains `VIN_HOLD`; its PI4IOE5V6416 power-button input is
-unmasked and GPIO34 is armed before deep sleep. An EXT0 reset is accepted as a
-real wake only after the active-low power button remains held for two seconds;
-a released/spurious wake disconnects the rails and returns to deep sleep. The
-firmware does not timer-poll the button in light sleep.
+Normal standby retains `VIN_HOLD` on both revisions, including on battery.
+`PWREN` and rev #05 `VOUTEN` are tri-stated rather than driven to their off
+levels, preserving the hardware latch's ability to restore power. After clearing
+stale expander transitions, the ESP enters deep sleep with GPIO34 EXT1
+`ALL_LOW` wake armed. Rev #05 unmasks only the power-button interrupt.
+Hold the power button for two seconds to wake. A released/spurious wake returns
+to sleep; an I2C read error cannot count as a held button. The wake hold and its
+release are consumed, so they cannot immediately shut down or blank the player
+again. GPIO12 isolation is released before SD initialization. There is no
+periodic light-sleep polling loop.
+
+Only depleted-battery protection uses physical `VIN_HOLD` cutoff on battery,
+on either revision. Its fallback still arms button wake before cutting power.
+After charging, hold power for two seconds to start again: battery-only startup
+requires at least 4% SOC, while valid external power permits startup even at 0%.
+Actual power loss clears the volatile off state and follows normal cold boot;
+there is no persistent low-battery lockout or guaranteed automatic boot on charging.
 
 The display carries one **base screen** (idle face, card art, admin code, or a
 low-battery warning) plus **transients** that expire back onto it: the wink
@@ -175,7 +187,7 @@ than copying a stock sound that does not exist.
 ```mermaid
 flowchart LR
   A[NFC card] --> B[CR95HF reads UID + URL]
-  B --> C[look up URL in mapping.json]
+  B --> C[look up URL in library.json]
   C --> D[image + tracks list]
   D --> E[show image]
   D --> F[play track 0]
@@ -184,7 +196,7 @@ flowchart LR
 
 - The NFC reader talks over UART (57,600 baud). It reads the card's UID (4 or
   7 bytes) and its **NDEF URL**.
-- The **URL is the key** (not the UID). `mapping.json` maps each URL to an
+- The **URL is the key** (not the UID). `/sdcard/media/library.json` maps each URL to an
   ordered list of audio tracks, each with an optional per-track image:
 
   ```json
@@ -264,55 +276,48 @@ shows a random six-character alphanumeric code. Visiting
 `http://192.168.4.1` and entering that code exchanges it for an HttpOnly,
 SameSite session cookie. Every API and file read requires that cookie.
 
+The hotspot and HTTP traffic are unencrypted. The code and cookie authenticate
+requests, but do not protect traffic from nearby observers. Use a trusted
+environment and end admin mode when finished; see [security guidance](project.md#security).
+
 If `/sdcard/webui/index.html` does not exist, the root redirects to an embedded
-installer. After login, the user uploads the provided
-[`index.html`](https://raw.githubusercontent.com/tensorfish/open-yoto/main/firmware/components/admin/html/index.html).
+installer. After login, upload `firmware/components/admin/html/index.html`
+from the same source revision as the firmware, not an arbitrary newer copy.
 The player then serves that SD-hosted file on future visits, allowing the page
 to be customized or replaced without rebuilding the firmware. See
 [Post-flash setup](firmware/post-flash-setup.md) for the complete walkthrough.
 
 The unlocked responsive UI has four areas:
 
-- **Remote control** — play or stop MP3, ADTS AAC, and M4A/AAC-LC files;
-  display an existing `.img`, clear the physical screen, or convert a PNG/JPEG
-  to 16×16 RGB565 for preview, upload, and immediate display. Every
-  asynchronous action reports progress, success, or failure.
-- **Media files** — browse from the fixed `/sdcard/media` root; upload/download
-  files; create directories/files; rename entries; delete files and empty
-  directories. The path field can navigate descendants but rejects any path
-  outside `/sdcard/media` as well as `.`/`..`. FatFs preserves UTF-8, mixed
-  case, and names up to 96 characters.
-- **Tracks** — choose one whole folder containing audio and images. The browser
-  validates paths and collisions, converts PNG/JPEG to 520-byte 16×16 RGB565
-  OYIM files, creates the tree under `/sdcard/media`, uploads sequentially with
-  visible progress/retry state, and lazily lists current playable assets.
-- **Cards** — inspect mappings; manually refresh or poll the last captured card
-  while the URL field is empty; distinguish blank tags by UID; and write a URL
-  back only when the tag in the field matches the captured UID.
+- **Library** — inspect saved cards and their tracks, edit playlists, write a
+  saved playlist to the scanned card, or delete entries.
+- **Cards** — choose tracks and artwork from SD media. Automatic creation
+  generates a URI, saves the playlist, and writes the scanned card after
+  checking its identity. Manual mode saves a supplied URI without writing NFC.
+- **Files** — browse media, upload individual files or folders, convert
+  PNG/JPEG artwork to OYIM, download, rename, and delete files. Folder deletion
+  can recursively remove its contents and requires confirmation. Playback
+  controls are available alongside audio files.
+- **Debug** — advanced player controls, card URL read/write, and diagnostics.
 
 Remote playback, knobs, and buttons continue operating while the web UI is
 active. Physical card scans are deliberately capture-only during admin mode.
 
 ### Memory-bounded, request-driven loading
 
-The web UI does not preload every subsystem after login:
+The content index is loaded lazily on the first NFC or card-mapping request,
+not as a condition of SD mounting. The browser also loads saved mappings for
+the Library and file association badges.
 
-1. Login requests only the default media directory
-   (`/api/fs/list?path=/sdcard/media`).
-2. Opening a directory requests that one level only; traversal is never
-   recursive.
-3. Card mappings and capture state load only when **Cards** is selected.
-   Automatic capture polling runs only while its URL field is empty.
-4. Recursive track discovery runs only while **Tracks** is selected and uses
-   one bounded directory request at a time; switching tabs invalidates stale
-   traversal results.
-5. Directory JSON is streamed one entry at a time rather than building a whole
-   server-side tree and a second response copy.
-6. `mapping.json` is parsed only on the first NFC/card-mapping request.
-7. MP3 and AAC decoder state exists only for active playback and is then freed.
-8. Every web UI file, playback, display, and folder-upload path is confined to
-   `/sdcard/media`; lower-level authenticated filesystem APIs retain explicit
-   `/sdcard/...` paths for non-UI clients.
+Directory listings are requested one directory at a time and streamed by the
+server rather than serialized as a complete SD tree. Folder uploads proceed
+sequentially with progress and retry state. Card capture polling runs in
+**Debug**, or in automatic **Cards** creation while not editing an existing
+playlist; it is not conditioned on an empty URL field.
+
+MP3 and AAC decoder state exists only for active playback and is then freed.
+The reference UI confines media operations to `/sdcard/media`; authenticated
+lower-level filesystem APIs use explicit `/sdcard/...` paths.
 
 The HTTP task stack is 16 KiB rather than 32 KiB. The 9.6 KiB native access
 code raster is temporary and released before Wi-Fi starts. Heap checkpoints
@@ -388,13 +393,11 @@ absolute `/sdcard` paths. Control requests from the web UI also send explicit
   `CHRG_STAT` state instead of the unreliable board `plugstat`/`chgstat` lines.
   A transition counts only after four consecutive 500 ms samples agree, and a
   glimpse appears at most once every 30 s.
-- A three-second power-button hold, or one hour without input, playback, or an
-  active admin session, stops Bluetooth/audio/admin, blanks the display, and
-  disables the amplifier and downstream rails. Active-low `PWREN` is changed
-  to an input rather than held inactive-high, matching the factory shutdown
-  latch sequence so the physical power button can restore power. Battery-powered
-  rev #04 then releases `VIN_HOLD`; externally powered rev #04 and all rev #05
-  shutdowns retain it and enter deep sleep with active-low GPIO34 wake armed.
-  GPIO12 is isolated in every deep-sleep path. An EXT0 wake reaches normal boot
-  only after the power button remains held for two seconds; an early release
-  returns the player to its powered-down state.
+- A three-second power-button hold, or **30 minutes** without input, playback,
+  or an active admin session, enters battery-saving standby. Bluetooth/audio/admin
+  stop, the display is blanked, the accelerometer powers down, and the amplifier
+  and downstream rails are released. `PWREN` and rev #05 `VOUTEN` become inputs;
+  `VIN_HOLD` stays high on both revisions. GPIO34 EXT1 active-low wake is armed
+  before deep sleep, and a two-second power hold starts the player again.
+  GPIO12 is isolated during sleep and restored before SD startup.
+  Battery-protection cutoff is separate from this normal wakeable “off” state.

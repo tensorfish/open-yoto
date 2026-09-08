@@ -2,133 +2,175 @@
 icon: lucide/wrench
 ---
 
-# Build Environment Setup
+# Build environment setup
 
-How to set up the ESP-IDF toolchain to compile the replacement firmware in
-[`firmware/`](https://github.com/tensorfish/open-yoto/tree/main/firmware), using
-**uv** for Python version management (not Homebrew Python).
+Open Yoto is currently an **early-development source build**, not a published
+firmware release. This page prepares the ESP-IDF **v5.5** project in
+[`firmware/`](https://github.com/tensorfish/open-yoto/tree/main/firmware).
+Before connecting hardware, read the [flash guide](firmware/flash-custom-firmware.md)
+for board identification, backup, and electrical precautions.
 
 ## Prerequisites
 
-- [Homebrew](https://brew.sh/) — for `cmake`, `ninja`, `dfu-util`.
-- [uv](https://docs.astral.sh/uv/) — for the Python interpreter.
+The concrete setup below is for **macOS**, with [Homebrew](https://brew.sh/)
+for build tools and [uv](https://docs.astral.sh/uv/) for Python. Git is also
+required. Linux and Windows users should follow Espressif's
+[ESP-IDF v5.5 installation guide](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32/get-started/index.html)
+for their host, then use the same project configuration steps below.
+Shell examples use POSIX syntax.
 
 ## One-time setup (macOS)
 
 ```bash
-# 1. Build tools (Python comes from uv, NOT brew)
 brew install cmake ninja dfu-util
-
-# 2. uv-managed Python 3.12 (ESP-IDF needs 3.10+)
 uv python install 3.12
 
-# 3. Clone ESP-IDF v5.5 and install its toolchain, using uv's Python
 git clone --depth 1 --recursive --shallow-submodules -b release/v5.5 \
   https://github.com/espressif/esp-idf.git ~/esp/esp-idf
-export PATH="$(dirname "$(uv python find 3.12)"):$PATH"   # uv Python first
+export PATH="$(dirname "$(uv python find 3.12)"):$PATH"
 ~/esp/esp-idf/install.sh esp32
 ```
 
-`install.sh` downloads the Xtensa cross-compiler and creates a Python virtualenv
-(at `~/.espressif/python_env`) from the uv-managed interpreter.
+`install.sh` downloads the Xtensa tools and creates ESP-IDF's Python environment
+under `~/.espressif/python_env`. Load it in each new shell with
+`. ~/esp/esp-idf/export.sh`; do not hard-code the generated virtualenv directory.
+The `release/v5.5` branch can advance, so record the ESP-IDF commit as well as
+the Open Yoto commit when keeping a reproducible build or reporting a problem.
 
-## Build
+If you do not already have the project:
 
 ```bash
-. ~/esp/esp-idf/export.sh     # sets IDF_PATH + toolchain on PATH
+git clone https://github.com/tensorfish/open-yoto.git
+cd open-yoto
+```
+
+## Configure for your board
+
+From the Open Yoto repository root:
+
+```bash
+. ~/esp/esp-idf/export.sh
 cd firmware
 idf.py set-target esp32
+idf.py menuconfig
+```
+
+`set-target` regenerates configuration and clears the build directory. Use it
+when initially selecting the target, not as a substitute for reviewing the
+configuration on every update. Both supported code paths target **esp32**, not
+ESP32-S3 or ESP32-C3.
+
+!!! warning "Saved configuration is not a safe board preset"
+    `sdkconfig` is local build state; `sdkconfig.defaults` only supplies defaults.
+    The checkout may be configured for hardware bring-up rather than the player
+    application. Never infer your board from either file, and do not flash until
+    the following settings match your identified hardware.
+
+Under **open-yoto Application**:
+
+| Menu option | Normal player build |
+|---|---|
+| **Target hardware revision #04 (TFT, single IOX)** (`BOARD_REV_04`) | **Enabled for #04**, disabled only for the partial #05 target |
+| **Build the boot test firmware** (`APP_TEST_MODE`) | **Disabled** |
+| **Build the I2C bus scanner firmware** (`APP_SCAN_MODE`) | **Disabled** |
+| **Play a speaker test tone at boot** (`APP_SPEAKER_TEST_TONE`) | **Disabled** |
+
+The scanner and boot test replace `app_main.c`; they do not provide the normal
+NFC player/admin workflow. Board selection is compile-time, not auto-detection.
+#04 uses the GC9306 color TFT, one IO expander and SDMMC 4-bit; #05 uses the
+HT16D35x on/off display, two expanders and SDMMC 1-bit. See the
+[support matrix](firmware/flash-custom-firmware.md#supported-hardware) before
+choosing. Full-size Players and other revisions are not installation targets.
+
+Under **Serial flasher config**, for the manual UART workflow:
+
+- **Flash size → 8 MB** (the physical chip must agree).
+- **Before flashing → No reset**.
+- **After flashing → Stay in bootloader**.
+
+The last two produce `CONFIG_ESPTOOLPY_BEFORE="no_reset"` and
+`CONFIG_ESPTOOLPY_AFTER="no_reset"` in `sdkconfig`. Those are ESP-IDF's config
+strings; direct **esptool v5 CLI** commands use hyphens (`--before no-reset`).
+Do not assume the checked-in config already disables automatic reset.
+
+Under **Partition Table**, retain the **Custom partition table CSV** selection
+and `partitions.csv` filename from the project defaults. It reserves a 4 MiB
+factory app partition needed by the current firmware, including Classic
+Bluetooth; a generic small default app partition is not interchangeable.
+Save and exit menuconfig.
+
+## Build and keep a matching set
+
+```bash
 idf.py build
 ```
 
-## Flash
+Keep these together outside disposable build directories:
 
-`idf.py` drives `esptool.py` at the correct offsets, or you can raw-flash a
-single merged image (the esptool workflow used throughout this project):
+- Open Yoto and ESP-IDF commit IDs, and any local source changes.
+- The reviewed `sdkconfig` and `partitions.csv`.
+- Build artifacts, including the ELF for interpreting crash logs.
+- `components/admin/html/index.html` from **this same source revision**.
 
-```bash
-idf.py -p /dev/cu.usbserial-XXXX flash monitor
+The current layout produces:
 
-# ...or a single merged image:
-idf.py merge-bin -o merged.bin
-esptool.py --chip esp32 --flash_size 8MB write_flash 0x0 merged.bin
-```
-
-Output binaries (flash offsets):
-
-| File | Offset |
-|------|--------|
+| File | Flash offset |
+|---|---|
 | `build/bootloader/bootloader.bin` | `0x1000` |
 | `build/partition_table/partition-table.bin` | `0x8000` |
 | `build/yoto.bin` | `0x10000` |
 
-Flash size is 8 MB (`ESP32-WROVER-E` module).
+Prefer `idf.py flash`, which uses the generated arguments for this build,
+rather than manually copying offsets from stock firmware or another revision.
+The table is not an OTA layout: it has NVS, PHY data, and one factory app.
 
-### USB-C limitation
+## Flash and monitor
 
-The player’s USB-C connector supplies power through the HUSB238 PD sink; it
-does **not** expose the ESP32 boot UART or a USB-to-UART bridge. The original
-ESP32 has no native USB peripheral, so a USB-C cable connected only to the
-player cannot flash firmware. Use the external USB-UART adapter wired to
-UART0, BOOT/GPIO0, and RESET/EN as described below.
+**First-time installation must go through the
+[flash guide](firmware/flash-custom-firmware.md)**: connect the adapter, select
+its real UART port, and verify the full stock flash and SD backups before
+writing. The player's USB-C connector is power-only; it is not a UART bridge.
 
-### Linux UART flash automation
-
-The Yoto wiring does not use Espressif's conventional automatic-reset circuit:
-
-| USB-UART line | ESP32 signal |
-|---------------|--------------|
-| RTS | BOOT/GPIO0 |
-| DTR | RESET/EN |
-
-`firmware/sdkconfig` disables esptool's automatic modem-line sequences:
-
-```ini
-CONFIG_ESPTOOLPY_BEFORE="no_reset"
-CONFIG_ESPTOOLPY_AFTER="no_reset"
-```
-
-`tools/flash_esp32.py` handles the physical sequence instead. It builds, starts
-`idf.py -p /dev/ttyUSB0 flash`, waits until esptool reaches its connection
-stage, drives the manual bootloader sequence, waits for the write to complete,
-then resets the application and saves its UART output to `/tmp/yoto_scan.log`.
+With that preparation complete, from `firmware/`:
 
 ```bash
-# Standard ESP-IDF v5.5 installation paths on this Linux setup.
-export PATH="$HOME/.espressif/python_env/idf5.5_py3.12_env/bin:$(dirname "$(uv python find 3.12)"):$PATH"
-. "$HOME/.esp/esp-idf/export.sh"
-
-python3 tools/flash_esp32.py
+export PORT=/dev/cu.usbserial-XXXX  # replace with your actual adapter
+idf.py -p "$PORT" flash
+idf.py -p "$PORT" monitor
 ```
 
-The script enters bootloader mode by asserting RTS and DTR for one second,
-releasing DTR for one second, then releasing RTS. It keeps esptool's
-connection attempts active until that two-second sequence finishes.
+Enter the ROM bootloader manually for flashing. With GPIO0/BOOT held low,
+pulse RESET/EN low then high, and release BOOT. After flashing, start the monitor
+and pulse RESET with BOOT released to boot the application. Exit the monitor
+with **Ctrl+]**. Detailed checks and recovery caveats are in the
+[first-boot checklist](firmware/flash-custom-firmware.md#5-first-boot-acceptance-checklist)
+and [update/recovery guide](firmware/flash-custom-firmware.md#updates-and-recovery).
 
-**Do not use pyserial to enter bootloader mode while esptool owns the port.**
-Opening a pyserial `Serial` object reconfigures the shared Linux TTY; its
-defaults changed `/dev/ttyUSB0` from esptool's 460800 baud to 9600 during
-testing, so esptool could no longer synchronize. `tools/bootloader_esp32.py`
-uses Linux `TIOCMBIS`/`TIOCMBIC` modem-control ioctls instead. Those ioctls
-change only DTR and RTS and preserve all terminal settings.
+### Optional Linux UART automation
 
-For individual hardware actions:
+Only use the helper if your **adapter wiring** matches its assumptions:
+**RTS → BOOT/GPIO0**, **DTR → RESET/EN**, active-low. This is not a built-in
+USB interface or a universal adapter pinout. Review the configuration above
+first; the helper builds and flashes, but does not choose your board or disable
+test modes for you. It also requires the no-reset settings above.
+
+From the repository root in an ESP-IDF-enabled Linux shell:
 
 ```bash
-python3 tools/bootloader_esp32.py  # enter ROM bootloader
-python3 tools/reset_esp32.py       # reset into the application
-python3 /tmp/yoto_capture.py 30    # capture a 30-second UART log
+python3 tools/flash_esp32.py --port /dev/ttyUSB0
 ```
+
+Replace the port. The helper builds, waits for esptool's connection phase,
+invokes `tools/bootloader_esp32.py`, flashes, resets, and captures UART output
+(default `/tmp/yoto_scan.log`). The bootloader helper uses Linux modem-control
+ioctls so it does not reconfigure the baud rate while esptool owns the port.
+Do not run a second pyserial session to manipulate the same port during a
+transfer. Logs can contain the admin access code; redact before sharing.
 
 !!! note "`make` vs `idf.py`"
-    ESP-IDF **v4+ removed the GNU-Make workflow**. The current build command is
-    `idf.py` (CMake + Ninja) — there is no `make menuconfig` / `make flash` in
-    modern ESP-IDF.
+    ESP-IDF v4+ removed the GNU-Make workflow. Use `idf.py` (CMake + Ninja), not
+    `make menuconfig` or `make flash`.
 
-## Notes
-
-- The original ESP32 (Xtensa LX6) has **no native USB**, so flashing is over the
-  UART bridge only (`esptool.py ... write_flash`).
-- The `firmware/README.md` has the same instructions plus the project structure
-  and the pin-map caveat.
-- Reference: [ESP-IDF macOS setup](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/macos-setup.html).
+Next: [Post-flash setup](firmware/post-flash-setup.md) for the admin card and
+matching web UI, or [firmware architecture](open-yoto-firmware.md) for development.
+Project participation and scope live on the [project page](project.md).
