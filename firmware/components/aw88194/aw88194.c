@@ -11,7 +11,7 @@
 #include <stdint.h>
 
 #include "board_pins.h"
-#include "driver/i2c.h"
+#include "board_i2c.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -81,35 +81,14 @@ static esp_err_t aw88194_write(uint8_t address, uint8_t reg, uint16_t value)
 {
     const uint8_t data[] = { reg, (uint8_t)(value >> 8), (uint8_t)value };
 
-    return i2c_master_write_to_device(I2C_PORT, address, data, sizeof(data),
-                                      pdMS_TO_TICKS(AW88194_I2C_TIMEOUT_MS));
+    return board_i2c_write(address, data, sizeof(data), AW88194_I2C_TIMEOUT_MS);
 }
 
 static esp_err_t aw88194_read(uint8_t address, uint8_t reg, uint16_t *value)
 {
     uint8_t data[2] = { 0 };
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    esp_err_t err;
-
-    if (cmd == NULL)
-    {
-        return ESP_ERR_NO_MEM;
-    }
-
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd,
-                          (uint8_t)((address << 1) | I2C_MASTER_WRITE), true);
-    i2c_master_write_byte(cmd, reg, true);
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd,
-                          (uint8_t)((address << 1) | I2C_MASTER_READ), true);
-    i2c_master_read_byte(cmd, &data[0], I2C_MASTER_ACK);
-    i2c_master_read_byte(cmd, &data[1], I2C_MASTER_NACK);
-    i2c_master_stop(cmd);
-
-    err = i2c_master_cmd_begin(I2C_PORT, cmd,
-                               pdMS_TO_TICKS(AW88194_I2C_TIMEOUT_MS));
-    i2c_cmd_link_delete(cmd);
+    esp_err_t err = board_i2c_write_read(address, &reg, 1, data, sizeof(data),
+                                         AW88194_I2C_TIMEOUT_MS);
     if (err == ESP_OK)
     {
         *value = (uint16_t)((uint16_t)data[0] << 8) | data[1];
@@ -170,8 +149,7 @@ static esp_err_t aw88194_upload_dsp(uint8_t address, uint16_t base,
         {
             tx[i + 1] = data[(offset + i) ^ 1U];
         }
-        err = i2c_master_write_to_device(I2C_PORT, address, tx, chunk + 1,
-                                         pdMS_TO_TICKS(AW88194_I2C_TIMEOUT_MS));
+        err = board_i2c_write(address, tx, chunk + 1, AW88194_I2C_TIMEOUT_MS);
         if (err != ESP_OK)
         {
             return err;

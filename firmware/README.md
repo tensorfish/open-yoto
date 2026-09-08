@@ -167,7 +167,7 @@ firmware/
 │   ├── CMakeLists.txt       # selects one application entry point
 │   └── *_rgba.h            # generated boot, wink, and battery assets
 ├── components/
-│   ├── board/              # revision-dependent pins and addresses
+│   ├── board/              # revision-dependent pins and shared I²C master bus
 │   ├── iox/                # expander I/O and power controls
 │   ├── battery/            # CW2215B gauge and SGM41513 charger
 │   ├── lis2dh12/           # accelerometer startup

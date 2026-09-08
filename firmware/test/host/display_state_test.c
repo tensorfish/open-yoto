@@ -342,14 +342,32 @@ esp_err_t audio_init(void)
     return ESP_OK;
 }
 
+static int s_audio_play_calls;
+static int s_audio_stop_calls;
+static bool s_check_card_lock;
+
 esp_err_t audio_play(const char *path)
 {
     (void)path;
+    s_audio_play_calls++;
+    if (s_check_card_lock)
+    {
+        CHECK(s_state_mutex_depth == 1,
+              "card playback must hold the state lock");
+        CHECK(s_track_count > 0 && s_current_url[0] != '\0',
+              "card playback must publish its track state before audio starts");
+    }
     return ESP_OK;
 }
 
 esp_err_t audio_stop(void)
 {
+    s_audio_stop_calls++;
+    if (s_check_card_lock)
+    {
+        CHECK(s_state_mutex_depth == 1,
+              "card stop must hold the state lock");
+    }
     return ESP_OK;
 }
 
@@ -495,7 +513,7 @@ esp_err_t cr95hf_init(void)
     return ESP_OK;
 }
 
-bool cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
+cr95hf_poll_result_t cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
                       size_t url_cap, cr95hf_card_info_t *info)
 {
     (void)uid;
@@ -503,7 +521,7 @@ bool cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
     (void)url;
     (void)url_cap;
     (void)info;
-    return false;
+    return CR95HF_POLL_ABSENT;
 }
 
 esp_err_t cr95hf_write_url(const char *url, const uint8_t *expected_uid,
@@ -534,12 +552,17 @@ esp_err_t content_init(void)
  * performs one: doing that on the 4 KB encoder task overflows its stack. */
 static int s_content_lookups;
 static bool s_admin_active;
+static int s_mapped_track_count;
+static int s_admin_start_calls;
+static int s_admin_stop_calls;
+static int s_admin_capture_calls;
+static char s_admin_captured_url[CR95HF_URL_MAX + 1];
 
 int content_get_track_count(const char *url)
 {
     (void)url;
     s_content_lookups++;
-    return 0;
+    return s_mapped_track_count;
 }
 
 esp_err_t content_get_track(const char *url, int index,
@@ -548,6 +571,11 @@ esp_err_t content_get_track(const char *url, int index,
     (void)url;
     (void)index;
     s_content_lookups++;
+    if (s_check_card_lock)
+    {
+        CHECK(s_state_mutex_depth == 1,
+              "mapped card track state must be accessed under the state lock");
+    }
     snprintf(sound_path, sp, "/sdcard/media/track%d.mp3", index);
     return ESP_OK;
 }
@@ -564,13 +592,16 @@ esp_err_t content_get_track_image(const char *url, int index,
 
 esp_err_t admin_start(char *code_out, size_t code_size)
 {
-    (void)code_out;
-    (void)code_size;
+    s_admin_start_calls++;
+    s_admin_active = true;
+    snprintf(code_out, code_size, "123456");
     return ESP_OK;
 }
 
 esp_err_t admin_stop(void)
 {
+    s_admin_stop_calls++;
+    s_admin_active = false;
     return ESP_OK;
 }
 
@@ -582,9 +613,16 @@ bool admin_is_active(void)
 void admin_set_last_card(const uint8_t *uid, uint8_t uid_len,
                          const char *url)
 {
-    (void)uid;
-    (void)uid_len;
-    (void)url;
+    if (uid == NULL)
+    {
+        s_admin_captured_url[0] = '\0';
+    }
+    else
+    {
+        CHECK(uid_len > 0, "admin captured a card without its UID");
+        s_admin_capture_calls++;
+        snprintf(s_admin_captured_url, sizeof(s_admin_captured_url), "%s", url);
+    }
 }
 
 void admin_set_code_callback(admin_code_cb_t cb)
@@ -769,6 +807,14 @@ static void reset_state(void)
     s_paused = false;
     s_pause_calls = 0;
     s_resume_calls = 0;
+    s_audio_play_calls = 0;
+    s_audio_stop_calls = 0;
+    s_check_card_lock = false;
+    s_mapped_track_count = 0;
+    s_admin_start_calls = 0;
+    s_admin_stop_calls = 0;
+    s_admin_capture_calls = 0;
+    s_admin_captured_url[0] = '\0';
 
     s_display_base = DISPLAY_BASE_IDLE;
     s_display_image_path[0] = '\0';
@@ -851,8 +897,158 @@ static void encoder_event(int id, int delta, encoder_event_t event)
     encoder_cb(id, delta, event);
 }
 
+static void test_card_polling(void)
+{
+    const uint8_t uid[] = {0x04, 0x11, 0x22, 0x33};
+    const uint8_t other_uid[] = {0x04, 0x44, 0x55, 0x66};
+    const char *url = "https://example.com/card";
+    const char *other_url = "https://example.com/other";
+    cr95hf_card_info_t readable = {.state = CR95HF_CARD_URI};
+    cr95hf_card_info_t unreadable = {.state = CR95HF_CARD_UNREADABLE};
+    card_poll_state_t card = {0};
+
+    reset_state();
+    s_mapped_track_count = 1;
+    s_check_card_lock = true;
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     MAGIC_URL, &unreadable);
+    CHECK(s_audio_play_calls == 0 && s_admin_start_calls == 0
+          && s_admin_capture_calls == 0 && s_track_count == 0,
+          "unreadable insertion must not use partial URI bytes or play");
+    CHECK(s_audio_stop_calls == 1,
+          "new UID must stop previous playback even before payload recovery");
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     url, &readable);
+    CHECK(s_audio_play_calls == 1 && s_audio_stop_calls == 1
+          && strcmp(s_current_url, url) == 0,
+          "same held UID must recover from initial payload failure once");
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid), NULL, NULL);
+    handle_card_poll(&card, CR95HF_POLL_ERROR, NULL, 0, NULL, NULL);
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     MAGIC_URL, &unreadable);
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     url, &readable);
+    CHECK(s_audio_play_calls == 1 && s_audio_stop_calls == 1
+          && s_admin_start_calls == 0 && strcmp(s_current_url, url) == 0,
+          "RF error or later unreadable payload must not stop or repeat action");
+
+    handle_card_poll(&card, CR95HF_POLL_ABSENT, NULL, 0, NULL, NULL);
+    CHECK(s_audio_stop_calls == 1 && s_track_count == 1,
+          "one no-response poll must not remove the card");
+    handle_card_poll(&card, CR95HF_POLL_ERROR, NULL, 0, NULL, NULL);
+    handle_card_poll(&card, CR95HF_POLL_ABSENT, NULL, 0, NULL, NULL);
+    CHECK(s_audio_stop_calls == 1,
+          "RF error must interrupt consecutive absence confirmation");
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     url, &readable);
+    handle_card_poll(&card, CR95HF_POLL_ABSENT, NULL, 0, NULL, NULL);
+    CHECK(s_audio_stop_calls == 1,
+          "presence must reset absence confirmation without replaying");
+    handle_card_poll(&card, CR95HF_POLL_ABSENT, NULL, 0, NULL, NULL);
+    CHECK(s_audio_stop_calls == 2 && s_audio_play_calls == 1
+          && s_track_count == 0 && s_current_url[0] == '\0',
+          "two consecutive no-response polls must stop and clear playback");
+    handle_card_poll(&card, CR95HF_POLL_ABSENT, NULL, 0, NULL, NULL);
+    CHECK(s_audio_stop_calls == 2, "continued absence must not repeat removal");
+    CHECK(s_state_mutex_depth == 0, "card removal leaked the state lock");
+
+    reset_state();
+    card = (card_poll_state_t){0};
+    s_mapped_track_count = 1;
+    s_check_card_lock = true;
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     url, &readable);
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, other_uid, sizeof(other_uid),
+                     NULL, NULL);
+    CHECK(s_audio_stop_calls == 2 && s_audio_play_calls == 1
+          && s_track_count == 0 && s_current_url[0] == '\0',
+          "changed UID must replace immediately without inheriting validity");
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, other_uid, sizeof(other_uid),
+                     other_url, &unreadable);
+    CHECK(s_audio_play_calls == 1 && s_track_count == 0,
+          "UID-only replacement must await a valid payload");
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, other_uid, sizeof(other_uid),
+                     other_url, &readable);
+    CHECK(s_audio_stop_calls == 2 && s_audio_play_calls == 2
+          && strcmp(s_current_url, other_url) == 0,
+          "replacement payload recovery must start only the replacement");
+    for (int i = 0; i < 20; i++)
+    {
+        handle_card_poll(&card, CR95HF_POLL_ERROR, NULL, 0, NULL, NULL);
+    }
+    CHECK(s_audio_stop_calls == 2 && s_track_count == 1,
+          "twenty consecutive RF errors must preserve the active card");
+    handle_card_poll(&card, CR95HF_POLL_ABSENT, NULL, 0, NULL, NULL);
+    handle_card_poll(&card, CR95HF_POLL_ERROR, NULL, 0, NULL, NULL);
+    CHECK(s_audio_stop_calls == 2,
+          "absence must interrupt the consecutive RF error budget");
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, other_uid, sizeof(other_uid),
+                     other_url, &readable);
+    for (int i = 0; i < 20; i++)
+    {
+        handle_card_poll(&card, CR95HF_POLL_ERROR, NULL, 0, NULL, NULL);
+    }
+    CHECK(s_audio_stop_calls == 2 && s_audio_play_calls == 2,
+          "present sample must reset error budget without restarting playback");
+    handle_card_poll(&card, CR95HF_POLL_ERROR, NULL, 0, NULL, NULL);
+    CHECK(s_audio_stop_calls == 3 && s_track_count == 0
+          && s_current_url[0] == '\0',
+          "twenty-first consecutive RF error must clear stale playback");
+    CHECK(s_state_mutex_depth == 0, "mapped playback leaked the state lock");
+
+    reset_state();
+    card = (card_poll_state_t){0};
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     MAGIC_URL, &readable);
+    handle_card_poll(&card, CR95HF_POLL_ERROR, NULL, 0, NULL, NULL);
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     MAGIC_URL, &unreadable);
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     MAGIC_URL, &readable);
+    CHECK(s_admin_active && s_admin_start_calls == 1 && s_admin_stop_calls == 0,
+          "held admin card must not toggle again after RF or payload errors");
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, other_uid, sizeof(other_uid),
+                     url, &unreadable);
+    CHECK(s_admin_capture_calls == 0,
+          "admin must not expose an unreadable replacement as blank");
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, other_uid, sizeof(other_uid),
+                     url, &readable);
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, other_uid, sizeof(other_uid),
+                     "", &unreadable);
+    CHECK(s_admin_capture_calls == 1 && strcmp(s_admin_captured_url, url) == 0,
+          "admin capture must recover once and retain successful same-UID data");
+    handle_card_poll(&card, CR95HF_POLL_ABSENT, NULL, 0, NULL, NULL);
+    CHECK(strcmp(s_admin_captured_url, url) == 0,
+          "transient absence must preserve admin's write target");
+    handle_card_poll(&card, CR95HF_POLL_ABSENT, NULL, 0, NULL, NULL);
+    CHECK(s_admin_captured_url[0] == '\0' && s_admin_active,
+          "confirmed removal must clear capture without disabling admin");
+    cr95hf_card_info_t blank = {.state = CR95HF_CARD_BLANK};
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     MAGIC_URL, &blank);
+    CHECK(s_admin_capture_calls == 2 && s_admin_captured_url[0] == '\0'
+          && s_admin_stop_calls == 0,
+          "known blank card remains capturable but must ignore stale URI bytes");
+
+    reset_state();
+    card = (card_poll_state_t){0};
+    s_powered_off = true;
+    s_mapped_track_count = 1;
+    s_check_card_lock = true;
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, uid, sizeof(uid),
+                     url, &readable);
+    handle_card_poll(&card, CR95HF_POLL_PRESENT, other_uid, sizeof(other_uid),
+                     MAGIC_URL, &readable);
+    play_card(url);
+    CHECK(s_audio_play_calls == 0 && s_admin_start_calls == 0
+          && s_track_count == 0 && s_current_url[0] == '\0',
+          "scan completing after shutdown must not restart playback or admin");
+    CHECK(s_state_mutex_depth == 0, "powered-off playback leaked the state lock");
+}
+
 int main(void)
 {
+    test_card_polling();
     /* ---------------------------------------------------- 1. BOOT --------- */
     {
         uint32_t start;

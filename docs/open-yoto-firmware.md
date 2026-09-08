@@ -58,7 +58,7 @@ flowchart TD
 
 | Component | Job |
 |-----------|-----|
-| `board` | the pin map (which wire goes where) |
+| `board` | pin map and shared synchronous I²C master bus |
 | `iox` | the two I/O expander chips (buttons, display, power control) |
 | `battery` | fuel-gauge + battery level / low-battery detection |
 | `ht16d35x` | the 16×16 LED display |
@@ -76,7 +76,7 @@ flowchart TD
 On power-up, in order:
 
 1. Initialize settings storage (erase it if it's corrupt).
-2. Start the I²C bus + both I/O expanders.
+2. Start the shared I²C master bus and initialize the IO expanders (one on #04, two on #05).
 3. Initialize the CW2215B battery monitor.
 4. Initialize the accelerometer, display, audio, and codec.
 5. If no external power is present, refuse normal startup below the stock 4%
@@ -94,6 +94,18 @@ Admin services remain off at boot. Scanning the exact admin magic URL starts
 the `openyoto` SoftAP, creates a six-character code, and starts the HTTP server
 on demand.
 
+The board owns one ESP-IDF `driver/i2c_master.h` bus with device handles
+registered once at startup. IOX, battery, accelerometer, amplifier, and DAC
+transactions share the driver's serialization and use bounded millisecond
+timeouts. Register reads retain repeated-START semantics. The legacy I²C
+driver is no longer used, including in the scanner application.
+
+NFC uses bare `0x55` Echo with a 530-attempt recovery bound. TX stays idle-high
+instead of injecting a GPIO break into an already-running reader; Echo also
+wakes a sleeping reader, with 10 ms allowed for oscillator startup. A missing
+reader still times out. The final wake-sequence change is host-tested and built,
+but not hardware-verified; see [NFC verification status](subsystems/nfc.md#uart-startup).
+
 ## The main loop (the state machine)
 
 The loop handles deferred physical-control work first, then:
@@ -105,8 +117,8 @@ The loop handles deferred physical-control work first, then:
 4. Maintain display-transient deadlines.
 5. Check the 30-minute inactivity deadline.
 
-A card is "new" on a rising edge or when its UID changes (a swap within one
-poll window):
+A card is new when its UID changes or returns after confirmed removal.
+UID presence and successful content acquisition are tracked separately:
 
 - **Magic URL** (`https://openyoto.com/admin`) → explicitly toggle the
   on-demand admin server.
@@ -116,8 +128,15 @@ poll window):
 - **Admin inactive** → perform normal catalog lookup, image display, and audio
   playback.
 
-Removing the card stops playback; a swap (or rapid remove/re-insert) is
-detected by UID change, not just presence.
+After successful acquisition, held-card polls read only the UID. A swap
+invalidates the previous action immediately and acquires content on the next
+poll. An initially unreadable card can recover on a later scheduled read;
+successful actions are not repeated. NDEF diagnostics stop at complete content
+instead of reading unrelated trailing pages.
+
+Two consecutive no-response polls or 21 consecutive driver-error polls stop
+playback and clear the card; a single malformed RF frame is not removal.
+Presence resets both counts, and opposite failure types interrupt each streak.
 
 The knobs/buttons are handled as events (not polled in the main loop):
 
@@ -261,6 +280,9 @@ Phone A2DP ─────> Bluedroid SBC ─────> bounded PCM worker �
   shutdown cancel and drain that session before deinitializing Bluetooth.
   Explicit audio-source ownership prevents local content and Bluetooth from
   writing I²S concurrently.
+  Rev #04 Bluetooth playback was user-confirmed working after the shared
+  I²C master-driver cutover on 2026-09-08; this is not a rev #05 or long-duration
+  playback qualification.
 - Rev #04 uses one AW88194A at 7-bit `0x34`. The replacement reproduces the
   factory ET6416 reset, register table, SmartK firmware/configuration, VCALB,
   DSP/I²S/PLL checks, interrupt setup, and hard-unmute.

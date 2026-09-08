@@ -29,8 +29,11 @@ Strings confirming both paths:
 - `strings.txt:3276` `Unknown NFC Interface`
 - `strings.txt:3500` `Unknown NFC Interface Type`
 
-UART reset/synchronization sends `[0x00, 0x55]` Echo frames until `0x55` is
-returned. The retry path permits up to 530 attempts with a 1 ms delay.
+UART reset/synchronization sends bare `0x55` until `0x55` is returned.
+Internal `00 55` buffers lose their leading zero in UART callback
+`0x40110a58` (pointer increment and length decrement at `0x40110a6e–75`).
+The retry helper permits 530 attempts with a 1 ms inter-attempt delay;
+the receive callback additionally waits at least 10 ms.
 
 ---
 
@@ -95,8 +98,10 @@ objdump.
 | `0x0E` | error response code | timeout diagnostics |
 | `0x87` | no-response / frame-waiting timeout | timeout diagnostics |
 
-Normal command frame: `[0]=0x00`, `[1]=command`, `[2]=payload length`,
-`[3..]=payload`. Echo is the two-byte exception `[0x00, 0x55]`.
+Internal command frame: `[0]=0x00`, `[1]=command`, `[2]=payload length`,
+`[3..]=payload`; internal Echo is `[0x00, 0x55]`. These are not UART wire
+frames: the callback strips `[0]`, leaving bare `55` for Echo and
+`[command][length][payload]` for normal commands.
 
 ### 3.2 ISO14443-A tag command bytes (initialized DRAM, seg2)
 
@@ -113,8 +118,10 @@ Observed values (raw hex dump of seg2):
 
 Reconstructed from strings + the `FUN_seg4__4010d2ac`/`4010d458` decompilation:
 
-1. **RF tuning** — write TimerW (`09 04 3A 00 60 04`) and modulation/gain
-   (`09 04 68 01 01 D0`).
+1. **Apparent tuning payloads** — `09 04 3A 00 60 04` and
+   `09 04 68 01 01 D0` are passed through the SendRecv builder at
+   `0x4010d270`. Direct disassembly does not establish WRREG execution or
+   effective TimerW/modulation/gain values from these arrays.
 2. **REQA** (`_cr95hf_drv_reqa`) — send `0x26`, expect ATQA. Strings:
    `_cr95hf_drv_reqa() : REQA failed` (3176–3177) and
    `_cr95hf_drv_reqa() timeout` (3174–3175).
@@ -149,7 +156,7 @@ rodata addresses.
 |---|---|---|
 | `0x400d5428` | `DAT` → driver runtime struct ptr (`0x3ffbf8f4`) | `FUN_seg4__4010e4d0` reads it |
 | `0x400d5438` | log tag `"NFC driver"` (`0x3f41ec7e`) | literal ref scan |
-| `0x400d5444` | **fn ptr → `0x4024bac4`** (transport send/recv) | `PTR_FUN_seg4__4024bac4_seg4__400d5444` |
+| `0x400d5444` | **fn ptr → `0x4024bac4`** (context check) | not the UART byte transport |
 | `0x400d5450` | ptr → REQA buffer `0x3ffbf8ee` | `FUN_seg4__4010d2ac` uses it |
 | `0x400d5454` | `_cr95hf_drv_reqa() timeout` str `0x3f41ed3b` | literal ref |
 | `0x400d545c` | `_cr95hf_drv_reqa() : REQA failed` `0x3f41ed9b` | literal ref |
@@ -160,7 +167,7 @@ rodata addresses.
 | `0x400d5500` | `Card in NFC field != 1` `0x3f41f348` | literal ref |
 | `0x400d5504/508/50c` | counter variables (error/read counts) | `FUN_seg4__4010e4d0` increments |
 | `0x400d0730` | `Initialising CR95HF NFC chip` `0x3f402162` | literal ref (init) |
-| `0x4024bac4` | **transport send/recv** (UART or SPI) | fn ptr target; sits between decompiled `FUN_seg4__4024ba74` (ends 0x4024bac4) and `FUN_seg4__4024bbcc` |
+| `0x4024bac4` | **context-validity check** | UART byte transport is callback `0x40110a58` |
 
 ### 4.2 HAL (upper layer) — decompiled, `seg4`
 
@@ -171,8 +178,8 @@ rodata addresses.
 | `0x4010d270` | 58 | **build SendRecv frame** (cmd `0x04`) | decompiled: `buf[1]=4`, `buf[2]=len` |
 | `0x4010d2ac` | 282 | **`_cr95hf_drv_reqa`** | sends `0x26 0x07`; checks `0x0E`/`0x87` |
 | `0x4010d3c8` | 47 | **WUPA session reset** | sends `0x52 0x07`; full NDEF reader calls it on exit |
-| `0x4010d3f8` | 47 | **adjust TimerW** | sends `09 04 3A 00 60 04` |
-| `0x4010d428` | 47 | **set modulation/gain** | sends `09 04 68 01 01 D0` |
+| `0x4010d3f8` | 47 | **apparent TimerW payload** | sends `09 04 3A 00 60 04` through SendRecv, not WRREG |
+| `0x4010d428` | 47 | **apparent modulation/gain payload** | sends `09 04 68 01 01 D0` through SendRecv, not WRREG |
 | `0x4010d458` | 307 | **ANTICOLLISION / SELECT L1** | starts with `93 20 08` |
 | `0x4010d598` | 67 | select/read sub-step | [INFERENCE] |
 | `0x4010d5dc` | 243 | select/read sub-step | [INFERENCE] |
@@ -345,7 +352,8 @@ tag: authenticate/read UID, write CC block, write NDEF TLV, read-back verify, re
   addresses (string literal pools) and (b) matching decompiled constants (`0x04` SendRecv, `0x26`
   REQA, `0x52` WUPA, `0x93/0x95`, `0xE1 0x10` CC magic, `0xD1` NDEF, `0x55 'U'`, `0x04 https://`).
 - The CR95HF low-level driver body is established by its command buffers and
-  callsites. `0x4024bac4`, previously labelled as the transport, is only a
-  context-validity check; the lower UART transport remains unsymbolized.
+  callsites. `0x4024bac4` is only a context-validity check; UART callback
+  `0x40110a58` establishes on-wire framing. Linear Xtensa disassembly can lose
+  alignment at padding; decode function and branch entrypoints separately.
 - The one-page `A2` write primitive is exact. Higher-level factory policy for
   choosing pages and formatting generic zero-CC tags remains unresolved.

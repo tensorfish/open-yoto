@@ -4,7 +4,7 @@
 #include "iox.h"
 #include "board_pins.h"
 
-#include "driver/i2c.h"
+#include "board_i2c.h"
 #include "esp_log.h"
 
 static const char *TAG = "iox";
@@ -32,14 +32,12 @@ static const uint8_t IOX_ADDRS[2] = { I2C_ADDR_IOX_0, I2C_ADDR_IOX_1 };
 static esp_err_t iox_write_reg(uint8_t exp, uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
-    return i2c_master_write_to_device(I2C_PORT, IOX_ADDRS[exp], buf, 2,
-                                      pdMS_TO_TICKS(IOX_TIMEOUT_MS));
+    return board_i2c_write(IOX_ADDRS[exp], buf, 2, IOX_TIMEOUT_MS);
 }
 
 static esp_err_t iox_read_reg(uint8_t exp, uint8_t reg, uint8_t *val)
 {
-    return i2c_master_write_read_device(I2C_PORT, IOX_ADDRS[exp], &reg, 1,
-                                        val, 1, pdMS_TO_TICKS(IOX_TIMEOUT_MS));
+    return board_i2c_write_read(IOX_ADDRS[exp], &reg, 1, val, 1, IOX_TIMEOUT_MS);
 }
 
 static esp_err_t iox_set_pin_direction(uint8_t pin, bool output)
@@ -83,26 +81,13 @@ static const uint8_t IOX1_OUT[2] = { 0x5F, 0xDF };
 
 esp_err_t iox_init(void)
 {
-    esp_err_t err;
-
-    i2c_config_t cfg = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = PIN_I2C_SDA,
-        .scl_io_num = PIN_I2C_SCL,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_MASTER_FREQ_HZ,
-    };
-    err = i2c_param_config(I2C_PORT, &cfg);
-    if (err != ESP_OK) return err;
-    err = i2c_driver_install(I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
+    esp_err_t err = board_i2c_init();
     if (err != ESP_OK) return err;
 
     /* Rev #04 has one ET6416; newer boards have two PI4IOE5V6416 parts. */
     for (int exp = 0; exp < IOX_COUNT; exp++) {
         uint8_t probe = 0;
-        err = i2c_master_write_read_device(I2C_PORT, IOX_ADDRS[exp], &(uint8_t){0x00},
-                                           1, &probe, 1, pdMS_TO_TICKS(IOX_TIMEOUT_MS));
+        err = board_i2c_write_read(IOX_ADDRS[exp], &(uint8_t){0x00}, 1, &probe, 1, IOX_TIMEOUT_MS);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "IO expander %d (0x%02x) not responding: %s",
                      exp, IOX_ADDRS[exp], esp_err_to_name(err));

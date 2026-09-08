@@ -1126,11 +1126,16 @@ static void play_card(const char *url)
     char image_path[128];
     int track_count = content_get_track_count(url);
 
+    state_lock();
+    if (s_powered_off)
+    {
+        state_unlock();
+        return;
+    }
     if (track_count <= 0)
     {
         ESP_LOGI(TAG, "card has no mapped tracks: %s",
                  url[0] == '\0' ? "<none>" : url);
-        state_lock();
         display_set_idle_locked();
         state_unlock();
         return;
@@ -1916,6 +1921,188 @@ static void log_card_diagnostics(const uint8_t *uid, uint8_t uid_len,
     }
 }
 
+/* Presence survives a noisy RF sample; payload validity is independent of UID
+ * activation so a held card can recover from an initial NDEF read failure. */
+#define CARD_ABSENT_POLLS 2
+#define CARD_ERROR_POLLS 21
+
+typedef struct {
+    bool present;
+    bool action_consumed;
+    uint8_t uid[CR95HF_UID_MAX];
+    uint8_t uid_len;
+    uint8_t absent_polls;
+    uint8_t error_polls;
+} card_poll_state_t;
+
+static void handle_card_poll(card_poll_state_t *card,
+                             cr95hf_poll_result_t result,
+                             const uint8_t *uid, uint8_t uid_len,
+                             const char *url, const cr95hf_card_info_t *info)
+{
+    state_lock();
+    bool powered_off = s_powered_off;
+    state_unlock();
+    if (powered_off)
+    {
+        return;
+    }
+    if (result != CR95HF_POLL_PRESENT)
+    {
+        if (result == CR95HF_POLL_ABSENT)
+        {
+            card->error_polls = 0;
+            if (card->absent_polls < CARD_ABSENT_POLLS)
+            {
+                card->absent_polls++;
+            }
+        }
+        else
+        {
+            card->absent_polls = 0;
+            if (card->error_polls < CARD_ERROR_POLLS)
+            {
+                card->error_polls++;
+            }
+        }
+        if (!card->present
+            || (card->absent_polls < CARD_ABSENT_POLLS
+                && card->error_polls < CARD_ERROR_POLLS))
+        {
+            return;
+        }
+
+        card->present = false;
+        card->action_consumed = false;
+        activity_note();
+        if (admin_is_active())
+        {
+            admin_set_last_card(NULL, 0, NULL);
+        }
+        state_lock();
+        if (s_track_count > 0)
+        {
+            audio_stop();
+        }
+        s_track_count = 0;
+        s_track_index = 0;
+        s_current_url[0] = '\0';
+        if (s_display_base == DISPLAY_BASE_ADMIN && s_admin_code[0] != '\0')
+        {
+            display_show_access_code(s_admin_code);
+        }
+        else
+        {
+            display_set_idle_locked();
+        }
+        state_unlock();
+        return;
+    }
+
+    card->absent_polls = 0;
+    card->error_polls = 0;
+    bool new_card = !card->present || uid_len != card->uid_len
+                   || memcmp(uid, card->uid, uid_len) != 0;
+    if (new_card)
+    {
+        activity_note();
+        memcpy(card->uid, uid, uid_len);
+        card->uid_len = uid_len;
+        card->present = true;
+        card->action_consumed = false;
+        if (info != NULL)
+        {
+            log_card_diagnostics(uid, uid_len, url, info);
+        }
+
+        /* A changed UID invalidates both playback and any admin write target,
+         * even when its payload cannot yet be read. */
+        if (admin_is_active())
+        {
+            admin_set_last_card(NULL, 0, NULL);
+        }
+        state_lock();
+        if (s_powered_off)
+        {
+            state_unlock();
+            return;
+        }
+        audio_stop();
+        s_track_count = 0;
+        s_track_index = 0;
+        s_current_url[0] = '\0';
+        if (s_display_base != DISPLAY_BASE_ADMIN)
+        {
+            display_set_idle_locked();
+        }
+        state_unlock();
+    }
+
+    if (card->action_consumed || info == NULL
+        || info->state == CR95HF_CARD_UNREADABLE)
+    {
+        return;
+    }
+    if (!new_card)
+    {
+        log_card_diagnostics(uid, uid_len, url, info);
+    }
+    /* Never treat stale/partial URL bytes as a URI or an unreadable card as a
+     * blank card. Readable non-URI cards can still be captured by admin. */
+    const char *card_url = info->state == CR95HF_CARD_URI ? url : "";
+    if (info->state == CR95HF_CARD_URI && strcmp(card_url, MAGIC_URL) == 0)
+    {
+        admin_lifecycle_lock();
+        if (s_powered_off)
+        {
+            admin_lifecycle_unlock();
+            return;
+        }
+        if (admin_is_active())
+        {
+            esp_err_t err = admin_stop();
+            if (err != ESP_OK)
+            {
+                ESP_LOGE(TAG, "admin stop failed: %s", esp_err_to_name(err));
+            }
+            else
+            {
+                state_lock();
+                s_admin_code[0] = '\0';
+                display_set_idle_locked();
+                state_unlock();
+                ESP_LOGI(TAG, "admin inactive");
+            }
+        }
+        else
+        {
+            char code[ADMIN_ACCESS_CODE_LEN + 1];
+            esp_err_t err = admin_start(code, sizeof(code));
+            if (err == ESP_OK)
+            {
+                ESP_LOGI(TAG,
+                         "admin active (SSID=openyoto, code=%s, http://192.168.4.1/)",
+                         code);
+            }
+            else
+            {
+                ESP_LOGE(TAG, "admin startup failed: %s", esp_err_to_name(err));
+            }
+        }
+        admin_lifecycle_unlock();
+    }
+    else if (admin_is_active())
+    {
+        admin_set_last_card(uid, uid_len, card_url);
+        ESP_LOGI(TAG, "admin captured card without playback");
+    }
+    else if (info->state == CR95HF_CARD_URI)
+    {
+        play_card(card_url);
+    }
+    card->action_consumed = true;
+}
+
 /* ------------------------------------------------------------ app_main --- */
 void app_main(void)
 {
@@ -2067,9 +2254,7 @@ void app_main(void)
 
     uint8_t uid[CR95HF_UID_MAX];
     char url[CR95HF_URL_MAX + 1];
-    bool card_present = false;
-    uint8_t last_uid[CR95HF_UID_MAX];
-    uint8_t last_uid_len = 0;
+    card_poll_state_t card = {0};
 
     while (1)
     {
@@ -2078,122 +2263,18 @@ void app_main(void)
 
         stack_watch();
 
-        /* A new NFC card either toggles admin, is captured by active admin,
-         * or starts its mapped first track. */
+        /* Once acquired, check only UID presence. A replacement invalidates
+         * the old action now and acquires its payload on the next poll. */
         cr95hf_card_info_t card_info;
+        bool acquire_payload = !card.action_consumed;
         uint8_t uid_len = sizeof(uid);
-        bool card = cr95hf_poll_card(uid, &uid_len, url, sizeof(url),
-                                     &card_info);
-        /* A card is "new" on a rising edge, or when its UID changes while a
-         * card is held (a swap within one poll window). */
-        bool new_card = card && !card_present;
-        if (card && card_present
-            && (uid_len != last_uid_len
-                || memcmp(uid, last_uid, uid_len) != 0))
-        {
-            new_card = true;
-        }
-
-        if (new_card)
-        {
-            activity_note();
-            memcpy(last_uid, uid, uid_len);
-            last_uid_len = uid_len;
-            log_card_diagnostics(uid, uid_len, url, &card_info);
-
-            /* Replacing a card always stops the previous card before handling
-             * the new card's mode or playback action. */
-            state_lock();
-            audio_stop();
-            s_track_count = 0;
-            s_track_index = 0;
-            s_current_url[0] = '\0';
-            state_unlock();
-
-            if (strcmp(url, MAGIC_URL) == 0)
-            {
-                admin_lifecycle_lock();
-                if (s_powered_off)
-                {
-                    admin_lifecycle_unlock();
-                    continue;
-                }
-                if (admin_is_active())
-                {
-                    esp_err_t err = admin_stop();
-                    if (err != ESP_OK)
-                    {
-                        ESP_LOGE(TAG, "admin stop failed: %s",
-                                 esp_err_to_name(err));
-                    }
-                    else
-                    {
-                        state_lock();
-                        s_admin_code[0] = '\0';
-                        display_set_idle_locked();
-                        state_unlock();
-                        ESP_LOGI(TAG, "admin inactive");
-                    }
-                }
-                else
-                {
-                    char code[ADMIN_ACCESS_CODE_LEN + 1];
-                    esp_err_t err = admin_start(code, sizeof(code));
-
-                    if (err == ESP_OK)
-                    {
-                        ESP_LOGI(TAG,
-                                 "admin active (SSID=openyoto, code=%s, http://192.168.4.1/)",
-                                 code);
-                    }
-                    else
-                    {
-                        ESP_LOGE(TAG, "admin startup failed: %s",
-                                 esp_err_to_name(err));
-                    }
-                }
-                admin_lifecycle_unlock();
-            }
-            else if (admin_is_active())
-            {
-                admin_set_last_card(uid, uid_len, url);
-                ESP_LOGI(TAG, "admin captured card without playback");
-            }
-            else
-            {
-                play_card(url);
-            }
-        }
-        else if (!card && card_present)
-        {
-            activity_note();
-            if (admin_is_active())
-            {
-                admin_set_last_card(NULL, 0, NULL);
-            }
-            /* Card removed: stop playback so controls don't act on a ghost
-             * card. */
-            state_lock();
-            if (s_track_count > 0)
-            {
-                audio_stop();
-                s_track_count = 0;
-                s_track_index = 0;
-                s_current_url[0] = '\0';
-            }
-            if (s_display_base == DISPLAY_BASE_ADMIN && s_admin_code[0] != '\0')
-            {
-                display_show_access_code(s_admin_code);
-            }
-            else
-            {
-                display_set_idle_locked();
-            }
-            state_unlock();
-        }
-
-        /* Remember presence so a held card acts once, not every poll. */
-        card_present = card;
+        cr95hf_poll_result_t result = cr95hf_poll_card(
+            uid, &uid_len, acquire_payload ? url : NULL,
+            acquire_payload ? sizeof(url) : 0,
+            acquire_payload ? &card_info : NULL);
+        handle_card_poll(&card, result, uid, uid_len,
+                         acquire_payload ? url : NULL,
+                         acquire_payload ? &card_info : NULL);
 
         /* Refresh charger state before any battery-only shutdown decision.
          * Safety sampling runs even while admin owns the display. */

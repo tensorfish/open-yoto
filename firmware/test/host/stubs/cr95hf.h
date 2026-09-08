@@ -1,6 +1,6 @@
 /*
  * Host-test stub for cr95hf.h. Mirrors the types and prototypes app_main.c
- * references; the host test provides no-op/false definitions.
+ * references; the host test provides no-op definitions.
  */
 #ifndef HOST_STUB_CR95HF_H
 #define HOST_STUB_CR95HF_H
@@ -34,8 +34,14 @@ typedef struct {
     uint8_t raw_ndef[256];
 } cr95hf_card_info_t;
 
+typedef enum {
+    CR95HF_POLL_ABSENT = 0,
+    CR95HF_POLL_PRESENT,
+    CR95HF_POLL_ERROR,
+} cr95hf_poll_result_t;
+
 esp_err_t cr95hf_init(void);
-bool cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
+cr95hf_poll_result_t cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
                       size_t url_cap, cr95hf_card_info_t *info);
 esp_err_t cr95hf_write_url(const char *url, const uint8_t *expected_uid,
                            uint8_t expected_uid_len);

@@ -7,16 +7,13 @@
  *
  * The chip boots in hardware mode; bit 2 of register 0x02 switches it to
  * software (I2C) mode so that volume and mute are I2C-controlled. The shared
- * I2C bus is installed by iox_init(); this driver only writes registers over
- * the existing bus with the legacy i2c_master_write_to_device API, matching
- * iox.c.
+ * I2C bus is initialized by iox_init() through the shared board bus owner.
  */
 #include "codec_es8156.h"
 #include "board_pins.h"
 
-#include "driver/i2c.h"
+#include "board_i2c.h"
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
 
 static const char *TAG = "codec_es8156";
 
@@ -97,9 +94,7 @@ static esp_err_t codec_es8156_write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
 
-    return i2c_master_write_to_device(I2C_PORT, I2C_ADDR_HP_DAC, buf,
-                                      sizeof(buf),
-                                      pdMS_TO_TICKS(ES8156_I2C_TIMEOUT_MS));
+    return board_i2c_write(I2C_ADDR_HP_DAC, buf, sizeof(buf), ES8156_I2C_TIMEOUT_MS);
 }
 
 /**

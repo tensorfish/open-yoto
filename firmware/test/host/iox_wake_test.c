@@ -34,22 +34,8 @@ static size_t s_write_count;
 static uint8_t s_last_read_address;
 static uint8_t s_last_read_reg;
 
-esp_err_t i2c_param_config(i2c_port_t port, const i2c_config_t *config)
+esp_err_t board_i2c_init(void)
 {
-    (void)port;
-    (void)config;
-    return ESP_OK;
-}
-
-esp_err_t i2c_driver_install(i2c_port_t port, int mode,
-                             size_t rx_buf_len, size_t tx_buf_len,
-                             int intr_alloc_flags)
-{
-    (void)port;
-    (void)mode;
-    (void)rx_buf_len;
-    (void)tx_buf_len;
-    (void)intr_alloc_flags;
     return ESP_OK;
 }
 
@@ -60,16 +46,15 @@ static int expander_for_address(uint8_t address)
     return -1;
 }
 
-esp_err_t i2c_master_write_read_device(i2c_port_t port, uint8_t address,
+esp_err_t board_i2c_write_read(uint8_t address,
                                        const uint8_t *write_buffer,
                                        size_t write_size,
                                        uint8_t *read_buffer,
                                        size_t read_size,
-                                       TickType_t timeout)
+                                       int timeout_ms)
 {
     int expander = expander_for_address(address);
-    (void)port;
-    (void)timeout;
+    (void)timeout_ms;
     if (expander < 0 || write_size != 1 || read_size != 1)
     {
         return ESP_FAIL;
@@ -80,14 +65,13 @@ esp_err_t i2c_master_write_read_device(i2c_port_t port, uint8_t address,
     return ESP_OK;
 }
 
-esp_err_t i2c_master_write_to_device(i2c_port_t port, uint8_t address,
+esp_err_t board_i2c_write(uint8_t address,
                                      const uint8_t *write_buffer,
                                      size_t write_size,
-                                     TickType_t timeout)
+                                     int timeout_ms)
 {
     int expander = expander_for_address(address);
-    (void)port;
-    (void)timeout;
+    (void)timeout_ms;
     if (expander < 0 || write_size != 2)
     {
         return ESP_FAIL;

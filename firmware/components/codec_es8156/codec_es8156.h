@@ -2,9 +2,9 @@
  * codec_es8156.h — ES8156 headphone DAC driver (I2C).
  *
  * The ES8156 is a stereo headphone DAC on the shared I2C bus. The bus itself
- * is installed by iox_init(); this driver only issues register writes over it
- * via i2c_master_write_to_device at I2C_ADDR_HP_DAC (0x09, the board's strap
- * vs. the chip's 0x08 default). It brings the part into software (I2C) mode,
+ * is initialized by iox_init(); this driver issues synchronous board-bus
+ * writes at I2C_ADDR_HP_DAC (0x08 on rev #04, 0x09 on rev #05). It brings
+ * the part into software (I2C) mode,
  * configures the 16-bit I2S slave input, and exposes percentage volume plus
  * mute/unmute.
  */

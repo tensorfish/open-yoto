@@ -17,7 +17,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/i2c.h"
+#include "board_i2c.h"
 
 #include "board_pins.h"
 #include "iox.h"
@@ -34,12 +34,7 @@ void app_main(void)
     ESP_LOGI(TAG, "=== I2C SCAN v1 (SDA=21 SCL=25) ===");
     for (int addr = 0x08; addr <= 0x77; addr++)
     {
-        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-        i2c_master_start(cmd);
-        i2c_master_write_byte(cmd, (uint8_t)((addr << 1) | I2C_MASTER_WRITE), true);
-        i2c_master_stop(cmd);
-        esp_err_t err = i2c_master_cmd_begin(I2C_PORT, cmd, pdMS_TO_TICKS(50));
-        i2c_cmd_link_delete(cmd);
+        esp_err_t err = board_i2c_probe((uint8_t)addr, 50);
         if (err == ESP_OK)
         {
             ESP_LOGI(TAG, "0x%02x ACK", addr);

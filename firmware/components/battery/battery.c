@@ -9,7 +9,7 @@
 #include "board_pins.h"
 #include "iox.h"
 
-#include "driver/i2c.h"
+#include "board_i2c.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -120,17 +120,13 @@ static bool s_batfet_fault_warned = false;
 /* Read a single 8-bit register from the CW2215B over the shared I2C bus. */
 static esp_err_t cw2215b_read_reg(uint8_t reg, uint8_t *val)
 {
-    return i2c_master_write_read_device(I2C_PORT, I2C_ADDR_FUEL_GAUGE,
-                                        &reg, 1, val, 1,
-                                        pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS));
+    return board_i2c_write_read(I2C_ADDR_FUEL_GAUGE, &reg, 1, val, 1, BATTERY_I2C_TIMEOUT_MS);
 }
 
 static esp_err_t cw2215b_write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
-    return i2c_master_write_to_device(I2C_PORT, I2C_ADDR_FUEL_GAUGE,
-                                      buf, sizeof(buf),
-                                      pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS));
+    return board_i2c_write(I2C_ADDR_FUEL_GAUGE, buf, sizeof(buf), BATTERY_I2C_TIMEOUT_MS);
 }
 
 /* Exact 80-byte profiles embedded in the stock image. hwconfig_04 selects
@@ -325,9 +321,7 @@ static esp_err_t cw2215b_ensure_ready(void)
 static esp_err_t cw2215b_read_reg16(uint8_t reg, uint16_t *val)
 {
     uint8_t buf[2];
-    esp_err_t err = i2c_master_write_read_device(I2C_PORT, I2C_ADDR_FUEL_GAUGE,
-                                                 &reg, 1, buf, sizeof(buf),
-                                                 pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS));
+    esp_err_t err = board_i2c_write_read(I2C_ADDR_FUEL_GAUGE, &reg, 1, buf, sizeof(buf), BATTERY_I2C_TIMEOUT_MS);
     if (err == ESP_OK)
     {
         *val = (uint16_t)(((uint16_t)buf[0] << 8) | buf[1]);
@@ -378,17 +372,13 @@ static bool cw2215b_read_soc(int *soc)
 
 static esp_err_t sgm41513_read_reg(uint8_t reg, uint8_t *val)
 {
-    return i2c_master_write_read_device(I2C_PORT, I2C_ADDR_CHARGER,
-                                        &reg, 1, val, 1,
-                                        pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS));
+    return board_i2c_write_read(I2C_ADDR_CHARGER, &reg, 1, val, 1, BATTERY_I2C_TIMEOUT_MS);
 }
 
 static esp_err_t sgm41513_write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t data[2] = { reg, val };
-    return i2c_master_write_to_device(I2C_PORT, I2C_ADDR_CHARGER,
-                                      data, sizeof(data),
-                                      pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS));
+    return board_i2c_write(I2C_ADDR_CHARGER, data, sizeof(data), BATTERY_I2C_TIMEOUT_MS);
 }
 
 static esp_err_t sgm41513_update_reg(uint8_t reg, uint8_t mask, uint8_t value)
@@ -423,10 +413,7 @@ static unsigned husb238_input_current_limit_ma(void)
     uint8_t status1;
     unsigned current_ma;
 
-    if (i2c_master_write_read_device(I2C_PORT, I2C_ADDR_PD_SINK,
-                                     (uint8_t[]){ HUSB238_REG_PD_STATUS1 }, 1,
-                                     &status1, 1,
-                                     pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS))
+    if (board_i2c_write_read(I2C_ADDR_PD_SINK, (uint8_t[]){ HUSB238_REG_PD_STATUS1 }, 1, &status1, 1, BATTERY_I2C_TIMEOUT_MS)
             != ESP_OK
         || (status1 & HUSB238_ATTACHED) == 0)
     {
@@ -440,10 +427,7 @@ static unsigned husb238_input_current_limit_ma(void)
             2500, 2750, 3000, 3250, 3500, 4000, 4500, 5000,
         };
 
-        if (i2c_master_write_read_device(
-                I2C_PORT, I2C_ADDR_PD_SINK,
-                (uint8_t[]){ HUSB238_REG_PD_STATUS0 }, 1, &status0, 1,
-                pdMS_TO_TICKS(BATTERY_I2C_TIMEOUT_MS)) != ESP_OK)
+        if (board_i2c_write_read(I2C_ADDR_PD_SINK, (uint8_t[]){ HUSB238_REG_PD_STATUS0 }, 1, &status0, 1, BATTERY_I2C_TIMEOUT_MS) != ESP_OK)
         {
             return 0;
         }

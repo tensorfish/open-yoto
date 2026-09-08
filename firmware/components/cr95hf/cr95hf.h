@@ -26,9 +26,17 @@ typedef enum
     CR95HF_CARD_UNREADABLE,
 } cr95hf_card_state_t;
 
+typedef enum
+{
+    CR95HF_POLL_ABSENT = 0,
+    CR95HF_POLL_PRESENT,
+    CR95HF_POLL_ERROR,
+} cr95hf_poll_result_t;
+
 /*
- * Card data captured during one activation. raw_ndef contains the formatted
- * Type-2 user area when it could be read; no allocation is performed.
+ * Card data captured during one activation. raw_ndef contains a bounded prefix
+ * of the Type-2 user area, through the read completing NDEF classification,
+ * not a dump of all tag memory. No allocation is performed.
  */
 typedef struct
 {
@@ -52,33 +60,29 @@ typedef struct
 esp_err_t cr95hf_init(void);
 
 /**
- * Poll for a Type A tag, then read its UID and (optionally) its NDEF URL.
+ * Poll a Type A tag and capture its UID and optional Type-2/NDEF diagnostics.
  *
- * Performs a full ISO14443-3A activation (REQA -> anticollision -> select,
- * including cascade level 2 for 7-byte UIDs). The tag must still be in the
- * field when called; this function does not block waiting for one.
+ * Performs ISO14443-3A activation (REQA/WUPA, anticollision, select, including
+ * cascade level 2 for 7-byte UIDs). Does not wait for a tag to enter the field.
+ * A card is blank only when its capability container is all zeroes or when
+ * a valid, writable Type-2 NDEF area contains no NDEF records. Non-URI,
+ * malformed, locked, and unreadable cards are never classified as blank.
+ * Passing NULL for both url and info performs only UID activation, without
+ * reading tag memory; callers can use this after acquiring a held card.
  *
  * @param uid      output buffer for the UID bytes (4 or 7 bytes)
  * @param uid_len  in: capacity of @p uid; out: number of UID bytes written
  * @param url      optional output buffer for the decoded URL; may be NULL
  * @param url_cap  capacity of @p url in bytes (including the NUL terminator);
  *                 ignored when @p url is NULL
- * @return         true if a tag was activated and its UID read, false otherwise
+ * @param info     optional diagnostics output; may be NULL
+ * @return PRESENT when UID activation succeeds, even if payload reading fails
+ *         (info.state is UNREADABLE and URL is empty). ABSENT only when both
+ *         REQA and WUPA return a complete no-response result (0x87). Transport,
+ *         protocol, malformed RF responses, and UID failures return ERROR.
  */
-bool cr95hf_poll(uint8_t *uid, uint8_t *uid_len, char *url, size_t url_cap);
-
-/**
- * Poll a Type A tag and capture its Type-2/NDEF state for serial diagnostics.
- *
- * A card is blank only when its capability container is all zeroes or when
- * a valid, writable Type-2 NDEF area contains no NDEF records. Non-URI,
- * malformed, locked, and unreadable cards are never classified as blank.
- *
- * @param info optional diagnostics output; may be NULL
- * @return true if a tag was activated and its UID read, false otherwise
- */
-bool cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
-                      size_t url_cap, cr95hf_card_info_t *info);
+cr95hf_poll_result_t cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
+                                      size_t url_cap, cr95hf_card_info_t *info);
 
 /**
  * Write a URL to the expected Type A tag currently present in the field.

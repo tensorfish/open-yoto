@@ -77,15 +77,14 @@ bool iox_get_pin(uint8_t pin)
     return s_iox_levels[pin];
 }
 
-esp_err_t i2c_master_write_read_device(i2c_port_t port, uint8_t address,
+esp_err_t board_i2c_write_read(uint8_t address,
                                        const uint8_t *write_buffer,
                                        size_t write_size,
                                        uint8_t *read_buffer,
                                        size_t read_size,
-                                       TickType_t timeout)
+                                       int timeout_ms)
 {
-    (void)port;
-    (void)timeout;
+    (void)timeout_ms;
     if (address == I2C_ADDR_FUEL_GAUGE && write_size == 1
         && read_size > 0 && read_size <= 2
         && (size_t)write_buffer[0] + read_size <= sizeof(s_gauge_registers))
@@ -111,13 +110,12 @@ esp_err_t i2c_master_write_read_device(i2c_port_t port, uint8_t address,
     return ESP_FAIL;
 }
 
-esp_err_t i2c_master_write_to_device(i2c_port_t port, uint8_t address,
+esp_err_t board_i2c_write(uint8_t address,
                                      const uint8_t *write_buffer,
                                      size_t write_size,
-                                     TickType_t timeout)
+                                     int timeout_ms)
 {
-    (void)port;
-    (void)timeout;
+    (void)timeout_ms;
     if (address == I2C_ADDR_FUEL_GAUGE && write_size == 2)
     {
         s_gauge_registers[write_buffer[0]] = write_buffer[1];

@@ -9,9 +9,8 @@
 #include <stdint.h>
 
 #include "board_pins.h"
-#include "driver/i2c.h"
+#include "board_i2c.h"
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
 
 #define LIS2DH12_REG_CTRL1 0x20
 #define LIS2DH12_REG_CTRL4 0x23
@@ -23,9 +22,7 @@ static esp_err_t lis2dh12_write(uint8_t reg, uint8_t value)
 {
     const uint8_t data[] = { reg, value };
 
-    return i2c_master_write_to_device(I2C_PORT, I2C_ADDR_ACCELEROMETER,
-                                      data, sizeof(data),
-                                      pdMS_TO_TICKS(LIS2DH12_I2C_TIMEOUT_MS));
+    return board_i2c_write(I2C_ADDR_ACCELEROMETER, data, sizeof(data), LIS2DH12_I2C_TIMEOUT_MS);
 }
 
 esp_err_t lis2dh12_init(void)

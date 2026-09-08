@@ -1,8 +1,8 @@
 /*
  * cr95hf.c — ST CR95HF NFC transceiver driver (UART transport).
  *
- * The cold-start Echo uses the recovered 0x00 prefix:
- *   host -> CR95HF Echo: 0x00 0x55
+ * Echo is a single byte on the wire: 0x55. The stock command helper strips
+ * its internal 0x00 marker before UART transmission.
  * Other host commands use the documented [command][length][data...] framing.
  * CR95HF replies are [result code][length][data...].
  *
@@ -16,7 +16,6 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_log.h"
-#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -31,7 +30,6 @@ static const char *TAG = "cr95hf";
 #define CR95HF_CMD_IDN              0x01
 #define CR95HF_CMD_PROTOCOL_SELECT  0x02
 #define CR95HF_CMD_SENDRECV         0x04
-#define CR95HF_CMD_WRREG            0x09
 #define CR95HF_CMD_ECHO             0x55
 
 #define CR95HF_CODE_SUCCESS         0x00   /* command executed successfully  */
@@ -81,7 +79,7 @@ static const char *TAG = "cr95hf";
 #define CR95HF_STATIC_LOCK_OTP      0x08
 #define CR95HF_NDEF_BUF_SIZE        256
 #define CR95HF_TIMEOUT_MS           200
-#define CR95HF_ECHO_ATTEMPTS        255
+#define CR95HF_ECHO_ATTEMPTS        530
 #define CR95HF_ECHO_TIMEOUT_MS      2
 #define CR95HF_UART_RX_BUF_SIZE     2048
 
@@ -285,12 +283,13 @@ static esp_err_t cr95hf_transact(uint8_t cmd, const uint8_t *data,
  * Synchronize the UART transport using the CR95HF's special Echo frame.
  *
  * A non-Echo reply means the two ends were out of framing; discard that
- * response before trying Echo again. Keep below the part's 528-Echo FIFO
- * recovery limit.
+ * response before trying Echo again. The part may need 528 Echo commands to
+ * fill its input buffer and recover framing; allow 530 attempts, matching
+ * the recovered stock sequence, rather than stopping short of recovery.
  */
 static esp_err_t cr95hf_echo_sync(void)
 {
-    static const uint8_t command[] = { 0x00, CR95HF_CMD_ECHO };
+    static const uint8_t command[] = { CR95HF_CMD_ECHO };
     uint8_t response;
 
     uart_flush_input(NFC_UART_PORT);
@@ -304,6 +303,9 @@ static esp_err_t cr95hf_echo_sync(void)
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
+        /* The first UART falling edge also wakes a sleeping reader. Allow
+         * its HFO to start before another byte; stock paces RX by 10 ms. */
+        vTaskDelay(pdMS_TO_TICKS(10));
         received = uart_read_bytes(NFC_UART_PORT, &response, 1,
                                    pdMS_TO_TICKS(CR95HF_ECHO_TIMEOUT_MS));
         if (received == 1 && response == CR95HF_CMD_ECHO)
@@ -409,7 +411,13 @@ static esp_err_t cr95hf_protocol_select(const uint8_t *params, uint8_t len)
 static esp_err_t cr95hf_select_iso14443a(void)
 {
     static const uint8_t params[2] = { 0x02, 0x00 };
-    return cr95hf_protocol_select(params, sizeof(params));
+    esp_err_t err = cr95hf_protocol_select(params, sizeof(params));
+    if (err == ESP_OK)
+    {
+        /* Allow the newly powered Type-A tag to become ready before RF I/O. */
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return err;
 }
 
 /**
@@ -423,49 +431,11 @@ static void cr95hf_field_off(void)
 }
 
 /**
- * Type-A receiver tuning for the Yoto antenna. TimerW 0x58 synchronizes the
- * analog/digital receive paths; ARC_B D3 keeps 95% modulation with 27 dB RX
- * gain, improving marginal clone load modulation without D0 saturation.
+ * Activate a Type A tag and return its UID (4 or 7 bytes). Only complete
+ * no-response results from both REQA and WUPA establish physical absence.
  */
-static bool cr95hf_configure_rf(void)
-{
-    static const uint8_t timer_w[] = { 0x3A, 0x00, 0x58, 0x04 };
-    static const uint8_t modulation_gain[] = { 0x68, 0x01, 0x01, 0xD3 };
-    uint8_t code = 0xFF;
-    uint8_t rsp[4];
-    uint8_t rsp_len;
-    esp_err_t err;
-
-    err = cr95hf_transact(CR95HF_CMD_WRREG, timer_w, sizeof(timer_w),
-                          &code, rsp, sizeof(rsp), &rsp_len,
-                          CR95HF_TIMEOUT_MS);
-    if (err != ESP_OK || code != CR95HF_CODE_SUCCESS)
-    {
-        ESP_LOGW(TAG, "CR95HF TimerW configuration failed: err=%s code=0x%02x",
-                 esp_err_to_name(err), code);
-        return false;
-    }
-
-    err = cr95hf_transact(CR95HF_CMD_WRREG, modulation_gain,
-                          sizeof(modulation_gain), &code, rsp, sizeof(rsp),
-                          &rsp_len, CR95HF_TIMEOUT_MS);
-    if (err != ESP_OK || code != CR95HF_CODE_SUCCESS)
-    {
-        ESP_LOGW(TAG,
-                 "CR95HF modulation/gain configuration failed: err=%s code=0x%02x",
-                 esp_err_to_name(err), code);
-        return false;
-    }
-    return true;
-}
-
-
-/**
- * Activate a Type A tag and return its UID (4 or 7 bytes). Runs REQA,
- * anticollision and select (cascade levels 1 and 2). Returns false when no
- * tag is in the field.
- */
-static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
+static cr95hf_poll_result_t cr95hf_activate(uint8_t *uid, uint8_t *uid_len,
+                                           uint8_t *sak)
 {
     uint8_t reqa = ISO14443A_REQA;
     uint8_t wupa = ISO14443A_WUPA;
@@ -479,46 +449,34 @@ static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
     uint8_t rsp[24];
     uint8_t rsp_len = 0;
     esp_err_t err;
-    bool request_ok;
+    bool reqa_absent;
 
     if (cr95hf_select_iso14443a() != ESP_OK)
     {
         ESP_LOGW(TAG, "ProtocolSelect (ISO14443A) failed before activation");
-        return false;
-    }
-    if (!cr95hf_configure_rf())
-    {
-        return false;
+        return CR95HF_POLL_ERROR;
     }
 
     err = cr95hf_send_recv(&reqa, 1, CR95HF_TX_SHORT_FRAME, &code, rsp,
                            sizeof(rsp), &rsp_len);
-    request_ok = err == ESP_OK && code == CR95HF_CODE_DATA
-              && cr95hf_type_a_response("REQA", code, rsp, rsp_len, 2, false);
-    if (!request_ok)
+    reqa_absent = err == ESP_OK && code == CR95HF_CODE_TIMEOUT && rsp_len == 0;
+    if (reqa_absent)
     {
-        /*
-         * REQA addresses IDLE tags only. WUPA also recovers a tag left in
-         * HALT by an earlier transaction.
-         */
+        /* REQA addresses IDLE tags; WUPA also addresses a tag in HALT. */
         err = cr95hf_send_recv(&wupa, 1, CR95HF_TX_SHORT_FRAME, &code, rsp,
                                sizeof(rsp), &rsp_len);
-        request_ok = err == ESP_OK && code == CR95HF_CODE_DATA
-                  && cr95hf_type_a_response("WUPA", code, rsp, rsp_len, 2,
-                                            false);
-        if (!request_ok)
+        if (err == ESP_OK && code == CR95HF_CODE_TIMEOUT && rsp_len == 0)
         {
-            /* Frame-wait timeout is the normal no-card result; keep the
-             * 100-ms poll loop quiet unless transport itself misbehaves. */
-            if (err != ESP_OK || code != CR95HF_CODE_TIMEOUT)
-            {
-                ESP_LOGW(TAG,
-                         "Type A activation failed: REQA/WUPA transport=%s"
-                         " code=0x%02x len=%u",
-                         esp_err_to_name(err), code, (unsigned)rsp_len);
-            }
-            return false;
+            return CR95HF_POLL_ABSENT;
         }
+    }
+    if (err != ESP_OK
+        || !cr95hf_type_a_response(reqa_absent ? "WUPA" : "REQA", code,
+                                   rsp, rsp_len, 2, false))
+    {
+        ESP_LOGW(TAG, "Type A request failed: transport=%s code=0x%02x len=%u",
+                 esp_err_to_name(err), code, (unsigned)rsp_len);
+        return CR95HF_POLL_ERROR;
     }
 
     err = cr95hf_send_recv(anticol1, 2, CR95HF_TX_NO_CRC, &code, rsp,
@@ -530,13 +488,13 @@ static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
         ESP_LOGW(TAG,
                  "anticollision L1 failed: transport=%s code=0x%02x len=%u",
                  esp_err_to_name(err), code, (unsigned)rsp_len);
-        return false;
+        return CR95HF_POLL_ERROR;
     }
     memcpy(cl1, rsp, 5);
     if ((uint8_t)(cl1[0] ^ cl1[1] ^ cl1[2] ^ cl1[3]) != cl1[4])
     {
         ESP_LOGW(TAG, "anticollision L1 BCC mismatch");
-        return false;
+        return CR95HF_POLL_ERROR;
     }
 
     select1[0] = ISO14443A_SEL_CL1;
@@ -549,14 +507,14 @@ static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
     {
         ESP_LOGW(TAG, "select L1 failed: transport=%s code=0x%02x len=%u",
                  esp_err_to_name(err), code, (unsigned)rsp_len);
-        return false;
+        return CR95HF_POLL_ERROR;
     }
 
     if (cl1[0] != ISO14443A_CT)
     {
         if ((rsp[0] & 0x04) != 0 || *uid_len < 4)
         {
-            return false;
+            return CR95HF_POLL_ERROR;
         }
         if (sak != NULL)
         {
@@ -564,12 +522,12 @@ static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
         }
         memcpy(uid, cl1, 4);
         *uid_len = 4;
-        return true;
+        return CR95HF_POLL_PRESENT;
     }
     if ((rsp[0] & 0x04) == 0)
     {
         ESP_LOGW(TAG, "select L1 did not advertise UID cascade");
-        return false;
+        return CR95HF_POLL_ERROR;
     }
 
     /* Cascade tag 0x88: a 7-byte UID — run cascade level 2. */
@@ -582,13 +540,13 @@ static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
         ESP_LOGW(TAG,
                  "anticollision L2 failed: transport=%s code=0x%02x len=%u",
                  esp_err_to_name(err), code, (unsigned)rsp_len);
-        return false;
+        return CR95HF_POLL_ERROR;
     }
     memcpy(cl2, rsp, 5);
     if ((uint8_t)(cl2[0] ^ cl2[1] ^ cl2[2] ^ cl2[3]) != cl2[4])
     {
         ESP_LOGW(TAG, "anticollision L2 BCC mismatch");
-        return false;
+        return CR95HF_POLL_ERROR;
     }
 
     select2[0] = ISO14443A_SEL_CL2;
@@ -601,12 +559,12 @@ static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
     {
         ESP_LOGW(TAG, "select L2 failed: transport=%s code=0x%02x len=%u",
                  esp_err_to_name(err), code, (unsigned)rsp_len);
-        return false;
+        return CR95HF_POLL_ERROR;
     }
     if ((rsp[0] & 0x04) != 0 || cl2[0] == ISO14443A_CT || *uid_len < 7)
     {
         ESP_LOGW(TAG, "unsupported UID cascade after level 2");
-        return false;
+        return CR95HF_POLL_ERROR;
     }
     if (sak != NULL)
     {
@@ -618,7 +576,7 @@ static bool cr95hf_activate(uint8_t *uid, uint8_t *uid_len, uint8_t *sak)
     uid[2] = cl1[3];
     memcpy(&uid[3], cl2, 4);
     *uid_len = 7;
-    return true;
+    return CR95HF_POLL_PRESENT;
 }
 
 /** Read 4 pages (16 bytes) starting at @p page into @p out16. */
@@ -890,10 +848,6 @@ static bool cr95hf_read_cc(size_t *capacity, bool *writable, bool *read_ok,
     }
 
     *capacity = (size_t)pages[2] * 8;
-    if (*capacity > CR95HF_NDEF_BUF_SIZE)
-    {
-        *capacity = CR95HF_NDEF_BUF_SIZE;
-    }
     if (writable != NULL)
     {
         *writable = (pages[3] & 0x0F) == 0;
@@ -911,11 +865,17 @@ static cr95hf_card_state_t cr95hf_read_card(char *url, size_t url_cap,
     uint8_t buf[CR95HF_NDEF_BUF_SIZE];
     uint8_t cc[4] = { 0 };
     size_t capacity = 0;
+    size_t read_limit;
     size_t used = 0;
     uint8_t page = CR95HF_USER_PAGE;
     bool writable = false;
     bool read_ok = false;
     cr95hf_card_state_t state = CR95HF_CARD_UNREADABLE;
+
+    if (url != NULL && url_cap > 0)
+    {
+        url[0] = '\0';
+    }
 
     if (!cr95hf_read_cc(&capacity, &writable, &read_ok, cc))
     {
@@ -934,16 +894,21 @@ static cr95hf_card_state_t cr95hf_read_card(char *url, size_t url_cap,
         info->writable = writable;
     }
 
-    while (used < capacity)
+    read_limit = capacity < sizeof(buf) ? capacity : sizeof(buf);
+    while (used < read_limit)
     {
         uint8_t pages[16];
-        size_t copy_len = capacity - used;
+        size_t copy_len = read_limit - used;
         cr95hf_ndef_scan_t scan;
 
         if (cr95hf_read_pages(page, pages) != ESP_OK)
         {
             ESP_LOGW(TAG, "NDEF user-area read failed at page %u",
                      (unsigned)page);
+            if (url != NULL && url_cap > 0)
+            {
+                url[0] = '\0';
+            }
             return CR95HF_CARD_UNREADABLE;
         }
         if (copy_len > sizeof(pages))
@@ -974,14 +939,14 @@ static cr95hf_card_state_t cr95hf_read_card(char *url, size_t url_cap,
             {
                 state = CR95HF_CARD_NON_URI;
             }
-            if (state != CR95HF_CARD_UNREADABLE && info == NULL)
+            if (state != CR95HF_CARD_UNREADABLE)
             {
                 return state;
             }
         }
         page = (uint8_t)(page + 4);
     }
-    return state == CR95HF_CARD_UNREADABLE ? CR95HF_CARD_NON_URI : state;
+    return state;
 }
 
 /** Read and decode the first URI, preserving the historical boolean API. */
@@ -1124,7 +1089,7 @@ static esp_err_t cr95hf_write_page(uint8_t page, const uint8_t data[4],
                  (unsigned)page);
         cr95hf_field_off();
         vTaskDelay(pdMS_TO_TICKS(5));
-        if (!cr95hf_activate(uid, &uid_len, NULL))
+        if (cr95hf_activate(uid, &uid_len, NULL) != CR95HF_POLL_PRESENT)
         {
             ESP_LOGE(TAG, "Type 2 WRITE page %u recovery activation failed",
                      (unsigned)page);
@@ -1391,38 +1356,19 @@ esp_err_t cr95hf_init(void)
         goto done;
     }
 
-    /*
-     * RX/IRQ_IN is the reader's input on GPIO32 (the ESP TX line). Pulse it
-     * before attaching the UART, then allow the CR95HF oscillator to start.
-     */
+    /* Preserve UART idle high. A forced low GPIO pulse becomes a break/data
+     * byte when the reader survived an ESP reset and is already awake.
+     * Echo itself supplies the >=10-us falling edge needed after cold power. */
+    err = gpio_set_level(PIN_NFC_TX, 1);
+    if (err != ESP_OK)
+    {
+        goto done;
+    }
     err = gpio_set_direction(PIN_NFC_TX, GPIO_MODE_OUTPUT);
     if (err != ESP_OK)
     {
         goto done;
     }
-    err = gpio_set_level(PIN_NFC_TX, 1);
-    if (err != ESP_OK)
-    {
-        goto done;
-    }
-    /*
-     * IRQ_IN needs a >=10-us low wake pulse. Hold GPIO32 high first, then
-     * low for 1 ms to tolerate the board level shifter, then allow the
-     * 10-ms-max HFO setup interval before sending Echo.
-     */
-    esp_rom_delay_us(1000);
-    err = gpio_set_level(PIN_NFC_TX, 0);
-    if (err != ESP_OK)
-    {
-        goto done;
-    }
-    esp_rom_delay_us(1000);
-    err = gpio_set_level(PIN_NFC_TX, 1);
-    if (err != ESP_OK)
-    {
-        goto done;
-    }
-    vTaskDelay(pdMS_TO_TICKS(20));
 
     err = gpio_set_direction(PIN_NFC_RX, GPIO_MODE_INPUT);
     if (err != ESP_OK)
@@ -1504,20 +1450,12 @@ done:
 
 /* ------------------------------------------------------------------- poll */
 
-bool cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
-                      size_t url_cap, cr95hf_card_info_t *info)
+cr95hf_poll_result_t cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
+                                      size_t url_cap, cr95hf_card_info_t *info)
 {
-    bool ok;
+    cr95hf_poll_result_t result;
     uint8_t sak = 0;
 
-    if (uid == NULL || uid_len == NULL || *uid_len == 0)
-    {
-        return false;
-    }
-    if (s_uart_mutex == NULL || !s_ready)
-    {
-        return false;
-    }
     if (url != NULL && url_cap > 0)
     {
         url[0] = '\0';
@@ -1527,11 +1465,16 @@ bool cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
         memset(info, 0, sizeof(*info));
         info->state = CR95HF_CARD_UNREADABLE;
     }
+    if (uid == NULL || uid_len == NULL || *uid_len == 0
+        || s_uart_mutex == NULL || !s_ready)
+    {
+        return CR95HF_POLL_ERROR;
+    }
 
     xSemaphoreTake(s_uart_mutex, portMAX_DELAY);
 
-    ok = cr95hf_activate(uid, uid_len, &sak);
-    if (ok)
+    result = cr95hf_activate(uid, uid_len, &sak);
+    if (result == CR95HF_POLL_PRESENT)
     {
         if (info != NULL)
         {
@@ -1560,13 +1503,9 @@ bool cr95hf_poll_card(uint8_t *uid, uint8_t *uid_len, char *url,
     cr95hf_field_off();
 
     xSemaphoreGive(s_uart_mutex);
-    return ok;
+    return result;
 }
 
-bool cr95hf_poll(uint8_t *uid, uint8_t *uid_len, char *url, size_t url_cap)
-{
-    return cr95hf_poll_card(uid, uid_len, url, url_cap, NULL);
-}
 
 /* --------------------------------------------------------------- write url */
 
@@ -1583,6 +1522,7 @@ esp_err_t cr95hf_write_url(const char *url, const uint8_t *expected_uid,
     uint8_t lock0;
     uint8_t lock1;
     esp_err_t err;
+    cr95hf_poll_result_t activation;
 
     if (url == NULL || url[0] == '\0' || expected_uid == NULL
         || expected_uid_len == 0 || expected_uid_len > sizeof(uid))
@@ -1595,9 +1535,10 @@ esp_err_t cr95hf_write_url(const char *url, const uint8_t *expected_uid,
     }
 
     xSemaphoreTake(s_uart_mutex, portMAX_DELAY);
-    if (!cr95hf_activate(uid, &uid_len, NULL))
+    activation = cr95hf_activate(uid, &uid_len, NULL);
+    if (activation != CR95HF_POLL_PRESENT)
     {
-        err = ESP_ERR_NOT_FOUND;
+        err = activation == CR95HF_POLL_ABSENT ? ESP_ERR_NOT_FOUND : ESP_FAIL;
         goto done;
     }
     if (uid_len != expected_uid_len

@@ -13,7 +13,6 @@
 #pragma once
 
 #include "driver/gpio.h"
-#include "driver/i2c.h"
 #include "driver/i2s_std.h"
 #include "driver/uart.h"
 #include "driver/sdmmc_host.h"
@@ -23,7 +22,6 @@
 #define PIN_I2C_SDA                 GPIO_NUM_21
 #define PIN_I2C_SCL                 GPIO_NUM_25
 #define I2C_MASTER_FREQ_HZ          100000
-#define I2C_PORT                    I2C_NUM_0
 
 /* I2C device addresses (7-bit) */
 #define I2C_ADDR_IOX_0              0x20   /* PI4IOE5V6416 #0 (buttons, charger, codec ctrl) */

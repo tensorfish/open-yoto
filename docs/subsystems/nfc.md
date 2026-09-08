@@ -27,24 +27,41 @@ driven by the ESP32 TX signal, while `nfc.tx=GPIO33` drives ESP32 RX.
 The stock boot path installs a 2048-byte RX buffer, applies 57600 8-N-2,
 configures GPIO32 as output and GPIO33 as input, and routes UART1 to those
 pins. Factory function `0x4010d270` constructs an internal request buffer with
-a zero byte followed by command, length, and payload. The lower transport
-abstraction is not symbolized, so the binary alone does not prove whether that
-zero reaches the UART wire. The replacement retains this framing because its
-Echo, ProtocolSelect, REQA, and UID reads succeed on the actual board.
+a leading zero. Direct disassembly of UART callback `0x40110a58` shows that
+`0x40110a6e–0x40110a75` removes this byte before transmission. Both stock and
+the replacement therefore send bare `0x55` Echo and normal commands as
+`[command][length][payload]`.
 
-The official ST driver and datasheet use bare UART
-`[command][length][payload]` frames and bare `0x55` Echo. The replacement now
-sends IDN after Echo and logs the returned device string/ROM byte, providing a
-runtime silicon check rather than relying only on recovered symbol names.
+The replacement retains the stock **530-attempt** recovery bound and drains
+non-Echo replies. It now leaves the ESP TX pin idle-high instead of forcing a
+1 ms low pulse onto a reader that may already be awake after an ESP reset.
+The first Echo supplies the falling edge for a sleeping reader; a 10 ms
+response delay allows oscillator startup and matches stock RX pacing.
+An absent reader still returns a timeout (under seven seconds in the host
+model). After synchronization, IDN logs the device string/ROM byte.
 Responses are `[result][length][payload]`.
+
+**Verification status (rev #04, 2026-09-08):** the earlier prefixed-Echo image
+recovered after 385 attempts. A later bare-Echo image that still forced the
+GPIO wake pulse exhausted 530 attempts, restarted, then synchronized after
+another 238; it returned IDN `NFC FS2JAST4` (ROM `0xce`) but the capture saw no
+URI card. That hardware check failed, not passed.
+
+The final idle-high/Echo-paced wake change builds for rev #04 and passes the
+host suite, but its pending flash was stopped at the user's request to commit
+and push. Cold-power startup, repeated-reset card reads, and RF reliability
+remain unverified on that final image. Host regressions cover bounded recovery,
+strict RF rejection, bounded NDEF reads, UID-only polling, and card transitions.
 
 ## Driver protocol (Type-A activation)
 
 The driver (`_cr95hf_drv_*`) implements the ISO/IEC 14443-A activation
 sequence recovered from the factory image:
 
-1. Write register `0x3A` with `[0x00,0x60,0x04]` to set TimerW, then register
-   `0x68` with `[0x01,0x01,0xD0]` to set modulation/gain.
+1. The stock helpers at `0x4010d3f8` and `0x4010d428` pass the apparent tuning
+   arrays `09 04 3A 00 60 04` and `09 04 68 01 01 D0` through **SendRecv**.
+   They are RF payloads, not demonstrated reader-register writes; the earlier
+   interpretation of these arrays as effective stock tuning was incorrect.
 2. `_cr95hf_drv_reqa()` (`0x26,0x07`).
 3. `_cr95hf_drv_antic1()` / `_cr95hf_drv_antic2()` — anti-collision cascade
    levels 1 and 2.
@@ -54,8 +71,9 @@ sequence recovered from the factory image:
 
 The factory full-reader calls WUPA only after its own lower-layer cleanup.
 Replaying WUPA directly after a selected-tag transaction returned `0x87`.
-The replacement instead retries with WUPA only when REQA fails, which is the
-standard recovery for a tag left in HALT/selected state.
+The replacement sends WUPA only after a complete REQA no-response (`0x87`,
+zero payload). Both must time out to establish absence; malformed frames,
+CRC failures, and transport errors remain errors rather than removal.
 
 Log strings confirm the flow:
 
@@ -221,14 +239,20 @@ Varying partial prefixes can mean two cards are energized, but they can also
 be corrupted output from one clone. Isolate other cards first. If one card
 still emits partial CL1 frames, test its orientation and a few millimetres of
 spacing; phone-reader success does not prove compatibility with this fixed
-CR95HF antenna. The practical firmware mitigation is Type-A receiver tuning
-after ProtocolSelect: TimerW `0x58` plus ARC_B `0xD3` (95% modulation, 27 dB
-receiver gain). No NDEF, lock, CC, or page-write change can repair a truncated
-UID frame.
+CR95HF antenna. The replacement removes its unvalidated TimerW `0x58` /
+ARC_B `0xD3` overrides and waits 10 ms after Type-A ProtocolSelect. This is
+not proof of an analog RF fix. No NDEF, lock, CC, or page-write change can
+reconstruct missing UID bytes; truncated and CRC-invalid frames remain rejected.
+
+The original-image power comparison found matching rev #04 output-before-
+direction IOX setup and run-state levels: VINHOLD high, PWREN low, level
+converter enabled. Battery and NFC startup order differences did not establish
+a charger or NFC supply fault. No speculative charger changes were made for
+these RF symptoms.
 
 ## Task model
 
-NFC is managed by a dedicated RTOS task guarded by a mutex:
+Stock NFC is managed by a dedicated RTOS task guarded by a mutex:
 
 ```text
 E (%lu) %s: Cannot take nfc mutex to init hal.
@@ -240,6 +264,20 @@ W (%lu) %s: NFC timeout, Reset CR9HF    # (sic — firmware typo for "CR95HF")
 
 The HAL initialises the CR95HF, starts a poll task, and emits card
 inserted/removed/UID-changed events.
+
+The replacement polls in the player loop and serializes activation, reading,
+and writing with its UART mutex. NDEF acquisition stops at a complete
+classification; diagnostics retain only the acquired prefix, not all memory.
+Reaching the 256-byte scan limit of a larger tag does not prove it blank.
+After acquiring a card, held-card polls read only its UID. A changed UID
+invalidates the previous playback/write target immediately; content is read on
+the next poll. Initial unreadable content remains pending until a later valid
+read, without replaying successful actions.
+
+Removal requires two consecutive no-response polls or 21 consecutive driver
+errors; presence resets both counts and opposite failure types interrupt each
+streak. These are replacement policies, not a claim that the configurable stock
+removal timing is identical. Payload errors alone do not remove a known UID.
 
 While the replacement's admin server is active, non-magic scans are
 capture-only: no mapping lookup, image render, or audio playback occurs. The
